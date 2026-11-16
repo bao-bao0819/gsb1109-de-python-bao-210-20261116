@@ -25,6 +25,20 @@ WikiText
    :special-members:
    :show-inheritance:
 
+VariantProjection
+-----------------
+.. autoclass:: wikitextparser.VariantProjection
+   :members:
+   :special-members:
+   :show-inheritance:
+
+VariantSegment
+--------------
+.. autoclass:: wikitextparser.VariantSegment
+   :members:
+   :special-members:
+   :show-inheritance:
+
 SubWikiText
 -----------
 .. autoclass:: wikitextparser._wikitext.SubWikiText

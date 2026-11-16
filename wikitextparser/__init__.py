@@ -12,6 +12,16 @@ from ._table import Table
 from ._tag import Tag
 from ._template import Template
 from ._wikilink import WikiLink
+from ._variant import (
+    KNOWN_VARIANTS,
+    RULE_DESCRIPTIONS,
+    VariantProjection,
+    VariantSegment,
+    project,
+    project_segments,
+    project_variant,
+    project_variant_segments,
+)
 from ._wikilist import LIST_PATTERN_FORMAT as _LIST_PATTERN_FORMAT, WikiList
 
 _wikitext.ExternalLink = ExternalLink

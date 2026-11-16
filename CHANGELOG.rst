@@ -1,6 +1,12 @@
 Unreleased
 ----------
-* 
+* Added ``project_variant`` (also available as ``WikiText.project_variant``)
+  to project wikitext onto a MediaWiki language variant.  Conversion
+  constructs such as ``-{zh-hans:简体; zh-hant:繁體}-`` are resolved without
+  evaluating templates or parser functions, and each output fragment records
+  its original source range and the rule used.  Rules are local to their
+  construct, and unknown or malformed forms are preserved as unexplained
+  source.
 
 v3.0.0 (2026-10-08)
 -------------------

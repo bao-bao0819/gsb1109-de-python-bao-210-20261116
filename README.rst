@@ -359,6 +359,37 @@ The ``remove_markup`` function or ``plain_text`` method can be used to remove wi
     >>> parse(s).plain_text()
     'a c d'
 
+Language variants
+-----------------
+``project_variant`` resolves MediaWiki language conversion markup without
+evaluating templates or parser functions, which makes it suitable for
+offline corpus collection:
+
+.. code:: python
+
+    >>> from wikitextparser import project_variant
+    >>> s = '甲-{zh-hans:简体;zh-hant:繁體}-乙'
+    >>> project_variant(s, 'zh-hans')
+    VariantProjection('甲简体乙', variant='zh-hans')
+    >>> projection = project_variant(s, 'zh-hant')
+    >>> str(projection)
+    '甲繁體乙'
+
+A ``VariantProjection`` is a ``str`` subclass whose ``segments`` map each
+output fragment back to a half-open range in the original source.  Each
+``VariantSegment`` also names the rule that produced it and, for a conversion
+construct, the whole ``-{...}-`` range.  Templates, parser functions,
+comments, and the contents of literal tags such as ``<nowiki>`` and ``<pre>``
+are never converted.  Conversion rules end at their closing ``}-`` and do not
+affect later text, and unknown forms are left as unexplained source:
+
+.. code:: python
+
+    >>> projection.segments
+    (VariantSegment(text='甲', ...), VariantSegment(text='繁體', ...), ...)
+    >>> projection.source_spans()
+    [(0, 1), (22, 24), (26, 27)]
+
 Compared with mwparserfromhell
 ==============================
 

@@ -24,6 +24,11 @@ from regex import (
 from wcwidth import wcswidth
 
 from wikitextparser._spans import SpanData
+from wikitextparser._variant import (
+    VariantProjection,
+    VariantSegment,
+    project_variant,
+)
 
 # noinspection PyProtectedMember
 from ._config import (
@@ -652,6 +657,58 @@ class WikiText:
             ]
             for type_, spans in self._type_to_spans.items()
         }
+
+    def project_variant(self, variant: str) -> VariantProjection:
+        """Project self onto a MediaWiki language variant.
+
+        ``-{ ... }-`` conversion constructs are resolved, but templates and
+        parser functions are copied verbatim and are never evaluated.  The
+        returned :class:`VariantProjection` is a string whose ``segments``
+        attribute records the original source range and the rule used for
+        every fragment.  Rules are local to their construct and never apply
+        to text after its closing ``}-``.
+        """
+        projection = project_variant(self.string, variant)
+        sd = self._span_data
+        if sd.start == 0 and sd.end == len(self._lststr[0]):
+            return projection
+        # Offsets are reported relative to the root document, matching the
+        # convention used by ``WikiText.span``.
+        segments = [
+            VariantSegment(
+                segment.text,
+                segment.start + sd.start,
+                segment.end + sd.start,
+                segment.rule,
+                branch=segment.branch,
+                tag=segment.tag,
+                construct_start=(
+                    None
+                    if segment.construct_start is None
+                    else segment.construct_start + sd.start
+                ),
+                construct_end=(
+                    None
+                    if segment.construct_end is None
+                    else segment.construct_end + sd.start
+                ),
+            )
+            for segment in projection.segments
+        ]
+        return VariantProjection(
+            str(projection),
+            variant=projection.variant,
+            source=self._lststr[0],
+            segments=segments,
+            source_start=sd.start,
+            source_end=sd.end,
+        )
+
+    project = project_variant
+    variant_text = project_variant
+    language_variant = project_variant
+    to_variant = project_variant
+    render_variant = project_variant
 
     def plain_text(
         self,

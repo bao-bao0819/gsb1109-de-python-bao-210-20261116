@@ -95,6 +95,33 @@ Section
    :special-members:
    :show-inheritance:
 
+RevisionComparison
+------------------
+.. autoclass:: wikitextparser.RevisionComparison
+   :members:
+   :special-members:
+   :show-inheritance:
+
+SectionPair
+-----------
+.. autoclass:: wikitextparser.SectionPair
+   :members:
+   :special-members:
+   :show-inheritance:
+
+LinkResolution
+--------------
+.. autoclass:: wikitextparser.LinkResolution
+   :members:
+   :special-members:
+   :show-inheritance:
+
+.. autofunction:: wikitextparser.compare_revisions
+
+.. autofunction:: wikitextparser._section.normalize_section_title
+
+.. autofunction:: wikitextparser._section.normalize_section_anchor
+
 Comment
 -------
 .. autoclass:: wikitextparser.Comment

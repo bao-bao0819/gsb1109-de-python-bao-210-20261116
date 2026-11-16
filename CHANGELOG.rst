@@ -1,6 +1,15 @@
 Unreleased
 ----------
-* 
+* Added ``Section.anchor``, ``Section.base_anchor``, ``Section.anchor_ordinal``,
+  ``Section.parent_section``, ``Section.subsections``, and
+  ``Section.section_path``.  Duplicate headings receive MediaWiki-style
+  ``_2``, ``_3``, ... anchors in document order.
+* Added ``compare_revisions`` and the ``RevisionComparison``,
+  ``SectionPair``, and ``LinkResolution`` classes for matching sections
+  across two revisions.  Matching uses title, parent hierarchy, duplicate
+  ordinal, and body evidence; indistinguishable sections stay ambiguous with
+  all candidates preserved, and section links are resolved by section
+  identity rather than by the first matching heading title.
 
 v3.0.0 (2026-10-08)
 -------------------

@@ -183,6 +183,50 @@ Sections
     {{text|value3}}
     [[Z|X]]
 
+Section anchors and revision comparison
+---------------------------------------
+
+Headings expose the anchor that ``[[page#anchor]]`` links use.  Duplicate
+headings get ``_2``, ``_3``, ... suffixes in document order:
+
+.. code:: python
+
+    >>> parsed = wtp.parse("""== 沿革 ==
+    ... 早期历史
+    ... === 沿革 ===
+    ... 子章节甲
+    ... == 其他 ==
+    ... === 沿革 ===
+    ... 子章节乙
+    ... """)
+    >>> [(s.title, s.anchor) for s in parsed.get_sections(
+    ...     include_subsections=False)]
+    [(None, None), (' 沿革 ', '沿革'), (' 沿革 ', '沿革_2'),
+     (' 其他 ', '其他'), (' 沿革 ', '沿革_3')]
+
+``compare_revisions`` pairs the sections of two revisions.  It does not
+assume that equal titles mean equal sections; parent hierarchy, the
+duplicate-heading ordinal, and body similarity are all used.  If two
+sections are equally plausible, every candidate is kept:
+
+.. code:: python
+
+    >>> comparison = wtp.compare_revisions(old_text, new_text)
+    >>> for pair in comparison.section_pairs:
+    ...     print(pair.old.anchor, pair.status, pair.candidate_anchors)
+    沿革 matched ['沿革']
+    沿革_2 renamed ['历史沿革']
+    其他 matched ['其他']
+    沿革_3 matched ['沿革_2']
+    >>> link = comparison.resolve_section_link('沿革_2')
+    >>> link.new_fragment
+    '历史沿革'
+
+A link to ``#沿革_2`` follows the section that was renamed, not the first
+remaining heading titled ``沿革``.  When the evidence cannot distinguish
+two sections, ``status`` is ``'ambiguous'``, ``new_fragment`` is ``None``,
+and ``candidates`` contains all remaining possibilities.
+
 Tables
 ------
 

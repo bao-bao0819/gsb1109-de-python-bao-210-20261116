@@ -317,6 +317,24 @@ Accessing HTML tags:
 
 WikiTextParser is able to handle common usages of HTML and extension tags. However it is not a fully-fledged HTML parser and may fail on edge cases or malformed HTML input. Please open an issue on github if you encounter bugs.
 
+References
+~~~~~~~~~~
+The ``refs`` method analyzes ``<ref>`` tags and returns a ``RefReport`` with an occurrence table (every ``<ref>`` in document order, with its group, original position and definition link) and a definition table (tags carrying citation body, with their reuses):
+
+.. code:: python
+
+    >>> p = parse('<ref name="r" /><ref name="r">citation</ref>'
+    ...           '<ref name="r">other</ref>')
+    >>> report = p.refs()
+    >>> report.occurrences[0].is_forward_reference  # reuse before definition
+    True
+    >>> [d.body for d in report.definitions]  # both bodies are retained
+    ['citation', 'other']
+    >>> [d.ordinal for d in next(iter(report.conflicts.values()))]
+    [1, 2]
+
+Matching is done per ``(group, name)`` over the whole document, so a self-closing reference placed before its definition is still linked. Distinct bodies for the same named reference are not collapsed: every definition is kept and the key is reported in ``RefReport.conflicts`` instead of treating the last body as the content of all earlier occurrences.
+
 Miscellaneous
 -------------
 ``parent`` and ``ancestors`` methods can be used to access a node's parent or ancestors respectively:

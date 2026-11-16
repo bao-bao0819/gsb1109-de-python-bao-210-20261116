@@ -34,6 +34,7 @@ from ._config import (
     _tag_extensions,
     regex_pattern,
 )
+from ._ref import analyze_refs as _analyze_refs
 from ._spans import (
     BARE_EXTERNAL_LINK,
     END_TAG_PATTERN,
@@ -1599,6 +1600,16 @@ class WikiText:
         spans.sort()
         tags.sort(key=attrgetter('_span_data'))
         return tags
+
+    def refs(self):
+        """Analyze ``<ref>`` tags and return an occurrence/definition report.
+
+        See :class:`wikitextparser.RefReport`. Named references are matched
+        to their definitions across the whole document (a reuse may precede
+        its definition) and distinct bodies for the same named reference
+        are retained as conflicts rather than collapsed into one.
+        """
+        return _analyze_refs(self)
 
     def parent(self, type_: str | None = None) -> WikiText | None:
         """Return None (The parent of the root node is None)."""

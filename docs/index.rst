@@ -116,6 +116,22 @@ Tag
    :special-members:
    :show-inheritance:
 
+References
+----------
+.. autoclass:: wikitextparser.RefReport
+   :members:
+   :show-inheritance:
+
+.. autoclass:: wikitextparser.RefOccurrence
+   :members:
+   :show-inheritance:
+
+.. autoclass:: wikitextparser.RefDefinition
+   :members:
+   :show-inheritance:
+
+.. autofunction:: wikitextparser.analyze_refs
+
 WikiList
 --------
 .. autoclass:: wikitextparser.WikiList

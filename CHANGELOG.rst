@@ -1,6 +1,11 @@
 Unreleased
 ----------
-* 
+* Added ``WikiText.refs`` (and the ``analyze_refs`` function) which returns
+  occurrence and definition tables for ``<ref>`` tags. Named references are
+  matched per ``(group, name)`` across the whole document, so a reuse placed
+  before its definition is still linked. Distinct bodies for the same named
+  reference are all retained and reported as conflicts instead of keeping
+  only the last body.
 
 v3.0.0 (2026-10-08)
 -------------------

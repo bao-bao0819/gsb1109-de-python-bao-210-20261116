@@ -7,6 +7,12 @@ from ._comment_bold_italic import Bold, Comment, Italic
 from ._externallink import ExternalLink
 from ._parameter import Parameter
 from ._parser_function import ParserFunction
+from ._ref import (
+    RefDefinition as RefDefinition,
+    RefOccurrence as RefOccurrence,
+    RefReport as RefReport,
+    analyze_refs as analyze_refs,
+)
 from ._section import Section
 from ._table import Table
 from ._tag import Tag

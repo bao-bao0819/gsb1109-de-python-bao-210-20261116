@@ -123,6 +123,22 @@ WikiList
    :special-members:
    :show-inheritance:
 
+Category declarations
+---------------------
+.. autofunction:: wikitextparser.category_declarations
+
+.. autoclass:: wikitextparser.CategoryReport
+   :members:
+   :show-inheritance:
+
+.. autoclass:: wikitextparser.CategoryDeclaration
+   :members:
+   :show-inheritance:
+
+.. autoclass:: wikitextparser.TransclusionRegion
+   :members:
+   :show-inheritance:
+
 SubWikiText
 -----------
 .. autoclass:: wikitextparser._comment_bold_italic.BoldItalic

@@ -317,6 +317,46 @@ Accessing HTML tags:
 
 WikiTextParser is able to handle common usages of HTML and extension tags. However it is not a fully-fledged HTML parser and may fail on edge cases or malformed HTML input. Please open an issue on github if you encounter bugs.
 
+Category declarations
+---------------------
+
+``<noinclude>``, ``<includeonly>`` and ``<onlyinclude>`` make a page's own
+view differ from the text emitted when the page is transcluded. The
+``category_declarations`` function reports the ``[[Category:...]]`` links of
+each view separately, together with the transclusion-control region each
+link is written in:
+
+.. code:: python
+
+    >>> parsed = wtp.parse(
+    ...     '[[Category:A]] '
+    ...     '<noinclude>[[Category:B]]</noinclude> '
+    ...     '<includeonly>[[Category:C]]</includeonly>'
+    ... )
+    >>> report = wtp.category_declarations(parsed)
+    >>> [d.link.string for d in report.page]
+    ['[[Category:A]]', '[[Category:B]]']
+    >>> [d.link.string for d in report.transclusion]
+    ['[[Category:A]]', '[[Category:C]]']
+    >>> report.page[1].region.name
+    'noinclude'
+
+Only the two views of the page itself are analyzed — templates are never
+expanded, so a category produced by ``{{a template}}`` is not mistaken for a
+category written directly on the page. Pseudo-categories inside comments or
+protected text (``<nowiki>``, ``<pre>``, ``<source>`` ...) are ignored, and
+nested or unclosed control tags keep their affected range instead of being
+silently dropped. Localized category namespaces can be supplied explicitly:
+
+.. code:: python
+
+    >>> report = wtp.category_declarations(
+    ...     wtp.parse('[[Κατηγορία:Greek]]'),
+    ...     category_namespaces=('category', 'κατηγορία'),
+    ... )
+    >>> [d.link.string for d in report.page]
+    ['[[Κατηγορία:Greek]]']
+
 Miscellaneous
 -------------
 ``parent`` and ``ancestors`` methods can be used to access a node's parent or ancestors respectively:

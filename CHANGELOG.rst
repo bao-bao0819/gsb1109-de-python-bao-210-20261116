@@ -1,6 +1,12 @@
 Unreleased
 ----------
-* 
+* Added ``category_declarations`` for collecting the ``[[Category:...]]``
+  declarations of a page separately for its own view and its transcluded
+  view. ``<noinclude>``, ``<includeonly>`` and ``<onlyinclude>`` regions are
+  honored, including nested and unclosed tags whose affected range is kept;
+  each declaration reports the region it is written in. Templates are not
+  expanded, and pseudo-categories inside comments or protected text (e.g.
+  ``<nowiki>``, ``<pre>``, ``<source>``) are ignored.
 
 v3.0.0 (2026-10-08)
 -------------------

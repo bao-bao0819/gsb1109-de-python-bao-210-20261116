@@ -3,6 +3,12 @@ __version__ = '3.0.1.dev1'
 
 from . import _wikitext
 from ._argument import Argument  # noqa: F401
+from ._category import (  # noqa: F401
+    CategoryDeclaration,
+    CategoryReport,
+    TransclusionRegion,
+    category_declarations,
+)
 from ._comment_bold_italic import Bold, Comment, Italic
 from ._externallink import ExternalLink
 from ._parameter import Parameter

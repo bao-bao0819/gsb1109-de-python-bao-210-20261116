@@ -1,0 +1,180 @@
+# Changelog
+
+## Unreleased
+
+## [0.4.18] - 2026-10-01
+
+### Fixed
+- Avoid float precision issues in `Edf.is_continuous` by using `decimal.Decimal` ([#119](https://github.com/the-siesta-group/edfio/pull/119))
+
+## [0.4.17] - 2026-09-21
+
+### Fixed
+- Always use four digits for the birthdate year in the local patient identification header ([#118](https://github.com/the-siesta-group/edfio/pull/118))
+
+## [0.4.16] - 2026-07-31
+
+### Added
+- Add `EdfSignal.from_digital` and `BdfSignal.from_digital` to allow creating signals from digital data ([#96](https://github.com/the-siesta-group/edfio/pull/96))
+- Ensure the `digital_range` parameter of `EdfSignal`/`BdfSignal` is within the range supported by the format ([#96](https://github.com/the-siesta-group/edfio/pull/96))
+- Allow lazy loading of EDF files from bytes object ([#103](https://github.com/the-siesta-group/edfio/pull/103))
+- Add properties `Edf.startdatetime` and `Edf.enddatetime` ([#112](https://github.com/the-siesta-group/edfio/pull/112))
+
+## [0.4.15] - 2026-07-30
+
+### Fixed
+- Encode annotation onsets and durations using the shortest round-trippable decimal, avoiding binary rounding noise that corrupted the sub-second start offset of long EDF+ recordings and made them unreadable by strict EDF+ readers ([#109](https://github.com/the-siesta-group/edfio/pull/109)).
+
+## [0.4.14] - 2026-07-15
+
+### Added
+- Allow getting the recording starttime when the very first EDF+ timekeeping annotation has an onset >=1 second ([#108](https://github.com/the-siesta-group/edfio/pull/108)).
+- Add a property `is_continuous` which returns False for EDF+ files where not all onsets of data records coincide with the ends of the preceding ones ([#108](https://github.com/the-siesta-group/edfio/pull/108)).
+
+### Fixed
+- Use `.reshape` instead of setting `.shape` which is deprecated in NumPy v2.5.0 ([#106](https://github.com/the-siesta-group/edfio/pull/106)).
+
+## [0.4.13] - 2026-02-11
+
+### Added
+- Add `keep_age`, `keep_sex`, and `keep_starttime` parameters to `Edf.anonymize()` for optionally keeping these fields when anonymizing an EDF/BDF record ([#100](https://github.com/the-siesta-group/edfio/pull/100) by [Clemens Brunner](https://github.com/cbrnr)).
+
+## [0.4.12] - 2026-01-20
+
+### Changed
+- Avoid loading data from disk when creating a new `Edf` object based on signals from an existing file ([#98](https://github.com/the-siesta-group/edfio/pull/98)).
+
+## [0.4.11] - 2025-11-19
+
+### Fixed
+- Use lazy loading in `Edf.slice_between_seconds` to speed up execution ([#93](https://github.com/the-siesta-group/edfio/pull/93)).
+
+## [0.4.10] - 2025-10-07
+
+### Added
+- Support reading and writing BDF and BDF+C files ([#63](https://github.com/the-siesta-group/edfio/pull/63)).
+
+### Fixed
+- Changing the microsecond part of an EDF+C with multiple annotation signals now correctly updates all annotation onsets ([#63](https://github.com/the-siesta-group/edfio/pull/63)).
+
+## [0.4.9] - 2025-05-19
+
+### Fixed
+- When reading a file where the number of data records is set to `-1` in the header, automatically fix the corresponding field and issue a warning ([#74](https://github.com/the-siesta-group/edfio/pull/74)).
+
+## [0.4.8] - 2025-03-26
+
+### Added
+- Add a parameter `header_encoding="ascii"` to `read_edf()` to support reading header fields that use a character encoding different to ASCII ([#68](https://github.com/the-siesta-group/edfio/pull/68) by [JohnAtl](https://github.com/JohnAtl)).
+
+### Fixed
+- Use ASCII instead of UTF-8 as the default character encoding for reading header fields ([#68](https://github.com/the-siesta-group/edfio/pull/68) by [JohnAtl](https://github.com/JohnAtl)).
+
+## [0.4.7] - 2025-03-21
+
+### Fixed
+- Allow having annotations with and without durations in the same recording ([#67](https://github.com/the-siesta-group/edfio/pull/67) by [JohnAtl](https://github.com/JohnAtl)).
+
+## [0.4.6] - 2025-02-27
+
+### Fixed
+- Improve efficiency of creating annotations signals in EDF+ files ([#65](https://github.com/the-siesta-group/edfio/pull/65)).
+
+## [0.4.5] - 2024-10-28
+
+### Added
+- Load a segment of EDF raw data from a signal without reading the entire file using `EdfSignal.get_data_slice` method ([#58](https://github.com/the-siesta-group/edfio/pull/58)).
+- Load annotations from a specific time window of the EDF file without reading the entire file using `Edf.get_annotations` method ([#58](https://github.com/the-siesta-group/edfio/pull/58)).
+
+## [0.4.4] - 2024-09-25
+
+### Added
+- Allow adding new EDF+ annotations and overwriting all existing ones with `Edf.add_annotations` and `Edf._set_annotations` ([#54](https://github.com/the-siesta-group/edfio/pull/54)).
+
+## [0.4.3] - 2024-06-23
+
+### Fixed
+- Retrieving data for signals where physical minimum and maximum are the same, the warning message now correctly reflects that ([#51](https://github.com/the-siesta-group/edfio/pull/51)).
+
+## [0.4.2] - 2024-05-13
+
+### Added
+- Lazy load raw signals from local EDF files. Lazy loading is supported and enabled by default when passing a `str` or `pathlib.Path` object to the `read_edf` function. The behavior can be controlled using the `lazy_load_data` parameters of the `read_edf` function ([#48](https://github.com/the-siesta-group/edfio/pull/48)).
+- Public getter for digital signal values called `digital` ([#48](https://github.com/the-siesta-group/edfio/pull/48)).
+
+## [0.4.1] - 2024-04-30
+
+### Added
+- Make EDF+ header fields `patient` and `recording` more tolerant regarding non-compliant inputs: omitted subfields are returned as `X` instead of throwing an exception ([#18](https://github.com/the-siesta-group/edfio/pull/18)).
+- Allow reading from `tempfile.SpooledTemporaryFile[bytes]` ([#36](https://github.com/the-siesta-group/edfio/pull/36)).
+- Enable the reading of EDF files where the filesize does not match the header information. Incomplete data records will be truncated ([#41](https://github.com/the-siesta-group/edfio/pull/41)).
+
+### Fixed
+- Allow reading more non-standard starttime and startdate fields ([#30](https://github.com/the-siesta-group/edfio/pull/30)).
+
+## [0.4.0] - 2023-12-22
+
+### Changed
+- Exclude EDF+ annotation signals from `Edf.signals`, `Edf.num_signals`, and `Edf.drop_signals()` ([#25](https://github.com/the-siesta-group/edfio/pull/25)).
+- Provide more concise `__repr__` for `Edf` and `EdfSignal` ([#26](https://github.com/the-siesta-group/edfio/pull/26)).
+- `Edf.append_signals()` now inserts new signals after the last ordinary (i.e. non-annotation) signal ([#29](https://github.com/the-siesta-group/edfio/pull/29)).
+
+### Added
+- Expand `~` (tilde) to the user's home directory in `edf_file` argument of `read_edf()` and `target` argument of `Edf.write()` ([#23](https://github.com/the-siesta-group/edfio/pull/23)).
+
+### Fixed
+- Avoid floating point errors sometimes preventing the creation of an Edf with signals that are actually compatible in duration ([#15](https://github.com/the-siesta-group/edfio/pull/15)).
+- Allow reading EDF+ startdate and birthdate with non-uppercase month ([#19](https://github.com/the-siesta-group/edfio/pull/19)).
+- Disallow setting signal label to `"EDF Annotations"` ([#28](https://github.com/the-siesta-group/edfio/pull/28)).
+
+## [0.3.1] - 2023-12-06
+
+### Added
+- Add optional parameter `sampling_frequency` to `EdfSignal.update_data()` for changing the sampling frequency of the signal when updating its data ([#13](https://github.com/the-siesta-group/edfio/pull/13)).
+- Add `update_data_record_duration` method to class `Edf` for updating the `data_record_duration` field of the EDF header ([#14](https://github.com/the-siesta-group/edfio/pull/14)).
+
+## [0.3.0] - 2023-11-30
+
+### Changed
+- `Edf.signals` can not be set anymore. Use `Edf.append_signals()`, `Edf.drop_signals()`, and `EdfSignal.update_data()` instead ([#10](https://github.com/the-siesta-group/edfio/pull/10)).
+
+### Added
+- Allow creating a new Edf containing only annotations ([#7](https://github.com/the-siesta-group/edfio/pull/7)).
+- Add `EdfSignal.update_data` for overwriting the physical values with an array of equal length ([#10](https://github.com/the-siesta-group/edfio/pull/10)).
+- Allow adding new signals to an Edf with `Edf.append_signals` ([#10](https://github.com/the-siesta-group/edfio/pull/10)).
+
+### Fixed
+- Disallow creating a new Edf where local patient/recording identification subfields are empty strings ([#6](https://github.com/the-siesta-group/edfio/pull/6)).
+- Allow retrieving the starttime from a file where the reserved field indicates it is an EDF+C but no annotations signal is present ([#8](https://github.com/the-siesta-group/edfio/pull/8)).
+- Disallow removing the EDF+ timekeeping signal with `Edf.drop_signals` ([#10](https://github.com/the-siesta-group/edfio/pull/10)).
+
+## [0.2.1] - 2023-11-17
+
+### Fixed
+- Disallow creating a new Edf with a recording startdate not between 1985-01-01 and 2084-12-31 ([#5](https://github.com/the-siesta-group/edfio/pull/5)).
+
+## [0.2.0] - 2023-11-16
+
+### Added
+- Support non-standard header fields (not encoded as UTF-8) by replacing incompatible characters with "�" ([#4](https://github.com/the-siesta-group/edfio/pull/4)).
+
+### Fixed
+- When `EdfSignal.physical_min` or `EdfSignal.physical_max` do not fit into their header fields, they are now always rounded down or up, respectively, to ensure all physical values lie within the physical range ([#2](https://github.com/the-siesta-group/edfio/pull/2)).
+- The calculation of `num_data_records` from signal duration and `data_record_duration` is now more robust to floating point errors ([#3](https://github.com/the-siesta-group/edfio/pull/3)).
+
+## [0.1.1] - 2023-11-09
+
+### Fixed
+- Use correct path to sphinx config file in `.readthedocs.yml`.
+
+## [0.1.0] - 2023-11-09
+
+Initial release 🎉
+
+### Added
+- Support for reading and writing EDF and EDF+C files.
+- I/O from/to files and file-like objects.
+- `Edf.slice_between_seconds()` and `Edf.slice_between_annotations()` for slicing a recording in time.
+- `Edf.drop_annotations()` for dropping EDF+ annotations based on their text.
+- `Edf.drop_signals()` for dropping individual EDF signals by specifying their index or label.
+- `Edf.anonymize()` for anonymizing all identifying header fields.

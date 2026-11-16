@@ -1,0 +1,650 @@
+from __future__ import annotations
+
+import datetime
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+from edfio import (
+    Edf,
+    EdfAnnotation,
+    EdfSignal,
+    Recording,
+    read_edf,
+)
+from edfio.edf_annotations import (
+    _create_annotations_signal,
+    _data_records_to_annotations_signal,
+    _EdfAnnotationsDataRecord,
+    _EdfTAL,
+    _encode_annotation_duration,
+    _encode_annotation_onset,
+)
+from tests import TEST_DATA_DIR
+
+EDF_FILE = TEST_DATA_DIR / "short_psg.edf"
+MNE_TEST_FILE = TEST_DATA_DIR / "mne_test.edf"
+SUBSECOND_TEST_FILE = TEST_DATA_DIR / "test_subsecond.edf"
+ONLY_ANNOTATIONS_FILE = TEST_DATA_DIR / "SC4001EC-Hypnogram.edf"
+
+MNE_TEST_ANNOTATIONS = (
+    EdfAnnotation(onset=0.0, duration=None, text="start"),
+    EdfAnnotation(onset=0.1344, duration=0.256, text="type A"),
+    EdfAnnotation(onset=0.3904, duration=1.0, text="type A"),
+    EdfAnnotation(onset=2.0, duration=None, text="type B"),
+    EdfAnnotation(onset=2.5, duration=2.5, text="type A"),
+)
+
+
+@pytest.mark.parametrize(
+    ("onset", "expected"),
+    [
+        (0, "+0"),
+        (0.0, "+0"),
+        (0.1, "+0.1"),
+        (0.01, "+0.01"),
+        (0.001, "+0.001"),
+        (0.0001, "+0.0001"),
+        (0.00001, "+0.00001"),
+        (0.000001, "+0.000001"),
+        (0.0000001, "+0.0000001"),
+        (0.00000001, "+0.00000001"),
+        (0.00000000001, "+0.00000000001"),
+        (100000000000.0, "+100000000000"),
+        # onsets whose fixed-precision formatting would expose binary rounding
+        # noise once the integer part is large (see GitHub issue #109)
+        (8191.202312, "+8191.202312"),
+        (8192.202312, "+8192.202312"),
+        (8193.202312, "+8193.202312"),
+        (29787.202312, "+29787.202312"),
+        (-0.1, "-0.1"),
+        (-0.0000001, "-0.0000001"),
+        (-0.0000000001, "-0.0000000001"),
+        (-100000000000.0, "-100000000000"),
+    ],
+)
+def test_encode_annotation_onset(onset: float, expected: str):
+    assert _encode_annotation_onset(onset) == expected
+
+
+@pytest.mark.parametrize(
+    ("duration", "expected"),
+    [
+        (0, "0"),
+        (0.0, "0"),
+        (0.1, "0.1"),
+        (0.01, "0.01"),
+        (0.001, "0.001"),
+        (0.0001, "0.0001"),
+        (0.00001, "0.00001"),
+        (0.000001, "0.000001"),
+        (0.0000001, "0.0000001"),
+        (0.00000000001, "0.00000000001"),
+        (100000000000.0, "100000000000"),
+        (12345.6789, "12345.6789"),
+    ],
+)
+def test_encode_annotation_duration(duration: float, expected: str):
+    assert _encode_annotation_duration(duration) == expected
+
+
+def test_encode_annotation_duration_raises_error_for_negative_values():
+    with pytest.raises(ValueError, match="Annotation duration must be positive, is"):
+        _encode_annotation_duration(-1)
+
+
+def test_long_recording_with_subsecond_starttime_roundtrip(tmp_file: Path):
+    # A sub-second starttime writes a timekeeping onset into every data record.
+    # For long recordings the later onsets have a large integer part, which used
+    # to expose binary rounding noise (e.g. 8192.202312 -> "+8192.202311999999"),
+    # corrupting the sub-second offset. Ensure the offset round-trips exactly.
+    duration_s = 8193
+    starttime = datetime.time(23, 20, 20, 202312)
+    with pytest.warns(UserWarning, match="Creating [BE]DF\\+C to store microsecond"):
+        edf = Edf([EdfSignal(np.zeros(duration_s), 1)], starttime=starttime)
+    edf.write(tmp_file)
+    edf = read_edf(tmp_file)
+    assert edf.starttime == starttime
+    signal = edf._signals[1]
+    last_data_record = signal.digital.reshape(-1, signal._bytes_per_data_record)[-1]
+    assert last_data_record.tobytes().startswith(b"+8192.202312")
+
+
+def test_edf_annotations():
+    edf = read_edf(MNE_TEST_FILE)
+    assert edf.annotations == MNE_TEST_ANNOTATIONS
+
+
+# examples taken from https://www.edfplus.info/specs/edfplus.html
+@pytest.mark.parametrize(
+    ("raw_annotations", "expected_annotations"),
+    [
+        (
+            b"+180\x14Lights off\x14Close door\x14\x00",
+            [
+                EdfAnnotation(180, None, "Lights off"),
+                EdfAnnotation(180, None, "Close door"),
+            ],
+        ),
+        (
+            b"+180\x14Lights off\x14\x00+180\x14Close door\x14\x00",
+            [
+                EdfAnnotation(180, None, "Lights off"),
+                EdfAnnotation(180, None, "Close door"),
+            ],
+        ),
+        (
+            b"+1800.2\x1525.5\x14Apnea\x14\x00",
+            [EdfAnnotation(1800.2, 25.5, "Apnea")],
+        ),
+        (
+            b"+0\x14\x14Stimulus click 35dB both ears\x14Free text\x14\x00",
+            [
+                EdfAnnotation(0, None, ""),
+                EdfAnnotation(0, None, "Stimulus click 35dB both ears"),
+                EdfAnnotation(0, None, "Free text"),
+            ],
+        ),
+        (
+            b"-0.065\x14Pre-stimulus beep 1000Hz\x14\x00",
+            [EdfAnnotation(-0.065, None, "Pre-stimulus beep 1000Hz")],
+        ),
+        (
+            b"+0\x14\x14Recording starts\x14\x00",
+            [
+                EdfAnnotation(0, None, ""),
+                EdfAnnotation(0, None, "Recording starts"),
+            ],
+        ),
+        (
+            b"+993.2\x151.2\x14Limb movement\x14R+L leg\x14\x00",
+            [
+                EdfAnnotation(993.2, 1.2, "Limb movement"),
+                EdfAnnotation(993.2, 1.2, "R+L leg"),
+            ],
+        ),
+        (
+            b"+30210\x14Recording ends\x14\x00\x00\x00\x00\x00\x00\x00\x00",
+            [EdfAnnotation(30210, None, "Recording ends")],
+        ),
+        (  # from https://github.com/mne-tools/mne-testing-data/blob/14a4cbc0ca9b3f268885d91ff058c18737487865/EDF/test_utf8_annotations.edf
+            b"+2\x150.500000\x14\xe4\xbb\xb0\xe5\x8d\xa7\x14\x00",
+            [EdfAnnotation(2, 0.5, "仰卧")],
+        ),
+        (  # allow trailing 0
+            b"+15.0\x155.0\x14Text\x14\x00",
+            [EdfAnnotation(15, 5, "Text")],
+        ),
+    ],
+)
+def test_parse_annotations(
+    raw_annotations: bytes,
+    expected_annotations: list[EdfAnnotation],
+):
+    assert (
+        _EdfAnnotationsDataRecord.from_bytes(raw_annotations).annotations
+        == expected_annotations
+    )
+
+
+@pytest.mark.parametrize(
+    "raw_annotations",
+    [
+        b"+15.\x155.5\x14x\x14\x00",
+        b"+15.5\x155.\x14x\x14\x00",
+    ],
+)
+def test_parse_annotations_raises_error_for_invalid_timing(raw_annotations: bytes):
+    with pytest.raises(ValueError, match="No valid annotations found in"):
+        _EdfAnnotationsDataRecord.from_bytes(raw_annotations).annotations
+
+
+def test_annotations_are_empty_for_legacy_edf():
+    assert read_edf(EDF_FILE).annotations == ()
+
+
+def test_read_write_does_not_change_edfplus_with_annotations(tmp_file: Path):
+    source_path = MNE_TEST_FILE
+    read_edf(source_path).write(tmp_file)
+    assert tmp_file.read_bytes() == source_path.read_bytes()
+
+
+def test_write_edf_with_annotations(tmp_file: Path):
+    annotations = (EdfAnnotation(3.5, 3, text="huhu"), EdfAnnotation(5, 1, "仰卧"))
+    Edf([EdfSignal(np.arange(10), 1)], annotations=annotations).write(tmp_file)
+    edf = read_edf(tmp_file)
+    assert edf.annotations == annotations
+    assert edf.reserved == f"{edf._fmt}+C"
+    assert edf.num_signals == 1
+    assert edf._total_num_signals == 2
+
+
+def test_annotations_outside_recording_limits(tmp_file: Path):
+    annotations = (
+        EdfAnnotation(-1, 1, "before start"),
+        EdfAnnotation(0, 1, "at start"),
+        EdfAnnotation(1, 1, "at end"),
+        EdfAnnotation(2, 1, "after end"),
+    )
+    edf = Edf(
+        signals=[EdfSignal(np.arange(2), sampling_frequency=1)],
+        annotations=annotations,
+    )
+    assert edf.annotations == annotations
+
+
+def test_drop_annotations():
+    edf = read_edf(MNE_TEST_FILE)
+    edf.drop_annotations(text="type A")
+    expected_annotations = (
+        EdfAnnotation(onset=0, duration=None, text="start"),
+        EdfAnnotation(onset=2, duration=None, text="type B"),
+    )
+    assert edf.annotations == expected_annotations
+
+
+def test_drop_annotations_write(tmp_file: Path):
+    edf = read_edf(MNE_TEST_FILE)
+    edf.drop_annotations(text="type A")
+    edf.write(tmp_file)
+    expected_annotations = tuple(a for a in edf.annotations if a.text != "type A")
+    assert read_edf(tmp_file).annotations == expected_annotations
+
+
+def test_drop_annotations_with_instantiated_edf():
+    edf = Edf(
+        [
+            EdfSignal(np.zeros(10), 1),
+        ],
+        annotations=[
+            EdfAnnotation(1, None, "A"),
+            EdfAnnotation(2, None, "B"),
+        ],
+    )
+    edf.drop_annotations("A")
+    assert edf.annotations == (EdfAnnotation(2, None, "B"),)
+
+
+def test_annotations_without_text_are_kept(tmp_file: Path):
+    annotations = (
+        EdfAnnotation(0, None, "abc"),
+        EdfAnnotation(1, 1, ""),
+    )
+    edf = Edf(
+        signals=[EdfSignal(np.arange(2), sampling_frequency=1)],
+        annotations=annotations,
+    )
+    edf.write(tmp_file)
+    assert read_edf(tmp_file).annotations == annotations
+
+
+def test_read_subsecond_starttime():
+    # testfile from PyEDFlib
+    edf = read_edf(SUBSECOND_TEST_FILE)
+    assert edf.starttime == datetime.time(4, 5, 56, 394531)
+
+
+def test_write_read_subsecond_starttime(tmp_file: Path):
+    starttime = datetime.time(14, 42, 30, 12345)
+    edf = Edf(
+        signals=[EdfSignal(np.arange(2), sampling_frequency=1)],
+        starttime=starttime,
+        annotations=(),
+    )
+    edf.write(tmp_file)
+    assert read_edf(tmp_file).starttime == starttime
+
+
+def test_edf_anonymized_removes_starttime_microseconds():
+    edf = read_edf(SUBSECOND_TEST_FILE)
+    edf.anonymize()
+    assert edf.starttime == datetime.time(0, 0, 0)
+
+
+def test_edf_write_works_after_adding_microsecond_places(tmp_file: Path):
+    edf = Edf(
+        signals=[EdfSignal(np.arange(2), sampling_frequency=1)],
+        starttime=datetime.time(0, 0, 0),
+        annotations=(),
+    )
+    starttime = datetime.time(0, 0, 0, 123456)
+    edf.starttime = starttime
+    edf.write(tmp_file)
+    assert read_edf(tmp_file).starttime == starttime
+
+
+def test_edf_annotations_multiple_annotation_signals():
+    edf = Edf(
+        signals=[
+            EdfSignal(np.arange(2), sampling_frequency=1),
+            _create_annotations_signal(
+                [
+                    EdfAnnotation(0, None, "sig 1 ann 1"),
+                    EdfAnnotation(0.5, None, "sig 1 ann 2"),
+                ],
+                signal_class=EdfSignal,
+                num_data_records=2,
+                data_record_duration=1,
+            ),
+            _create_annotations_signal(
+                [
+                    EdfAnnotation(0.25, None, "sig 2 ann 1"),
+                    EdfAnnotation(0.75, None, "sig 2 ann 2"),
+                ],
+                signal_class=EdfSignal,
+                num_data_records=2,
+                data_record_duration=1,
+                with_timestamps=False,
+            ),
+        ],
+    )
+    assert edf.annotations == (
+        EdfAnnotation(0, None, "sig 1 ann 1"),
+        EdfAnnotation(0.25, None, "sig 2 ann 1"),
+        EdfAnnotation(0.5, None, "sig 1 ann 2"),
+        EdfAnnotation(0.75, None, "sig 2 ann 2"),
+    )
+
+
+TEST_SUBSECOND_ANNOTATION_ONSETS = [1.9511719, 3.4921875, 290.5019531, 583.5722656]
+
+
+def test_annotation_onsets_are_correct_for_file_with_subsecond_starttime_offset():
+    edf = read_edf(SUBSECOND_TEST_FILE)
+    assert [ann.onset for ann in edf.annotations] == TEST_SUBSECOND_ANNOTATION_ONSETS
+
+
+def test_changing_starttime_microseconds_does_not_shift_annotation_onsets(
+    tmp_file: Path,
+):
+    edf = read_edf(SUBSECOND_TEST_FILE)
+    edf.starttime = edf.starttime.replace(microsecond=1)
+    edf.write(tmp_file)
+    edf = read_edf(tmp_file)
+    assert [ann.onset for ann in edf.annotations] == TEST_SUBSECOND_ANNOTATION_ONSETS
+
+
+def test_changing_starttime_microseconds_does_not_shift_annotation_onsets_for_multiple_annotation_signals():
+    edf = Edf(
+        signals=[
+            EdfSignal(np.arange(2), sampling_frequency=1),
+            _create_annotations_signal(
+                [
+                    EdfAnnotation(0, None, "sig 1 ann 1"),
+                    EdfAnnotation(0.5, None, "sig 1 ann 2"),
+                ],
+                signal_class=EdfSignal,
+                num_data_records=2,
+                data_record_duration=1,
+            ),
+            _create_annotations_signal(
+                [
+                    EdfAnnotation(0.25, None, "sig 2 ann 1"),
+                    EdfAnnotation(0.75, None, "sig 2 ann 2"),
+                ],
+                signal_class=EdfSignal,
+                num_data_records=2,
+                data_record_duration=1,
+                with_timestamps=False,
+            ),
+        ],
+    )
+    edf.starttime = edf.starttime.replace(microsecond=1)
+    assert edf.annotations == (
+        EdfAnnotation(0, None, "sig 1 ann 1"),
+        EdfAnnotation(0.25, None, "sig 2 ann 1"),
+        EdfAnnotation(0.5, None, "sig 1 ann 2"),
+        EdfAnnotation(0.75, None, "sig 2 ann 2"),
+    )
+
+
+def test_annotation_onsets_are_written_correctly_for_new_edf_with_microsecond_starttime(
+    tmp_file: Path,
+):
+    annotations = (
+        EdfAnnotation(-2, None, ""),
+        EdfAnnotation(0.2, None, ""),
+        EdfAnnotation(1.2345, None, ""),
+        EdfAnnotation(15.42, None, ""),
+    )
+    edf = Edf(
+        [EdfSignal(np.arange(10), 1)],
+        starttime=datetime.time(0, 0, 0, 123456),
+        annotations=annotations,
+    )
+    edf.write(tmp_file)
+    assert read_edf(tmp_file).annotations == annotations
+
+
+def test_creating_edf_with_microsecond_starttime_without_annotations_emits_warning():
+    with pytest.warns(UserWarning, match="Creating [BE]DF\\+C to store microsecond"):
+        edf = Edf([EdfSignal(np.arange(2), 1)], starttime=datetime.time(0, 0, 0, 1))
+    assert edf.starttime.microsecond == 1
+    assert edf.reserved == f"{edf._fmt}+C"
+
+
+def test_read_edf_containing_only_annotations():
+    # testfile from
+    # https://www.physionet.org/content/sleep-edfx/1.0.0/sleep-cassette/SC4001EC-Hypnogram.edf
+    edf = read_edf(ONLY_ANNOTATIONS_FILE)
+    assert len(edf.annotations) == 154
+
+
+def test_long_annotation_texts_are_possible(tmp_file: Path):
+    annotations = (
+        EdfAnnotation(0.1, None, "this is a short text"),
+        EdfAnnotation(0.2, None, "this is a looooooooooooooooooooooooooooooooong text"),
+        EdfAnnotation(0.3, None, "x" * 10000),
+    )
+    Edf([EdfSignal(np.arange(10), 1)], annotations=annotations).write(tmp_file)
+    assert read_edf(tmp_file).annotations == annotations
+
+
+def test_high_numbers_of_annotations_are_possible(tmp_file: Path):
+    fs = 1000
+    signal = EdfSignal(np.arange(fs), fs)
+    annotations = (EdfAnnotation(t / fs, 1 / fs, "x") for t in range(fs))
+    edf = Edf([signal], annotations=annotations)
+    edf.write(tmp_file)
+    assert len(read_edf(tmp_file).annotations) == fs
+
+
+@pytest.mark.parametrize(
+    ("offset", "expected"),
+    [
+        (0, datetime.time(0, 0, 0)),
+        (1, datetime.time(0, 0, 1)),
+        (2.345, datetime.time(0, 0, 2, 345000)),
+        (2.345678, datetime.time(0, 0, 2, 345678)),
+        (2.3456789, datetime.time(0, 0, 2, 345679)),
+    ],
+)
+def test_starttime_with_subsecond_offset(offset: float, expected: datetime.time):
+    edf = Edf(
+        [
+            EdfSignal(np.arange(1), 1),
+            _create_annotations_signal(
+                [EdfAnnotation(offset, None, "")],
+                signal_class=EdfSignal,
+                num_data_records=1,
+                data_record_duration=1,
+                with_timestamps=False,
+            ),
+        ]
+    )
+    edf._reserved = f"{edf._fmt}+C".ljust(44).encode()
+    assert edf.starttime == expected
+
+
+def test_startdate_where_subsecond_offsets_shifts_past_midnight():
+    edf = Edf(
+        [
+            EdfSignal(np.arange(1), 1),
+            _create_annotations_signal(
+                [EdfAnnotation(10, None, "")],
+                signal_class=EdfSignal,
+                num_data_records=1,
+                data_record_duration=1,
+                with_timestamps=False,
+            ),
+        ],
+        recording=Recording(startdate=datetime.date(2026, 7, 14)),
+        starttime=datetime.time(23, 59, 55),
+    )
+    assert edf.starttime == datetime.time(0, 0, 5)
+    assert edf.startdate == datetime.date(2026, 7, 15)
+
+
+def test_edf_anonymized_does_not_remove_annotations():
+    edf = read_edf(MNE_TEST_FILE)
+    edf.anonymize()
+    assert edf.annotations == MNE_TEST_ANNOTATIONS
+
+
+def test_set_annotations(tmp_file: Path):
+    old_annotations = (
+        EdfAnnotation(3.5, 3, text="old 1"),
+        EdfAnnotation(5, 1, "old 2"),
+    )
+    edf = Edf([EdfSignal(np.arange(10), 1)], annotations=old_annotations)
+    new_annotations = (EdfAnnotation(1, 1, "new 1"), EdfAnnotation(2, None, "new 2"))
+    edf.set_annotations(new_annotations)
+    edf.write(tmp_file)
+    edf = read_edf(tmp_file)
+    assert edf.annotations == new_annotations
+
+
+def test_set_annotations_removes_all_existing_annotation_signals(tmp_file: Path):
+    edf = Edf(
+        signals=[
+            _create_annotations_signal(
+                [
+                    EdfAnnotation(0, None, "sig 1 ann 1"),
+                    EdfAnnotation(0.5, None, "sig 1 ann 2"),
+                ],
+                signal_class=EdfSignal,
+                num_data_records=2,
+                data_record_duration=1,
+            ),
+            EdfSignal(np.arange(2), sampling_frequency=1, label="EEG 1"),
+            _create_annotations_signal(
+                [
+                    EdfAnnotation(0.25, None, "sig 2 ann 1"),
+                    EdfAnnotation(0.75, None, "sig 2 ann 2"),
+                ],
+                signal_class=EdfSignal,
+                num_data_records=2,
+                data_record_duration=1,
+                with_timestamps=False,
+            ),
+            EdfSignal(np.arange(2), sampling_frequency=1, label="EEG 2"),
+        ],
+    )
+    new_annotations = (EdfAnnotation(1, 1, "new 1"), EdfAnnotation(2, None, "new 2"))
+    edf.set_annotations(new_annotations)
+    edf.write(tmp_file)
+    edf = read_edf(tmp_file)
+    assert edf.annotations == new_annotations
+    assert edf.labels == ("EEG 1", "EEG 2")
+    assert [s.label for s in edf._signals] == [
+        "EEG 1",
+        "EEG 2",
+        f"{edf._fmt} Annotations",
+    ]
+
+
+def test_add_annotations(tmp_file: Path):
+    old_annotations = (
+        EdfAnnotation(3.5, 3, text="old 1"),
+        EdfAnnotation(5, 1, "old 2"),
+    )
+    edf = Edf([EdfSignal(np.arange(10), 1)], annotations=old_annotations)
+    new_annotations = (EdfAnnotation(1, 1, "new 1"), EdfAnnotation(2, None, "new 2"))
+    edf.add_annotations(new_annotations)
+    edf.write(tmp_file)
+    edf = read_edf(tmp_file)
+    assert edf.annotations == tuple(sorted(old_annotations + new_annotations))
+
+
+def test_get_annotations_defined_in_timewindow():
+    all_annotations = [
+        EdfAnnotation(0.15, 3, "A"),
+        EdfAnnotation(3.5, 1, "B"),
+        EdfAnnotation(5, 1, "C"),
+        EdfAnnotation(7.8, 1, "D"),
+    ]
+    edf = Edf(signals=[EdfSignal(np.arange(10), 1)], annotations=all_annotations)
+    assert edf.get_annotations(0.9, 7.6) == tuple(all_annotations[1:3])
+
+
+def test_mixture_of_annotations_with_and_without_durations():
+    annotations = (
+        EdfAnnotation(0.2, 0.5, "B"),
+        EdfAnnotation(0.1, 0, "A"),
+        EdfAnnotation(0.1, None, "A"),
+        EdfAnnotation(0.7, None, "C"),
+    )
+    edf = Edf([], annotations=annotations)
+    edf = read_edf(edf.to_bytes())
+    assert edf.annotations == (
+        EdfAnnotation(0.1, None, "A"),
+        EdfAnnotation(0.1, 0, "A"),
+        EdfAnnotation(0.2, 0.5, "B"),
+        EdfAnnotation(0.7, None, "C"),
+    )
+
+
+def test_edf_without_annotations_is_continuous():
+    edf = Edf([EdfSignal(np.arange(4), 1)])
+    assert edf.is_continuous is True
+
+
+@pytest.mark.parametrize(
+    ("onsets", "data_record_duration", "expected"),
+    [
+        ((0, 1, 2, 3), 1, True),
+        ((2, 3, 4, 5), 1, True),
+        ((0, 1, 3, 4), 1, False),
+        ((0, 2, 4, 6), 2, True),
+        ((3, 5, 7, 9), 2, True),
+        ((0, 2, 5, 7), 2, False),
+        ((0.0, 0.1, 0.2, 0.3), 0.1, True),
+        ((0.1, 0.2, 0.3, 0.4), 0.1, True),
+        ((0.1, 0.2, 0.4, 0.5), 0.1, False),
+    ],
+)
+def test_is_continuous(onsets, expected, data_record_duration):
+    annotations_signal = _data_records_to_annotations_signal(
+        [_EdfAnnotationsDataRecord([_EdfTAL(o, None, [])]).to_bytes() for o in onsets],
+        EdfSignal,
+        data_record_duration,
+    )
+
+    edf = Edf(
+        [
+            EdfSignal(np.arange(len(onsets)), 1 / data_record_duration),
+            annotations_signal,
+        ],
+        data_record_duration=data_record_duration,
+    )
+    assert edf.is_continuous == expected
+
+
+def test_is_continuous_avoids_floating_point_issues():
+    # When working with floats, 4095.123456 + 1 returns 4096.123455999999. Comparing
+    # data record onsets with the previous onset plus the data record duration should
+    # avoid such precision issues.
+    edf = Edf(
+        [EdfSignal(np.arange(4097), 1)],
+        starttime=datetime.time(0, 0, 0, 123456),
+        annotations=(),
+    )
+    assert edf.is_continuous
+
+
+def test_is_continuous_with_invalid_annotations_raises_error():
+    edf = Edf([EdfSignal(np.arange(10), 1)], annotations=())
+    edf._signals[-1]._digital[:] = 0
+    with pytest.raises(ValueError, match="No valid annotations"):
+        edf.is_continuous

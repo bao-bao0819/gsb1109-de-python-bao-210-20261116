@@ -1,0 +1,21 @@
+pymzml_gz/__pycache__
+__pycache__
+*.DS_Store
+*Thumbs.db
+*.pyc
+test.*
+#scripts
+build
+docs/build
+tests/data/Fusion001225.mzML
+PyNumpress.so
+test.dat
+*.html
+dist
+*.log
+<<<<<<< HEAD
+.coverage
+.scannerwork
+.tox
+pymzml.egg-info
+docs/source/code_inc/

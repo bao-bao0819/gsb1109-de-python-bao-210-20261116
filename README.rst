@@ -81,6 +81,30 @@ The ``pformat`` method returns a pretty-print formatted string for templates:
     >>> t
     Template('{{t|a=a}}')
 
+Importing arguments as a batch:
+
+.. code:: python
+
+    >>> t = wtp.Template('{{t|1=a|x|b|1=c}}')
+    >>> [(a.name, a.value) for a in t.argument_occurrences]
+    [('1', 'a'), ('1', 'x'), ('2', 'b'), ('1', 'c')]
+    >>> report = t.import_arguments([
+    ...     wtp.ArgumentDelete(index=1),
+    ...     wtp.ArgumentSet(index=4, value='C'),
+    ... ])
+    >>> report.string_after
+    '{{t|x|b|1=C}}'
+
+``import_arguments`` keeps every occurrence, including duplicate names and
+an explicit ``|1=a`` beside the first positional argument. Named identity
+ignores surrounding whitespace; positional identity is the ordinal among
+positional occurrences. Each request index refers to the *original* list, so
+deleting one occurrence does not renumber the target of another request.
+``report.effective_before``/``effective_after`` show the last-occurrence-wins
+values, ``report.effective_changes`` reports revealed or changed values,
+``report.positional_shifts`` reports renumbering, and
+``report.conflicts``/``errors``/``request_conflicts`` report ambiguity.
+
 Template parameters:
 
 .. code:: python

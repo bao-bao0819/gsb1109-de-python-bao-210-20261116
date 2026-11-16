@@ -1,6 +1,14 @@
 Unreleased
 ----------
-* 
+* Added ``Template.import_arguments`` / ``apply_argument_changes`` and the
+  module-level ``wikitextparser.import_arguments`` for importing every
+  argument occurrence while retaining duplicate names and the distinction
+  between an explicit ``|1=a`` and the first positional argument.  Batch
+  delete/set/insert positions always refer to the original occurrence list;
+  deletions can reveal an earlier value for the same name and inserted
+  positional arguments renumber later positional occurrences.  The returned
+  report lists effective value changes, positional shifts, remaining value
+  conflicts, and rejected or mutually conflicting requests.
 
 v3.0.0 (2026-10-08)
 -------------------

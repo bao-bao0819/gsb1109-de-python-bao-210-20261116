@@ -3,6 +3,22 @@ __version__ = '3.0.1.dev1'
 
 from . import _wikitext
 from ._argument import Argument  # noqa: F401
+from ._argument_import import (
+    ArgumentConflict as ArgumentConflict,
+    ArgumentDelete as ArgumentDelete,
+    ArgumentImportReport as ArgumentImportReport,
+    ArgumentInsert as ArgumentInsert,
+    ArgumentOccurrence as ArgumentOccurrence,
+    ArgumentRequestConflict as ArgumentRequestConflict,
+    ArgumentRequestError as ArgumentRequestError,
+    ArgumentSet as ArgumentSet,
+    EffectiveArgument as EffectiveArgument,
+    EffectiveChange as EffectiveChange,
+    OccurrenceChange as OccurrenceChange,
+    OccurrenceShift as OccurrenceShift,
+    apply_argument_changes as apply_argument_changes,
+    import_arguments as import_arguments,
+)
 from ._comment_bold_italic import Bold, Comment, Italic
 from ._externallink import ExternalLink
 from ._parameter import Parameter

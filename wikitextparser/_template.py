@@ -135,6 +135,56 @@ class Template(SubWikiTextWithArgs):
         """Delete all arguments with the given name."""
         super()._del_arg(name, ignore_equals=False)
 
+    def import_arguments(self, changes=()):
+        """Return every argument occurrence and its effective value.
+
+        Unlike :attr:`arguments`, this view keeps duplicate occurrences and
+        distinguishes an explicit ``|1=a`` from the first positional argument.
+        Both address parameter ``1``, but they remain separate records and the
+        last occurrence wins.
+
+        Pass ``changes`` (delete/set/insert requests or mappings) to apply an
+        edit batch.  Every index refers to the occurrence list of the
+        *original* template, so deleting one occurrence never changes what
+        another request addresses, and inserting a positional occurrence
+        renumbers only the result.  See
+        :func:`wikitextparser._argument_import.import_arguments`.
+        """
+        from ._argument_import import import_arguments
+
+        return import_arguments(self, changes)
+
+    def apply_argument_changes(self, changes):
+        """Apply delete/set/insert requests to this template's arguments."""
+        from ._argument_import import apply_argument_changes
+
+        return apply_argument_changes(self, changes)
+
+    @property
+    def argument_occurrences(self):
+        """Return every argument occurrence in source order.
+
+        Duplicate names are kept, and an explicit ``|1=a`` is distinct from
+        the first positional argument even though both address parameter 1.
+        """
+        from ._argument_import import import_arguments
+
+        return import_arguments(self).occurrences_before
+
+    @property
+    def effective_arguments(self):
+        """Return the last-occurrence-wins mapping of parameter names."""
+        from ._argument_import import import_arguments
+
+        return import_arguments(self).effective_before
+
+    @property
+    def argument_conflicts(self):
+        """Return names whose occurrences do not all have the same value."""
+        from ._argument_import import import_arguments
+
+        return import_arguments(self).conflicts_before
+
     @property
     def templates(self) -> list[Template]:
         return super().templates[1:]

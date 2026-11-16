@@ -238,6 +238,29 @@ Calling the ``cells`` method of a ``Table`` returns table cells as ``Cell`` obje
 HTML attributes of Table, Cell, and Tag objects are accessible via
 ``get_attr``, ``set_attr``, ``has_attr``, and  ``del_attr`` methods.
 
+Several cell values can be revised as one local change with
+``Table.apply_revisions``. Coordinates refer to the rendered table, so two
+coordinates covered by the same merged cell resolve to one source cell:
+
+.. code:: python
+
+    >>> t = wtp.Table("""{|
+    ... | rowspan="2" colspan="2" | M || x
+    ... |-
+    ... | y
+    ... |}""")
+    >>> report = t.apply_revisions([(0, 0, 'same'), (1, 1, 'same')])
+    >>> report.overlaps[0].consistent
+    True
+    >>> t.data()
+    [['same', 'same', 'x'], ['same', 'same', 'y']]
+
+Conflicting values for one source cell leave that cell untouched and are
+reported in ``report.conflicts``. Revisions without a source cell (empty
+slots in a ragged table) are reported in ``report.skipped``. All positions
+are resolved against the table as it was before the call, so an earlier
+revision that adds text does not shift a later one.
+
 Lists
 -----
 

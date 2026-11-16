@@ -1,6 +1,6 @@
-from pytest import mark
+from pytest import mark, raises
 
-from wikitextparser import Table, WikiText
+from wikitextparser import CellRevision, Table, WikiText
 
 # Todo: addrow, addcol, shiftrow, shiftcol, ...
 # addrow([], -1)
@@ -708,4 +708,161 @@ def test_multiline_with_carriage_return():
         ['Orange', 'Apple'],
         ['Bread', 'Pie'],
         ['Butter', 'Ice cream'],
+    ]
+
+
+# Table.apply_revisions
+
+
+MERGED = (
+    '{| class="wikitable"\n'
+    '! a !! b !! c\n'
+    '|-\n'
+    '| rowspan="2" colspan="2" | M || x\n'
+    '|-\n'
+    '| y\n'
+    '|}'
+)
+
+
+def test_apply_revisions_only_changes_the_source_cell():
+    table = Table('{|\n| A || B\n|-\n| C || D\n|}')
+    report = table.apply_revisions([(0, 0, 'A2'), (1, 1, 'D2')])
+    assert table.data() == [['A2', 'B'], ['C', 'D2']]
+    assert [write.value for write in report.writes] == ['A2', 'D2']
+    assert report.changed is True
+    assert report.has_conflicts is False
+
+
+def test_apply_revisions_resolves_merged_coordinates_to_one_cell():
+    table = Table(MERGED)
+    report = table.apply_revisions([(1, 0, 'left'), (2, 1, 'left')])
+    assert table.data() == [
+        ['a', 'b', 'c'],
+        ['left', 'left', 'x'],
+        ['left', 'left', 'y'],
+    ]
+    assert len(report.overlaps) == 1
+    overlap = report.overlaps[0]
+    assert (overlap.anchor_row, overlap.anchor_column) == (1, 0)
+    assert overlap.values == ('left', 'left')
+    assert overlap.consistent is True
+    assert report.conflicts == ()
+    assert len(report.writes) == 1
+
+
+def test_apply_revisions_reports_conflicting_sources():
+    table = Table(MERGED)
+    report = table.apply_revisions([(1, 0, 'a'), (2, 1, 'b')])
+    assert table.string == MERGED
+    assert report.changed is False
+    assert report.has_conflicts is True
+    assert report.overlaps[0].consistent is False
+    conflict = report.conflicts[0]
+    assert (conflict.anchor_row, conflict.anchor_column) == (1, 0)
+    assert conflict.values == ('a', 'b')
+    assert conflict.original_value == ' M '
+
+
+def test_apply_revisions_applies_unconflicted_cells_alongside_conflict():
+    table = Table(MERGED)
+    report = table.apply_revisions([(1, 0, 'a'), (2, 1, 'b'), (1, 2, 'x2')])
+    assert report.has_conflicts is True
+    assert table.data() == [
+        ['a', 'b', 'c'],
+        ['M', 'M', 'x2'],
+        ['M', 'M', 'y'],
+    ]
+    assert [write.value for write in report.writes] == ['x2']
+
+
+def test_apply_revisions_duplicate_coordinates_with_same_value():
+    table = Table('{|\n| A || B\n|-\n| C || D\n|}')
+    report = table.apply_revisions([(0, 0, 'X'), (0, 0, 'X')])
+    assert table.data()[0] == ['X', 'B']
+    assert report.overlaps[0].consistent is True
+    assert len(report.writes) == 1
+
+
+def test_apply_revisions_position_uses_original_version():
+    table = Table('{|\n| A || B\n|-\n| C || D\n|}')
+    table.apply_revisions([(0, 0, 'A much longer value'), (1, 1, 'D2')])
+    assert table.data() == [
+        ['A much longer value', 'B'],
+        ['C', 'D2'],
+    ]
+
+
+def test_apply_revisions_later_target_first():
+    table = Table('{|\n| A || B\n|-\n| C || D\n|}')
+    table.apply_revisions([(1, 1, 'A much longer value'), (0, 0, 'A2')])
+    assert table.data() == [
+        ['A2', 'B'],
+        ['C', 'A much longer value'],
+    ]
+
+
+def test_apply_revisions_in_a_document_uses_table_offsets():
+    parsed = WikiText('lead\n{|\n| A || B\n|-\n| C || D\n|}\ntail')
+    table = parsed.tables[0]
+    table.apply_revisions([(0, 0, 'A much longer value'), (1, 1, 'D2')])
+    assert parsed.string == (
+        'lead\n{|\n|A much longer value|| B\n|-\n| C ||D2\n|}\ntail'
+    )
+    assert table.data() == [
+        ['A much longer value', 'B'],
+        ['C', 'D2'],
+    ]
+
+
+def test_apply_revisions_in_nested_table():
+    parsed = WikiText('{|\n| A\n|\n{|\n| N\n|}\n|}')
+    table = parsed.tables[0]
+    report = table.apply_revisions([(0, 0, 'A2')])
+    assert parsed.string == '{|\n|A2\n|\n{|\n| N\n|}\n|}'
+    assert report.writes[0].span == (2, 6)
+    assert table.data() == [['A2', '\n{|\n| N\n|}']]
+
+
+def test_apply_revisions_can_disable_span():
+    table = Table(MERGED)
+    report = table.apply_revisions([(1, 0, 'M2')], span=False)
+    assert table.data(span=False)[1] == ['M2', 'x']
+    assert report.writes[0].value == 'M2'
+
+
+def test_apply_revisions_reports_unchanged_and_skipped():
+    table = Table('{|\n| 1 || 2\n|-\n| 3\n|}')
+    report = table.apply_revisions([(0, 0, ' 1 '), (1, 1, 'x')])
+    assert table.data() == [['1', '2'], ['3', None]]
+    assert report.changed is False
+    assert len(report.unchanged) == 1
+    assert report.skipped == (CellRevision(1, 1, 'x'),)
+    assert report.applied == (CellRevision(0, 0, ' 1 '),)
+
+
+def test_apply_revisions_span_false_counts_missing_coordinates_as_out_of_range():
+    table = Table('{|\n| 1 || 2\n|-\n| 3\n|}')
+    with raises(IndexError):
+        table.apply_revisions([(1, 1, 'x')], span=False)
+
+
+def test_apply_revisions_rejects_out_of_range_coordinates():
+    table = Table('{|\n| A\n|}')
+    with raises(IndexError):
+        table.apply_revisions([(1, 0, 'x')])
+    with raises(IndexError):
+        table.apply_revisions([(0, -1, 'x')])
+
+
+def test_apply_revisions_accepts_a_mapping():
+    table = Table(MERGED)
+    report = table.apply_revisions(
+        {(1, 0): 'same', (2, 1): 'same', (1, 2): 'x2'}
+    )
+    assert report.overlaps[0].consistent is True
+    assert table.data() == [
+        ['a', 'b', 'c'],
+        ['same', 'same', 'x2'],
+        ['same', 'same', 'y'],
     ]

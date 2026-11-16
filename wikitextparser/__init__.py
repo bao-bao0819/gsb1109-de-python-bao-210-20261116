@@ -8,7 +8,14 @@ from ._externallink import ExternalLink
 from ._parameter import Parameter
 from ._parser_function import ParserFunction
 from ._section import Section
-from ._table import Table
+from ._table import (
+    CellRevision as CellRevision,
+    RevisionConflict as RevisionConflict,
+    RevisionOverlap as RevisionOverlap,
+    RevisionReport as RevisionReport,
+    RevisionWrite as RevisionWrite,
+    Table,
+)
 from ._tag import Tag
 from ._template import Template
 from ._wikilink import WikiLink

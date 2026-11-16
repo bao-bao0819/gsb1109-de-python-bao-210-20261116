@@ -109,6 +109,36 @@ Table
    :special-members:
    :show-inheritance:
 
+CellRevision
+------------
+.. autoclass:: wikitextparser.CellRevision
+   :members:
+   :special-members:
+
+RevisionWrite
+-------------
+.. autoclass:: wikitextparser.RevisionWrite
+   :members:
+   :special-members:
+
+RevisionOverlap
+---------------
+.. autoclass:: wikitextparser.RevisionOverlap
+   :members:
+   :special-members:
+
+RevisionConflict
+----------------
+.. autoclass:: wikitextparser.RevisionConflict
+   :members:
+   :special-members:
+
+RevisionReport
+--------------
+.. autoclass:: wikitextparser.RevisionReport
+   :members:
+   :special-members:
+
 Tag
 ---
 .. autoclass:: wikitextparser.Tag

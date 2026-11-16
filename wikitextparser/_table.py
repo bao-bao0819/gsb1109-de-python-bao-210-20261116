@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from bisect import insort_right
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from re import Match
 from typing import Any, Callable, TypeVar, cast, overload
 
@@ -45,6 +47,103 @@ CAPTION_MATCH = rc(
 ).match
 T = TypeVar('T')
 FIND_ROWS = rc(rb'\|-(.*)').finditer
+
+
+@dataclass(frozen=True)
+class CellRevision:
+    """A value change for a cell at a row/column coordinate.
+
+    Coordinates are zero-based and refer to the rendered table when
+    ``span`` is true, i.e. a coordinate covered by a merged cell points to
+    the anchor cell that provides its value.
+    """
+
+    row: int
+    column: int
+    value: str
+
+
+@dataclass(frozen=True)
+class RevisionWrite:
+    """A value written to a single source cell."""
+
+    anchor_row: int
+    anchor_column: int
+    span: tuple[int, int]
+    value: str
+    original_value: str
+    revisions: tuple[CellRevision, ...]
+
+
+@dataclass(frozen=True)
+class RevisionOverlap:
+    """Revisions that target the same source cell.
+
+    ``consistent`` is true when all revisions agree on the value. In that
+    case the value is written once and all revisions are reported as
+    applied.
+    """
+
+    anchor_row: int
+    anchor_column: int
+    span: tuple[int, int]
+    revisions: tuple[CellRevision, ...]
+
+    @property
+    def values(self) -> tuple[str, ...]:
+        """Return the target values, in input order."""
+        return tuple(revision.value for revision in self.revisions)
+
+    @property
+    def consistent(self) -> bool:
+        """Return True if every revision in this overlap agrees."""
+        return len({revision.value for revision in self.revisions}) <= 1
+
+
+@dataclass(frozen=True)
+class RevisionConflict:
+    """Revisions that target the same source cell with different values."""
+
+    anchor_row: int
+    anchor_column: int
+    span: tuple[int, int]
+    revisions: tuple[CellRevision, ...]
+    original_value: str
+
+    @property
+    def values(self) -> tuple[str, ...]:
+        """Return the conflicting values, in input order."""
+        return tuple(revision.value for revision in self.revisions)
+
+
+@dataclass(frozen=True)
+class RevisionReport:
+    """The outcome of :meth:`Table.apply_revisions`."""
+
+    writes: tuple[RevisionWrite, ...]
+    unchanged: tuple[RevisionWrite, ...]
+    overlaps: tuple[RevisionOverlap, ...]
+    conflicts: tuple[RevisionConflict, ...]
+    skipped: tuple[CellRevision, ...]
+
+    @property
+    def applied(self) -> tuple[CellRevision, ...]:
+        """Return all revisions whose values were accepted."""
+        return tuple(
+            revision
+            for write in self.writes + self.unchanged
+            for revision in write.revisions
+        )
+
+    @property
+    def has_conflicts(self) -> bool:
+        """Return True if any source cell received conflicting values."""
+        return bool(self.conflicts)
+
+    @property
+    def changed(self) -> bool:
+        """Return True if at least one source cell was changed."""
+        return bool(self.writes)
 
 
 HEAD_DIGITS = rc(rb'\s*+\d+').match
@@ -358,6 +457,138 @@ class Table(SubWikiTextWithAttrs):
             return table_cells[row]
         return table_cells[row][column]
 
+    def apply_revisions(
+        self,
+        revisions: (
+            Iterable[CellRevision | tuple[int, int, str]]
+            | Mapping[tuple[int, int], str]
+        ),
+        *,
+        span: bool = True,
+    ) -> RevisionReport:
+        """Apply several cell value revisions as one local change.
+
+        ``revisions`` can be an iterable of :class:`CellRevision` or
+        ``(row, column, value)`` tuples, or a mapping of
+        ``(row, column)`` to value. Coordinates are zero-based. With
+        ``span=True`` (the default) they refer to the rendered table, so
+        different coordinates may resolve to the same merged cell.
+        Revisions are always interpreted against the table as it was
+        before this call; a value inserted by an earlier revision cannot
+        move the source position of a later one.
+
+        Revisions that resolve to the same source cell are reported in
+        ``overlaps``. If they all provide the same value, that value is
+        written once. Otherwise the cell is left untouched and the group
+        is reported in ``conflicts``.
+
+        Cells without a source (``None`` slots in a ragged table) are
+        reported in ``skipped``.
+
+        :return: A :class:`RevisionReport` describing every write,
+            overlap, conflict, and skipped revision.
+        """
+        grid = cast(Any, self.cells(span=span))
+        string = self.string
+        anchors: dict[tuple[int, int], tuple[int, int]] = {}
+        for row_index, row in enumerate(grid):
+            for column_index, cell in enumerate(row):
+                if cell is not None:
+                    anchors.setdefault(cell.span, (row_index, column_index))
+        groups: dict[
+            tuple[int, int],
+            list[tuple[CellRevision, int, int]],
+        ] = {}
+        skipped: list[CellRevision] = []
+        if isinstance(revisions, Mapping):
+            revisions = [
+                CellRevision(row, column, value)
+                for (row, column), value in revisions.items()
+            ]
+        for item in revisions:
+            revision = _coerce_revision(item)
+            row, column = revision.row, revision.column
+            if row < 0 or column < 0:
+                raise IndexError(
+                    f'revision coordinate ({row}, {column}) '
+                    'is outside the table'
+                )
+            try:
+                cell = grid[row][column]
+            except IndexError:
+                raise IndexError(
+                    f'revision coordinate ({row}, {column}) '
+                    'is outside the table'
+                ) from None
+            if cell is None:
+                skipped.append(revision)
+                continue
+            # Matches cached by ``cells`` are relative to this table, while
+            # ``cell.span`` is relative to the root. Keep value positions
+            # table-relative for slicing and use the resolved source span
+            # only for identity.
+            match = cell._match
+            data_start, data_end = match.span('data')
+            groups.setdefault(cell.span, []).append(
+                (revision, data_start, data_end)
+            )
+
+        writes: list[RevisionWrite] = []
+        unchanged: list[RevisionWrite] = []
+        overlaps: list[RevisionOverlap] = []
+        conflicts: list[RevisionConflict] = []
+        pending: list[tuple[int, int, str]] = []
+        for span_range, entries in groups.items():
+            revisions_group = tuple(entry[0] for entry in entries)
+            original_value = string[entries[0][1] : entries[0][2]]
+            anchor_row, anchor_column = anchors[span_range]
+            if len(entries) > 1:
+                overlap = RevisionOverlap(
+                    anchor_row,
+                    anchor_column,
+                    span_range,
+                    revisions_group,
+                )
+                overlaps.append(overlap)
+                if not overlap.consistent:
+                    conflicts.append(
+                        RevisionConflict(
+                            anchor_row,
+                            anchor_column,
+                            span_range,
+                            revisions_group,
+                            original_value,
+                        )
+                    )
+                    continue
+            value = revisions_group[0].value
+            write = RevisionWrite(
+                anchor_row,
+                anchor_column,
+                span_range,
+                value,
+                original_value,
+                revisions_group,
+            )
+            if value == original_value:
+                unchanged.append(write)
+                continue
+            writes.append(write)
+            pending.append((entries[0][1], entries[0][2], value))
+
+        for value_start, value_end, value in sorted(
+            pending, key=lambda write: write[0], reverse=True
+        ):
+            self[value_start:value_end] = value
+
+        return RevisionReport(
+            tuple(writes),
+            tuple(unchanged),
+            tuple(overlaps),
+            tuple(conflicts),
+            tuple(skipped),
+        )
+
     @property
     def caption(self) -> str | None:
         """Caption of the table. Support get and set."""
@@ -571,6 +802,15 @@ def _apply_attr_spans(
     # slots that do not have a cell anchored to them,
     # then this is a table model error.
     return table
+
+
+def _coerce_revision(
+    item: CellRevision | tuple[int, int, str],
+) -> CellRevision:
+    if isinstance(item, CellRevision):
+        return item
+    row, column, value = item
+    return CellRevision(row, column, value)
 
 
 def _lstrip_increase(shadow: bytearray, pos: int) -> int:

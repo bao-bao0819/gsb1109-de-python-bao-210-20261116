@@ -1,6 +1,10 @@
 Unreleased
 ----------
-* 
+* Added ``Table.apply_revisions`` for applying several cell value revisions
+  in one pass. Revisions are resolved against the original table, report
+  overlapping coordinates that point to the same merged cell, accept
+  consistent duplicates, and report conflicting values without changing
+  that cell.
 
 v3.0.0 (2026-10-08)
 -------------------

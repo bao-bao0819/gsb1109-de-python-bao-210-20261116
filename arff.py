@@ -645,6 +645,200 @@ def _get_data_object_for_encoding(matrix):
 
 # =============================================================================
 
+# SPARSE CONVERSION UTILITIES =================================================
+def _is_missing_value(value):
+    '''(INTERNAL) Mirrors the missing-value rule used when encoding data:
+    ``None``, the empty string and NaN are all encoded as ``?``.'''
+    return value is None or value == '' or value != value
+
+
+def _implicit_sparse_value(attr_type):
+    '''(INTERNAL) Value an omitted sparse entry decodes to for a given
+    attribute type: the first category for nominal attributes, ``0`` for
+    numeric attributes and ``'0'`` for strings.'''
+    if isinstance(attr_type, (list, tuple)):
+        return attr_type[0]
+    if attr_type == 'STRING':
+        return '0'
+    return 0
+
+
+def _sparse_row_entries(attributes, row):
+    '''(INTERNAL) Explicit ``{column: value}`` entries of a dense row.
+
+    An entry may be omitted only if sparse decoding restores it exactly:
+    numeric zeros, string ``'0'``s and nominal first categories. Missing
+    values are always explicit, since an omitted entry never decodes to
+    missing.'''
+    if len(row) != len(attributes):
+        raise BadObject('Instance has %d attributes, expected %d' %
+                        (len(row), len(attributes)))
+    entries = {}
+    for col, (value, attr) in enumerate(zip(row, attributes)):
+        if _is_missing_value(value):
+            entries[col] = None
+        elif value != _implicit_sparse_value(attr[1]):
+            entries[col] = value
+    return entries
+
+
+def dense_to_sparse(obj):
+    '''Convert an ARFF object with dense data into one whose data is in
+    list-of-dicts (LOD) sparse form.
+
+    Entries are omitted exactly when sparse decoding would restore them:
+    numeric zeros, string ``'0'``s and nominal values equal to the first
+    declared category. Missing values are always written explicitly as
+    ``?``, since an omitted entry decodes to zero / the first category,
+    never to missing. The result round-trips: dumping it and loading it
+    back as ``DENSE`` yields the original data.
+
+    :param obj: a dictionary with ``attributes`` and dense ``data``.
+    :return: a new dictionary whose ``data`` is a list of dicts.
+    '''
+    attributes = obj['attributes']
+    new_obj = dict(obj)
+    new_obj['data'] = [_sparse_row_entries(attributes, row)
+                       for row in obj['data']]
+    return new_obj
+
+
+def resparsify_rows(attributes, rows, new_attributes):
+    '''Re-derive sparse rows after reordering nominal categories.
+
+    Checks every row against the new category order: entries that were
+    omitted because they equalled the old first category must be written
+    explicitly if they no longer match the new first category, and
+    explicit entries that now match the new first category can be
+    omitted. Missing values stay explicit in both directions.
+
+    :param attributes: the current attribute declarations.
+    :param rows: sparse data (a list of dicts) encoded against
+        ``attributes``.
+    :param new_attributes: the same attributes with nominal category
+        lists reordered (same categories, possibly a different first
+        category); non-nominal types must be unchanged.
+    :return: ``(new_rows, report)`` where ``report[i]`` is a dict with
+        ``'added'`` (columns originally omitted that must now be written)
+        and ``'removed'`` (columns originally explicit that may now be
+        omitted).
+    '''
+    if len(attributes) != len(new_attributes):
+        raise BadObject('Expected %d attributes, got %d.' %
+                        (len(attributes), len(new_attributes)))
+    for (name, type_), (new_name, new_type) in zip(attributes,
+                                                   new_attributes):
+        if name != new_name:
+            raise BadObject('Attribute "%s" was renamed to "%s".' %
+                            (name, new_name))
+        if isinstance(type_, (list, tuple)):
+            if not isinstance(new_type, (list, tuple)) or \
+                    sorted(type_) != sorted(new_type):
+                raise BadObject('Categories of attribute "%s" may only be '
+                                'reordered, not changed.' % name)
+        elif new_type != type_:
+            raise BadObject('Type of attribute "%s" may not change.' % name)
+
+    new_rows = []
+    report = []
+    for row in rows:
+        new_row = {}
+        added = []
+        removed = []
+        for col, (attr, new_attr) in enumerate(zip(attributes,
+                                                   new_attributes)):
+            if col in row:
+                value = row[col]
+                was_explicit = True
+            else:
+                value = _implicit_sparse_value(attr[1])
+                was_explicit = False
+            if _is_missing_value(value):
+                keep = True
+                value = None
+            else:
+                keep = value != _implicit_sparse_value(new_attr[1])
+            if keep:
+                new_row[col] = value
+                if not was_explicit:
+                    added.append(col)
+            elif was_explicit:
+                removed.append(col)
+        new_rows.append(new_row)
+        report.append({'added': added, 'removed': removed})
+    return new_rows, report
+
+
+def plan_sparse_budget(attributes, data, budget=None):
+    '''Choose the first category of each nominal attribute so that the
+    sparse encoding of ``data`` needs as few explicit entries as possible.
+
+    Since attributes are independent, the optimum puts the most frequent
+    non-missing category of each nominal attribute first. Missing values
+    always require an explicit entry and are never treated as zero to
+    save space; numeric zeros, string ``'0'``s and the chosen first
+    categories are omitted.
+
+    :param attributes: attribute declarations.
+    :param data: dense data (a list of rows).
+    :param budget: optional maximum number of explicit entries allowed.
+    :return: a dict with keys:
+
+        - ``'attributes'``: declarations with nominal categories
+          reordered so the chosen first category comes first;
+        - ``'first_categories'``: chosen first category per nominal
+          attribute name;
+        - ``'required_entries'``: the minimum achievable number of
+          explicit entries (reported whether or not it fits the budget);
+        - ``'feasible'``: True if no budget was given or the minimum fits.
+    '''
+    new_attributes = []
+    first_categories = {}
+    total = 0
+    for col, (name, type_) in enumerate(attributes):
+        present = []
+        missing = 0
+        for row in data:
+            if len(row) != len(attributes):
+                raise BadObject('Instance has %d attributes, expected %d' %
+                                (len(row), len(attributes)))
+            value = row[col]
+            if _is_missing_value(value):
+                missing += 1
+            else:
+                present.append(value)
+
+        if isinstance(type_, (list, tuple)):
+            counts = {}
+            for value in present:
+                if value not in type_:
+                    raise BadNominalValue(value)
+                counts[value] = counts.get(value, 0) + 1
+            best, best_count = type_[0], -1
+            for category in type_:
+                if counts.get(category, 0) > best_count:
+                    best, best_count = category, counts.get(category, 0)
+            total += missing + len(present) - max(best_count, 0)
+            first_categories[name] = best
+            new_attributes.append(
+                (name, [best] + [c for c in type_ if c != best]))
+        else:
+            implicit = _implicit_sparse_value(type_)
+            total += missing + sum(1 for v in present if v != implicit)
+            new_attributes.append((name, type_))
+
+    plan = {
+        'attributes': new_attributes,
+        'first_categories': first_categories,
+        'required_entries': total,
+        'feasible': budget is None or total <= budget,
+    }
+    if budget is not None:
+        plan['budget'] = budget
+    return plan
+
+# =============================================================================
+
 # ADVANCED INTERFACE ==========================================================
 class ArffDecoder:
     '''An ARFF decoder.'''

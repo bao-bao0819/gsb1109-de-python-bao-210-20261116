@@ -6,6 +6,11 @@ LIAC-ARFF 2.5
 
 This is the last release supporting Python 2.
 
+* new: ``arff.merge_partitions`` (also available in the ``arff_merge``
+  module) aligns ARFF partitions by field name, expands sparse rows using
+  each partition's own declarations, remaps nominal values by label, records
+  the source column of every output value, and reports incompatible
+  same-name types as conflicts instead of padding a missing column.
 * maintenance: drop support for Python 3.3 and 3.4, add support for Python 3.8
 * maintenance: improve compatibility with the upcoming Python 3.10
 * maintenance: automatically build the documentation.

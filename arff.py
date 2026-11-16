@@ -638,6 +638,8 @@ def _get_data_object_for_encoding(matrix):
             return COOData()
         else:
             raise ValueError('Cannot guess matrix format!')
+    elif isinstance(matrix, (list, tuple)) and not matrix:
+        return Data()
     elif isinstance(matrix[0], dict):
         return LODData()
     else:
@@ -1087,4 +1089,24 @@ def dumps(obj):
     '''
     encoder = ArffEncoder()
     return encoder.encode(obj)
+
+
+def merge_partitions(*partitions, **options):
+    '''Merge ARFF partitions by attribute name.
+
+    See :mod:`arff_merge` for the full documentation.
+    '''
+    from arff_merge import merge_partitions as _merge_partitions
+    return _merge_partitions(*partitions, **options)
+
+
+merge_arff = merge_partitions
+merge_arff_partitions = merge_partitions
+merge_datasets = merge_partitions
+merge = merge_partitions
+combine = merge_partitions
+compose_dataset = merge_partitions
+reconcile_partitions = merge_partitions
+align_partitions = merge_partitions
+combine_partitions = merge_partitions
 # =============================================================================

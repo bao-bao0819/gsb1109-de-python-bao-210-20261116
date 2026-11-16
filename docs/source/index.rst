@@ -490,3 +490,65 @@ loading to preallocate an array and do any data conversion on the fly::
     array([(0, 85., 85.,  True,  True), (0, 80., 90., False,  True)],
           dtype=[('outlook', '<i8'), ('temperature', '<f8'),
                  ('humidity', '<f8'), ('windy', '?'), ('play', '?')])
+
+.. _merging:
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+Merging ARFF partitions
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``arff.merge_partitions`` (also importable as ``arff_merge``) combines
+partitions that declare their attributes in different orders.  Attributes are
+matched by name, and sparse rows are expanded using the declarations of the
+partition they belong to before being mapped to the merged schema::
+
+    left = '''@RELATION left
+    @ATTRIBUTE id INTEGER
+    @ATTRIBUTE color {red, green, blue}
+    @DATA
+    1,blue
+    {0 2}
+    '''
+
+    right = '''@RELATION right
+    @ATTRIBUTE color {blue, red, green}
+    @ATTRIBUTE id INTEGER
+    @DATA
+    green,3
+    '''
+
+    merged = arff.merge_partitions(left, right,
+                                   relation='combined')
+
+The nominal domain is unified by label, so ``blue`` and ``green`` keep their
+meaning even though the two partitions order their labels differently.  The
+result includes a ``provenance`` matrix whose entries are
+``SourceRef(partition, column)`` tuples, giving the source of every output
+value::
+
+    >>> merged['data']
+    [[1, 'blue'], [2, 'red'], [3, 'green']]
+    >>> merged['provenance'][0]
+    [SourceRef(partition=0, column=0), SourceRef(partition=0, column=1)]
+
+Pass a field contract to fix the output order and types::
+
+    merged = arff.merge_partitions(
+        left, right,
+        contract=[('color', ['red', 'green', 'blue']), ('id', 'INTEGER')])
+
+A field whose sources share a name but have types that cannot be reconciled
+losslessly is reported in ``merged['conflicts']``.  It is left out of
+``merged['attributes']`` and ``merged['data']`` rather than being emitted as
+a column of missing values; ``merged['conflict_columns']`` lists the original
+columns.  Set ``on_conflict='raise'`` to turn conflicts into a
+``TypeConflictError``.  Merged objects can be written with ``arff.dumps``:
+
+.. code:: python
+
+    print(arff.dumps(merged))
+
+The module also provides a command-line interface::
+
+    python -m arff_merge left.arff right.arff -o merged.arff \
+        --conflicts conflicts.json --provenance provenance.json

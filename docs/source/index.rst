@@ -43,6 +43,22 @@ Basic Usage
 .. autofunction:: arff.dumps
 
 
+--------------
+Row Filtering
+--------------
+
+.. automodule:: arff_filter
+.. autofunction:: arff_filter.parse_expression
+.. autofunction:: arff_filter.condition
+.. autofunction:: arff_filter.partition
+.. autoclass:: arff_filter.Expression
+   :members:
+.. autoclass:: arff_filter.FilterState
+   :members:
+.. autoclass:: arff_filter.FilterResult
+   :members:
+
+
 ---------------------
 Encoders and Decoders
 ---------------------

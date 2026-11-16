@@ -2,6 +2,19 @@
 What's New in LIAC-ARFF
 ~~~~~~~~~~~~~~~~~~~~~~~
 
+LIAC-ARFF (unreleased)
+
+* new: ``arff_filter`` module evaluates ``and``/``or``/``not`` field
+  conditions with three-valued logic, partitioning rows into keep, exclude
+  and unknown; each unknown verdict reports the missing fields it depends on
+* new: sparse rows honour the declared defaults for omitted indices
+  (numeric zero, first nominal category, ``'0'`` for strings) while an
+  explicit ``?`` stays missing and a quoted ``"?"`` is an ordinary value
+* new: incremental re-judgement that only re-evaluates unknown rows whose
+  reported dependencies touch a refilled column
+* fix: quote values consisting of ``?`` so that a nominal ``"?"`` category
+  and a string value ``?`` survive an encode/decode round-trip
+
 LIAC-ARFF 2.5
 
 This is the last release supporting Python 2.

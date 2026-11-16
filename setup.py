@@ -55,7 +55,7 @@ setup(
         'Topic :: Scientific/Engineering :: Artificial Intelligence',
     ],
     keywords='arff weka parser liac python',
-    py_modules=['arff'],
+    py_modules=['arff', 'arff_filter'],
     package_data={'': ['README.rst', 'CHANGES.rst', 'LICENSE']},
     data_files=[('LICENSE')],
     test_suite='tests',

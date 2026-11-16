@@ -132,6 +132,46 @@ You can write an ARFF file with this structure::
     %
 
 
+-------------
+Row Filtering
+-------------
+
+The ``arff_filter`` module filters rows before they enter a data warehouse.
+Conditions on fields are combined with ``and``, ``or`` and ``not`` and
+evaluated with three-valued logic, so an explicit missing value (``?``)
+produces an ``unknown`` verdict instead of being silently treated as
+``False``.  Every unknown verdict carries the field names it depends on::
+
+    >>> import arff
+    >>> import arff_filter
+    >>> obj = arff.load(open('weather.arff'))
+    >>> expr = arff_filter.parse_expression(
+    ...     'temperature > 70 and (outlook = sunny or humidity < 90)',
+    ...     obj['attributes'])
+    >>> result = arff_filter.partition(expr, obj['data'])
+    >>> result.keep_indices, result.exclude_indices
+    ([...], [...])
+    >>> result.unknown_indices
+    [3]
+    >>> result.dependencies[3]
+    ['humidity']
+
+Sparse semantics follow the attribute declarations: an omitted index is not
+missing, it takes the declared default (numeric zero, the first nominal
+category or the string ``'0'``); an explicit ``?`` remains missing; and a
+quoted ``"?"`` is an ordinary category/value.
+
+After a missing column is supplied, only the unknown rows whose dependencies
+touch the refilled fields are re-judged; definite verdicts never change::
+
+    >>> state = arff_filter.FilterState(expr, obj['data'])
+    >>> state.run()
+    >>> obj['data'][3][2] = 85.0          # humidity filled
+    >>> state.reclassify(['humidity'])
+
+A command line entry point is available as ``python -m arff_filter``.
+
+
 Contributors
 ------------
 

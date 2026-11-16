@@ -33,6 +33,8 @@ Features
 - Supports read and write the descriptions of files;
 - Supports missing values and names with spaces;
 - Supports unicode values and names;
+- Supports resumable sharded ingestion where late shards may extend nominal
+  declarations;
 - Fully compatible with Python 3.6+;
 - Under `MIT License <http://opensource.org/licenses/MIT>`_
 

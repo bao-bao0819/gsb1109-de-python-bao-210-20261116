@@ -2,6 +2,13 @@
 What's New in LIAC-ARFF
 ~~~~~~~~~~~~~~~~~~~~~~~
 
+Unreleased
+
+* enhancement: resumable sharded ingestion with ``ArffShardAccumulator`` and
+  ``load_shards``. Accepted rows and pending nominal categories are tracked
+  separately, incomplete datasets cannot be published, and rows are decoded
+  against the final declaration so late categories match a full import.
+
 LIAC-ARFF 2.5
 
 This is the last release supporting Python 2.

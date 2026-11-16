@@ -54,6 +54,46 @@ Encoders and Decoders
    :members:
 
 
+-----------------
+Sharded Ingestion
+-----------------
+
+When an ARFF document arrives in shards, the last shard may introduce nominal
+values that were not in the declaration written by earlier shards. Loading the
+shards one by one would freeze that early declaration and reject the late
+values. :class:`arff.ArffShardAccumulator` instead stages accepted rows and
+tracks the still-pending nominal domain separately.
+
+.. autoclass:: arff.ArffShardAccumulator
+   :members:
+
+.. autofunction:: arff.load_shards
+
+Shards are accepted atomically, and an accepted shard id can be replayed safely
+after a crash. Use :meth:`arff.ArffShardAccumulator.checkpoint` to persist a
+resumable state; a checkpoint is JSON, not ARFF, and records whether the
+dataset is still partial.
+
+Publishing is refused unless every expected shard was accepted (or an
+open-ended accumulator was sealed) and no nominal category is still pending.
+An early publication therefore cannot emit a half declaration, and once the
+final shard declares the complete domain, every row is decoded against that
+final declaration, matching a single full import::
+
+    >>> import arff
+    >>> acc = arff.ArffShardAccumulator(expected_shards=2)
+    >>> acc.add_shard(first_page, shard_id='page-1')
+    >>> acc.pending_nominals
+    {'label': ['gamma']}
+    >>> acc.publish()
+    Traceback (most recent call last):
+    ...
+    arff.IncompleteShards: Cannot publish an incomplete dataset: accepted 1 of 2 shards, at line -1.
+    >>> acc.add_shard(last_page, shard_id='page-2')
+    >>> acc.publish()
+    {...}
+
+
 ----------
 Exceptions
 ----------
@@ -80,6 +120,15 @@ Exceptions
    :members:
 
 .. autoexception:: arff.BadObject
+   :members:
+
+.. autoexception:: arff.IncompleteShards
+   :members:
+
+.. autoexception:: arff.IncompleteNominalDomain
+   :members:
+
+.. autoexception:: arff.ShardConflict
    :members:
 
 

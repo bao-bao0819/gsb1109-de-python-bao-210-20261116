@@ -150,6 +150,11 @@ __version__ = '2.4.0'
 import re
 import sys
 import csv
+import os
+import json
+import copy
+import hashlib
+import tempfile
 from typing import Optional
 
 # CONSTANTS ===================================================================
@@ -393,6 +398,48 @@ class BadObject(ArffException):
 
     def __str__(self):
         return '%s' % self.msg
+
+
+class IncompleteShards(ArffException):
+    '''Error raised when a sharded dataset is published before every shard has
+    been accepted.'''
+    def __init__(self, accepted, expected):
+        super().__init__()
+        self.accepted = accepted
+        self.expected = expected
+        if expected is None:
+            self.message = (
+                'Cannot publish an incomplete dataset: the shard sequence is '
+                'not sealed (accepted %d shards), at line %%d.' % accepted
+            )
+        else:
+            self.message = (
+                'Cannot publish an incomplete dataset: accepted %d of %d '
+                'shards, at line %%d.' % (accepted, expected)
+            )
+
+
+class IncompleteNominalDomain(ArffException):
+    '''Error raised when accepted data uses categories that no declaration has
+    covered yet.'''
+    def __init__(self, pending):
+        super().__init__()
+        self.pending = {name: list(values)
+                        for name, values in pending.items()}
+        details = ', '.join('%s=%r' % (name, values)
+                            for name, values in sorted(self.pending.items()))
+        self.message = (
+            'Cannot publish an incomplete dataset: nominal domain is missing '
+            '%s, at line %%d.' % details.replace('%', '%%')
+        )
+
+
+class ShardConflict(ArffException):
+    '''Error raised when a shard disagrees with the declared schema or with a
+    previously accepted shard.'''
+    def __init__(self, msg):
+        super().__init__()
+        self.message = msg.replace('%', '%%') + ' at line %d.'
 
 # =============================================================================
 
@@ -1021,6 +1068,720 @@ class ArffEncoder:
             yield from data.encode_data(obj.get('data'), attributes)
 
         yield ''
+
+# =============================================================================
+
+# SHARDED INGESTION ==========================================================
+_SHARD_STATE_FORMAT = 'liac-arff-shard-state'
+_SHARD_STATE_VERSION = 1
+
+
+class _TrackingNominalConversor:
+    '''A nominal conversor that accepts values outside the current declaration
+    and records them instead of raising `BadNominalValue`.
+
+    It mirrors `NominalConversor` for all declared values and for the implicit
+    first value used by sparse rows, so validating a shard through the regular
+    decoding machinery produces the same errors for everything else.
+    '''
+
+    def __init__(self, values, unknown):
+        self.values = set(values)
+        self.zero_value = values[0]
+        self.unknown = unknown
+
+    def __call__(self, value):
+        if value == 0:
+            return self.zero_value
+        value = str(value)
+        if value not in self.values:
+            self.unknown.append(value)
+        return value
+
+
+def _conversor_for_type(type_, encode_nominal=False):
+    if isinstance(type_, list):
+        if encode_nominal:
+            return EncodedNominalConversor(type_)
+        return NominalConversor(type_)
+    return {
+        'STRING': str,
+        'INTEGER': lambda x: int(float(x)),
+        'NUMERIC': float,
+        'REAL': float,
+    }[type_]
+
+
+def _normalize_attributes(attributes):
+    '''Validate and normalize an attribute declaration.
+
+    Returns a list of ``(name, type)`` tuples where simple types are upper
+    cased and nominal types are lists.
+    '''
+    if not attributes:
+        raise BadObject('Attributes not found.')
+
+    if isinstance(attributes, dict):
+        attributes = list(attributes.items())
+
+    result = []
+    names = set()
+    for attr in attributes:
+        if not isinstance(attr, (tuple, list)) or len(attr) != 2:
+            raise BadObject('Invalid attribute declaration "%s"' % str(attr))
+        name, type_ = attr
+
+        if not isinstance(name, str):
+            raise BadObject('Invalid attribute declaration "%s"' % str(attr))
+        if name in names:
+            raise BadObject('Trying to use attribute name "%s" for the '
+                            'second time.' % name)
+        names.add(name)
+
+        if isinstance(type_, str):
+            type_ = type_.upper()
+            if type_ not in _SIMPLE_TYPES:
+                raise BadObject('Invalid attribute type "%s"' % str(attr))
+        elif isinstance(type_, (tuple, list)):
+            values = [str(value) for value in type_]
+            if not values:
+                raise BadObject('Invalid attribute type "%s"' % str(attr))
+            type_ = values
+        else:
+            raise BadObject('Invalid attribute type "%s"' % str(attr))
+
+        result.append((name, type_))
+
+    return result
+
+
+def _merge_attribute_declarations(current, declared):
+    '''Merge a shard's attribute declaration into the accepted declaration.
+
+    Attribute names, order and non-nominal types are fixed. A nominal domain
+    may only grow; when it does, the shard's order is adopted so that the final
+    interpretation matches a full import using that declaration.
+    '''
+    if len(current) != len(declared):
+        raise ShardConflict('Shard declares %d attributes, expected %d' %
+                            (len(declared), len(current)))
+
+    merged = []
+    for (cur_name, cur_type), (new_name, new_type) in zip(current, declared):
+        if cur_name != new_name:
+            raise ShardConflict('Shard declares attribute %r, expected %r' %
+                                (new_name, cur_name))
+
+        if isinstance(cur_type, list):
+            if not isinstance(new_type, list):
+                raise ShardConflict('Attribute %r changed from nominal to %s' %
+                                    (cur_name, new_type))
+            missing = [value for value in cur_type if value not in new_type]
+            if missing:
+                raise ShardConflict(
+                    'Declaration for attribute %r no longer contains %r' %
+                    (cur_name, missing[0]))
+            merged.append((cur_name, list(new_type)))
+        else:
+            if new_type != cur_type:
+                raise ShardConflict('Attribute %r changed type from %s to %s' %
+                                    (cur_name, cur_type, new_type))
+            merged.append((cur_name, cur_type))
+
+    return merged
+
+
+class ArffShardAccumulator:
+    '''Incrementally accept ARFF shards and publish one coherent dataset.
+
+    Shards are accepted atomically: a shard that fails to parse or validate
+    leaves the accumulator unchanged. Nominal domains may grow as later shards
+    arrive; a category present in accepted data but not present in any
+    declaration is kept in ``pending_nominals``. Pending categories are data
+    that has been received, not part of the published declaration. Data rows
+    are retained verbatim and are decoded only against the final declaration,
+    so their nominal interpretation is identical to importing the concatenated
+    document in one pass.
+
+    Publication requires both a known end and a complete category domain:
+    either ``expected_shards`` is reached or an open-ended accumulator is
+    explicitly sealed, and no category remains pending. A pending category can
+    be resolved by a later shard header or by :meth:`declare_attributes`. An
+    incomplete accumulator can be checkpointed and resumed, but :meth:`publish`
+    refuses to write a partial dataset or a half declaration.
+
+    :param relation: optional relation name; a first shard may also supply it.
+    :param attributes: optional attribute declaration, allowing header-less
+        shards from the start.
+    :param description: optional dataset description.
+    :param expected_shards: number of shards that make the dataset complete,
+        or ``None`` for an open-ended accumulator that must be sealed.
+    '''
+
+    def __init__(self, relation=None, attributes=None, description=None,
+                 expected_shards=None):
+        if expected_shards is not None:
+            if (not isinstance(expected_shards, int) or
+                    isinstance(expected_shards, bool) or expected_shards < 1):
+                raise ValueError('expected_shards must be a positive integer '
+                                 'or None.')
+
+        self._relation = None if relation is None else str(relation)
+        self._attributes = (None if attributes is None
+                            else _normalize_attributes(attributes))
+        self._description = '' if description is None else str(description)
+        self._description_locked = description is not None
+
+        self._data_lines = []
+        self._pending_nominals = {}
+        self._accepted_shards = []
+        self._expected_shards = expected_shards
+        self._sealed = False
+
+    @property
+    def relation(self):
+        return self._relation
+
+    @property
+    def attributes(self):
+        '''The accepted (fixed) declaration, without pending categories.'''
+        if self._attributes is None:
+            return None
+        return copy.deepcopy(self._attributes)
+
+    @property
+    def pending_nominals(self):
+        '''Categories seen in accepted data but not yet declared.'''
+        return copy.deepcopy(self._pending_nominals)
+
+    @property
+    def accepted_shards(self):
+        return copy.deepcopy(self._accepted_shards)
+
+    @property
+    def accepted_rows(self):
+        return len(self._data_lines)
+
+    @property
+    def sealed(self):
+        return self._sealed
+
+    @property
+    def complete(self):
+        '''Whether the dataset may be published.
+
+        This requires every expected shard to be accepted (or an open-ended
+        accumulator to be sealed) *and* no category to remain pending.
+        '''
+        if self._expected_shards is not None:
+            if len(self._accepted_shards) != self._expected_shards:
+                return False
+        elif not (self._sealed and self._accepted_shards):
+            return False
+        return not self._pending_nominals
+
+    def seal(self):
+        '''Declare that no further shards will be supplied.
+
+        For an accumulator with ``expected_shards`` this only marks the end of
+        input; it still remains incomplete if fewer shards were accepted.
+        '''
+        self._sealed = True
+        return self.complete
+
+    def declare_attributes(self, attributes):
+        '''Complete the fixed declaration with categories still pending.
+
+        This is the explicit fill-in step for an open-ended stream whose last
+        shard introduced categories but had no header. The supplied declaration
+        must keep every existing attribute and may only grow nominal domains.
+        It is applied atomically.
+        '''
+        if self._attributes is None:
+            raise BadLayout('No attribute declaration found in shard')
+
+        declared = _normalize_attributes(attributes)
+        merged = _merge_attribute_declarations(self._attributes, declared)
+
+        pending = copy.deepcopy(self._pending_nominals)
+        for name, type_ in merged:
+            if isinstance(type_, list):
+                remaining = [value for value in pending.get(name, [])
+                             if value not in type_]
+                if remaining:
+                    pending[name] = remaining
+                else:
+                    pending.pop(name, None)
+
+        if pending:
+            raise IncompleteNominalDomain(pending)
+
+        self._attributes = merged
+        self._pending_nominals = pending
+        return self.attributes
+
+    def state(self):
+        '''Return a JSON-serializable snapshot of the accumulator.
+
+        ``data`` contains only rows that were fully accepted. Categories that
+        are not part of ``attributes`` yet are kept separately in
+        ``pending_nominals``; nothing in this snapshot is a publishable ARFF
+        partition while ``complete`` is false.
+        '''
+        next_row = 0
+        shards = []
+        for shard in self._accepted_shards:
+            record = copy.deepcopy(shard)
+            record['first_row'] = next_row
+            next_row += record['rows']
+            shards.append(record)
+
+        return {
+            'format': _SHARD_STATE_FORMAT,
+            'version': _SHARD_STATE_VERSION,
+            'status': 'complete' if self.complete else 'partial',
+            'relation': self._relation,
+            'description': self._description,
+            'attributes': copy.deepcopy(self._attributes),
+            'pending_nominals': copy.deepcopy(self._pending_nominals),
+            'data': list(self._data_lines),
+            'accepted_shards': shards,
+            'expected_shards': self._expected_shards,
+            'sealed': self._sealed,
+            'complete': self.complete,
+        }
+
+    def checkpoint(self, fp):
+        '''Write a resumable JSON checkpoint to a path or file-like object.
+
+        A checkpoint is deliberately not an ARFF document. Writing it to a
+        path is atomic, so an interrupted write cannot replace a previous
+        valid checkpoint.
+        '''
+        text = json.dumps(self.state(), ensure_ascii=False, indent=2) + '\n'
+        if hasattr(fp, 'write'):
+            fp.write(text)
+        else:
+            _atomic_write(fp, text)
+
+    @classmethod
+    def from_state(cls, state):
+        '''Restore an accumulator from :meth:`state` output.'''
+        if not isinstance(state, dict):
+            raise ValueError('Shard state must be a mapping.')
+        if state.get('format') != _SHARD_STATE_FORMAT:
+            raise ValueError('Not a liac-arff shard state document.')
+        if state.get('version') != _SHARD_STATE_VERSION:
+            raise ValueError('Unsupported shard state version: %r' %
+                             (state.get('version'),))
+
+        expected_shards = state.get('expected_shards')
+        if expected_shards is not None and (
+                not isinstance(expected_shards, int) or
+                isinstance(expected_shards, bool) or expected_shards < 1):
+            raise ValueError('Invalid expected_shards in shard state.')
+
+        relation = state.get('relation')
+        if relation is not None and not isinstance(relation, str):
+            raise ValueError('Invalid relation in shard state.')
+        attributes = state.get('attributes')
+        if attributes is not None and not isinstance(attributes, list):
+            raise ValueError('Invalid attributes in shard state.')
+
+        accumulator = cls(
+            relation=relation,
+            attributes=attributes,
+            description=state.get('description', ''),
+            expected_shards=expected_shards,
+        )
+        pending = state.get('pending_nominals', {})
+        if not isinstance(pending, dict):
+            raise ValueError('pending_nominals must be a mapping.')
+        accumulator._pending_nominals = {
+            str(name): [str(value) for value in values]
+            for name, values in pending.items()
+        }
+
+        data = state.get('data', [])
+        if not isinstance(data, list):
+            raise ValueError('data must be a list.')
+        accumulator._data_lines = [str(line) for line in data]
+
+        shards = state.get('accepted_shards', [])
+        if not isinstance(shards, list):
+            raise ValueError('accepted_shards must be a list.')
+        accumulator._accepted_shards = []
+        for shard in shards:
+            if (not isinstance(shard, dict) or 'id' not in shard or
+                    not isinstance(shard.get('rows'), int) or
+                    shard['rows'] < 0):
+                raise ValueError('Invalid accepted shard record.')
+            record = {
+                'id': shard['id'],
+                'digest': shard.get('digest', ''),
+                'rows': shard['rows'],
+            }
+            accumulator._accepted_shards.append(record)
+
+        if expected_shards is not None and (
+                len(accumulator._accepted_shards) > expected_shards):
+            raise ValueError('Shard state has more accepted shards than '
+                             'expected.')
+        if sum(record['rows'] for record in accumulator._accepted_shards) != \
+                len(accumulator._data_lines):
+            raise ValueError('Shard state row counts do not match its data.')
+
+        accumulator._sealed = bool(state.get('sealed', False))
+        return accumulator
+
+    @classmethod
+    def from_checkpoint(cls, fp):
+        '''Read a checkpoint written by :meth:`checkpoint`.'''
+        if hasattr(fp, 'read'):
+            state = json.load(fp)
+        else:
+            with open(fp, 'r', encoding='utf-8') as stream:
+                state = json.load(stream)
+        return cls.from_state(state)
+
+    def add_shard(self, shard, shard_id=None):
+        '''Parse, validate and accept one shard.
+
+        The operation is atomic: on any error the accumulator is unchanged. A
+        shard header may repeat the fixed declaration and extend nominal
+        domains. A shard without a header is interpreted with the accepted
+        declaration.
+
+        Re-supplying an already accepted ``shard_id`` with identical content is
+        a no-op, which makes replay after a crash safe. The same id with
+        different content is rejected.
+
+        :return: ``True`` if the shard was newly accepted, ``False`` for an
+            idempotent replay.
+        '''
+        text = _read_shard_text(shard)
+        digest = _shard_digest(text)
+
+        if shard_id is not None:
+            for record in self._accepted_shards:
+                if record['id'] == shard_id:
+                    if record.get('digest') == digest:
+                        return False
+                    raise ShardConflict(
+                        'Shard %r was already accepted with different content'
+                        % (shard_id,))
+        else:
+            shard_id = self._next_shard_id()
+
+        if (self._expected_shards is not None and
+                len(self._accepted_shards) >= self._expected_shards):
+            raise ShardConflict('All %d expected shards were already accepted'
+                                % self._expected_shards)
+        if self._sealed:
+            raise ShardConflict('Shard sequence is already sealed')
+
+        parsed = _parse_shard(text)
+
+        relation = self._relation
+        if parsed['relation'] is not None:
+            if relation is not None and relation != parsed['relation']:
+                raise ShardConflict('Shard relation %r differs from %r' %
+                                    (parsed['relation'], relation))
+            relation = parsed['relation']
+        if relation is None:
+            raise BadLayout('No relation declaration found in shard')
+
+        if parsed['attributes'] is not None:
+            declared = _normalize_attributes(parsed['attributes'])
+            if self._attributes is None:
+                attributes = declared
+            else:
+                attributes = _merge_attribute_declarations(self._attributes,
+                                                           declared)
+        else:
+            if self._attributes is None:
+                raise BadLayout('No attribute declaration found in shard')
+            attributes = copy.deepcopy(self._attributes)
+
+        pending = copy.deepcopy(self._pending_nominals)
+        for name, type_ in attributes:
+            if isinstance(type_, list):
+                remaining = [value for value in pending.get(name, [])
+                             if value not in type_]
+                if remaining:
+                    pending[name] = remaining
+                else:
+                    pending.pop(name, None)
+
+        unknown = {}
+        conversors = []
+        for name, type_ in attributes:
+            if isinstance(type_, list):
+                bucket = unknown.setdefault(name, [])
+                conversors.append(_TrackingNominalConversor(type_, bucket))
+            else:
+                conversors.append(_conversor_for_type(type_))
+
+        decoder = DenseGeneratorData()
+        for line, offset in zip(parsed['data'], parsed['data_offsets']):
+            try:
+                list(decoder.decode_rows([line], conversors))
+            except ArffException as exc:
+                if exc.line in (-1, None):
+                    exc.line = offset
+                raise
+
+        for name, values in unknown.items():
+            if not values:
+                continue
+            bucket = pending.setdefault(name, [])
+            seen = set(bucket)
+            for value in values:
+                if value not in seen:
+                    bucket.append(value)
+                    seen.add(value)
+
+        if parsed['description'] is not None and not self._description_locked:
+            self._description = parsed['description']
+            self._description_locked = True
+        self._relation = relation
+        self._attributes = attributes
+        self._pending_nominals = pending
+        self._data_lines.extend(parsed['data'])
+        self._accepted_shards.append({
+            'id': shard_id,
+            'digest': digest,
+            'rows': len(parsed['data']),
+        })
+        return True
+
+    def _next_shard_id(self):
+        used = {record['id'] for record in self._accepted_shards}
+        candidate = len(self._accepted_shards)
+        while candidate in used:
+            candidate += 1
+        return candidate
+
+    def final_attributes(self):
+        '''Return the fully declared attributes.
+
+        Raises `IncompleteShards` until every shard is present and
+        `IncompleteNominalDomain` while categories remain pending, because a
+        declaration is not final before both conditions hold.
+        '''
+        self._require_complete()
+        return copy.deepcopy(self._attributes)
+
+    def finalize(self, encode_nominal=False, return_type=DENSE):
+        '''Return the dataset object once the dataset is complete.
+
+        The result is produced with the same decoder path and the same final
+        declaration as a single full import of the concatenated document.
+        '''
+        self._require_complete()
+        attributes = copy.deepcopy(self._attributes)
+
+        conversors = []
+        for _, type_ in attributes:
+            conversors.append(_conversor_for_type(
+                type_, encode_nominal=encode_nominal))
+
+        data = _get_data_object_for_decoding(return_type)
+        return {
+            'description': self._description,
+            'relation': self._relation,
+            'attributes': attributes,
+            'data': data.decode_rows(iter(self._data_lines), conversors),
+        }
+
+    def publish(self, fp=None):
+        '''Finalize and optionally write the complete ARFF document.
+
+        An incomplete accumulator raises `IncompleteShards` before anything is
+        written. A path is replaced atomically; a file-like object receives the
+        whole document only after it has been fully encoded.
+        '''
+        obj = self.finalize(encode_nominal=False, return_type=DENSE)
+        text = dumps(obj)
+
+        if fp is None:
+            return obj
+
+        if hasattr(fp, 'write'):
+            fp.write(text)
+        else:
+            _atomic_write(fp, text)
+        return obj
+
+    def _require_complete(self):
+        if self._expected_shards is not None:
+            if len(self._accepted_shards) != self._expected_shards:
+                raise IncompleteShards(len(self._accepted_shards),
+                                       self._expected_shards)
+        elif not (self._sealed and self._accepted_shards):
+            raise IncompleteShards(len(self._accepted_shards), None)
+        if self._pending_nominals:
+            raise IncompleteNominalDomain(self._pending_nominals)
+
+
+def _read_shard_text(shard):
+    if hasattr(shard, 'read'):
+        shard = shard.read()
+    if isinstance(shard, bytes):
+        shard = shard.decode('utf-8')
+    if not isinstance(shard, str):
+        raise TypeError('A shard must be a string, bytes or file-like object.')
+    return shard
+
+
+def _shard_digest(text):
+    return hashlib.sha256(text.encode('utf-8')).hexdigest()
+
+
+def _atomic_write(path, text):
+    path = os.fspath(path)
+    directory = os.path.dirname(os.path.abspath(path))
+    fd, tmp_path = tempfile.mkstemp(prefix='.arff-', dir=directory)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8', newline='') as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def _header_present(lines):
+    for row in lines:
+        u_row = row.strip(' \r\n').upper()
+        if (u_row.startswith(_TK_RELATION) or
+                u_row.startswith(_TK_ATTRIBUTE) or
+                u_row.startswith(_TK_DATA)):
+            return True
+    return False
+
+
+def _parse_shard(text):
+    '''Parse a shard into its header pieces and raw data lines.
+
+    A shard may be a full ARFF document or a header-less data fragment. It is
+    parsed independently rather than through `ArffDecoder` so that unknown
+    nominal values can be recorded rather than rejected; the data lines
+    themselves are retained verbatim for final decoding.
+    '''
+    text = text.strip('\r\n ')
+    lines = text.replace('\r\n', '\n').split('\n')
+    header = _header_present(lines)
+
+    description = None
+    relation = None
+    attributes = []
+    data = []
+    data_offsets = []
+    in_data = False
+    attribute_names = {}
+
+    for offset, raw_row in enumerate(lines, 1):
+        row = raw_row.strip(' \r\n')
+        if not row:
+            continue
+        u_row = row.upper()
+
+        if in_data:
+            if not row.startswith(_TK_COMMENT):
+                data.append(row)
+                data_offsets.append(offset)
+            continue
+
+        if header:
+            if u_row.startswith(_TK_DESCRIPTION):
+                if not attributes and relation is None:
+                    if description is None:
+                        description = ''
+                    description += '%s\n' % ArffDecoder()._decode_comment(row)
+            elif u_row.startswith(_TK_RELATION):
+                if relation is not None or attributes:
+                    raise BadLayout()
+                decoder = ArffDecoder()
+                try:
+                    relation = decoder._decode_relation(row)
+                except ArffException as exc:
+                    if exc.line in (-1, None):
+                        exc.line = offset
+                    raise
+            elif u_row.startswith(_TK_ATTRIBUTE):
+                if relation is None:
+                    raise BadLayout()
+                decoder = ArffDecoder()
+                try:
+                    attr = decoder._decode_attribute(row)
+                except ArffException as exc:
+                    if exc.line in (-1, None):
+                        exc.line = offset
+                    raise
+                if attr[0] in attribute_names:
+                    raise BadAttributeName(attr[0], attribute_names[attr[0]])
+                attribute_names[attr[0]] = offset
+                attributes.append(attr)
+            elif u_row.startswith(_TK_DATA):
+                if relation is None:
+                    raise BadLayout()
+                if not attributes:
+                    attributes = None
+                in_data = True
+            elif u_row.startswith(_TK_COMMENT):
+                continue
+            else:
+                raise BadLayout('Unrecognized shard header %r' % row)
+        else:
+            if u_row.startswith(_TK_DATA):
+                in_data = True
+            elif row.startswith(_TK_COMMENT):
+                continue
+            else:
+                data.append(row)
+                data_offsets.append(offset)
+
+    if header and not in_data:
+        raise BadLayout()
+    if not header:
+        # A header-less shard reuses the accepted declaration; its rows and
+        # their offsets were collected above.
+        attributes = None
+    elif attributes == []:
+        if relation is not None:
+            raise BadLayout('No attribute declaration found in shard')
+        # A bare '@DATA' marker reuses the accepted declaration.
+        attributes = None
+    if description is not None and description.endswith('\n'):
+        description = description[:-1]
+
+    return {
+        'description': description,
+        'relation': relation,
+        'attributes': attributes,
+        'data': data,
+        'data_offsets': data_offsets,
+    }
+
+
+def load_shards(shards, expected_shards=None, encode_nominal=False,
+                return_type=DENSE):
+    '''Convenience wrapper around :class:`ArffShardAccumulator`.
+
+    :param shards: an iterable of shard strings or file-like objects.
+    '''
+    accumulator = ArffShardAccumulator(expected_shards=expected_shards)
+    for index, shard in enumerate(shards):
+        accumulator.add_shard(shard, shard_id=index)
+    accumulator.seal()
+    return accumulator.finalize(encode_nominal=encode_nominal,
+                                return_type=return_type)
 
 # =============================================================================
 

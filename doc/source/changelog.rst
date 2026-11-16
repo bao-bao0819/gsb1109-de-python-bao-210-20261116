@@ -1,0 +1,332 @@
+.. currentmodule:: gffutils
+
+Change log
+==========
+
+
+v0.14
+-----
+
+- If a value contained a semicolon there would be unexpected behavior (reported
+  in `#212 <https://github.com/daler/gffutils/issues/212>`__). This is solved
+  by adding a new entry to the dialect, ``semicolon in quotes```, and running
+  the necessary regular expression only when inferring dialect, or, if
+  ``semicolon in quotes`` is ``True``, on every feature. In the latter case,
+  this can dramatically increase the parsing time, since in Python regular
+  expressions are relatively slow, but it does correctly parse. Thanks to
+  @DevangThakkar for the fix.
+- While working on that, refactored the attributes parsing to make it clearer
+  to follow along, and added more tests. The refactoring fixed some subtle bugs
+  on corner cases:
+  - Previously, for features with repeated keys, the ``order`` key of dialects
+    would list the repeated keys each time they appeared (i.e., the list had
+    duplicates) which could result in undetermined behavior. The ``order`` key
+    is now unique and only the first occurrence of a repeated key will be added
+    to the order.
+  - Previously, the ``ensembl_gtf.txt`` example file had a leading *space* in
+    front of the attributes. This looks to be an error in the creation of the
+    example file in the first place, but had previously parsed fine. Now the
+    parser (correctly) mis-handles it. Since I'm unaware of any cases in the
+    wild that have a leading space, I actually consider the new parsing, which
+    complains about the space, to be more correct.
+  - Added tests to directly inspect the inferred dialects for the test cases.
+- Preserve GFF directives when ``create_db()`` imports from a file path,
+  matching the behavior for string-backed iterators and fixing
+  `#213 <https://github.com/daler/gffutils/issues/213>`__. This was due to
+  a different path through the code when using a `pathlib.Path` object. In
+  addition to this fix, `pathlib.Path` objects are now converted to `str`
+  throughout the code base with ``os.fspath`` where appropriate.
+- CI, testing, and docs infrastructure updates (miniforge instead of
+  mambaforge; GitHub Action version bumps; skip biopython test if it's not
+  installed (`#233 <https://github.com/daler/gffutils/issues/233>`__); reduce build errors for docs)
+- Fix `#224 <https://github.com/daler/gffutils/issues/224>`__, which was caused
+  by changes to the ``argh`` package used for the command-line tool.
+- Address  `#242 <https://github.com/daler/gffutils/issues/242>`__ (typo in docstring)
+- Migrate to using ``pyproject.toml`` for packaging. This changes how versions are calculated
+  and reported, and removes the need for ``setup.py``. Version is only ever
+  recorded in ``pyproject.toml``; ``version.py`` gets the installed version or
+  parses the TOML if not installed; ``setup.py`` just calls ``setup()`` with no
+  arguments since everything has been migrated to ``pyproject.toml``.
+
+
+v0.13
+-----
+
+- Document options for avoiding deadlocks when simultaneously reading/writing
+  to a db on disk (fixes `#227
+  <https://github.com/daler/gffutils/issues/227>`__).
+- Support later versions of BioPython (fixes `#228
+  <https://github.com/daler/gffutils/issues/228>`__).
+- Drop support for Python 3.7 and unused ``six`` dependency; support Python
+  3.11 and 3.12 (fixes `#223 <https://github.com/daler/gffutils/issues/223>`__)
+
+v0.12
+-----
+
+- Fix `#216 <https://github.com/daler/gffutils/issues/216>`_ (remove deprecated OptimizedUnicode text factory)
+- When interfeatures (like when creating introns) results in features with
+  multiple IDs, concatenate them (`#219
+  <https://github.com/daler/gffutils/pull/219>`_, thanks @Juke34)
+- Handle corner cases observed in GRCh38 annotations where a quoted comma in
+  the attributes causes the dialect inference to incorrectly conclude that
+  repeated keys are not present. See `PR #208 <https://github.com/daler/gffutils/pull/208>`_ for details.
+- Refactor tests to use pytest instead of the deprecated nosetests (`PR #201
+  <https://github.com/daler/gffutils/pull/201>`_, thanks @mr-c)
+- New method, `FeatureDB.create_splice_sites` (`PR #220 <https://github.com/daler/gffutils/pull/200>`_, thanks @Juke34)
+
+v0.11.1
+-------
+
+Bugfix: This fixes `#197 <https://github.com/daler/gffutils/issues/197>`_,
+where the :meth:`FeatureDB.interfeatures` function was not behaving correctly
+when computing inter-features crossing chromosomes and when overlapping
+features are provided. Behavior is still somewhat undefined for computing
+inter-features for multiple nested features, so the recommendation is still to
+merge features before providing them to this method.
+
+This also makes a minor maintenance change, replacing
+``sqlite3.OptimizedUnicode`` with ``str``. Since Python 3.3, the former has
+been an alias to the latter, but this alias will be removed in Python 3.12.
+Making the change now avoids a deprecation warning.
+
+v0.11
+-----
+
+This is largely a bugfix release, many thanks to contributors Rory Kirchner,
+Stefano Rivera, Daniel Lowengrub, Nolan Woods, Stefen Moeller,  and Husen Umer.
+
+- Avoid deadlocks in tests under Python 3.8 (`#155
+  <https://github.com/daler/gffutils/pull/155>`_, thanks Stefano Rivera)
+- Fix deprecation warning for invalid escape sequence (`#168
+  <https://github.com/daler/gffutils/pull/168>`_, Stefen Moeller, and `#165
+  <https://github.com/daler/gffutils/pull/165>`_, thanks Rory Kirchner)
+- Fix ResourceWarning about unclosed file (`#169
+  <https://github.com/daler/gffutils/pull/169>`_, thanks Daniel Lowengrub)
+- Allow database creation when there is an empty string in the transcript ID
+  (`#171 <https://github.com/daler/gffutils/pull/171>`_, thanks Nolan Woods)
+- Fix off-by-one error in ``FeatureDB.region()`` when ``completely_within
+  = False`` (`#162 <https://github.com/daler/gffutils/pull/162>`_, thanks Husen
+  Umer and also @Brunox13 for the detailed reporting in `#126
+  <https://github.com/daler/gffutils/issues/129>`_)
+- Migrated tests to GitHub Actions
+- Refactored the :mod:`iterators` module to make it a bit easier to understand
+  the code, and to pave the way for supporting FASTA sequences at the end of
+  GFF files (see `PR #179 <https://github.com/daler/gffutils/pull/179>`_)
+- Empty input now raises ``EmptyInputError`` rather than ``ValueError``, making
+  it easier to catch cases where one might expect empty input (addresses `#17
+  <https://github.com/daler/gffutils/issues/17>`_)
+- PEP8 formatting in code
+- New dialect detection method will weight more highly those features with more
+  attributes. This solves things like `#128
+  <https://github.com/daler/gffutils/issues/128/>`_ where some dialect
+  components are otherwise ambiguous.
+- Fix bug in :meth:`FeatureDB.children_bp`, `#157
+  <https://github.com/daler/gffutils/issues/157>`_, where the `ignore_strand`
+  argument is deprecated.
+- Add new :meth:`FeatureDB.seqids` to list the unique
+  seqids/chromosomes/contigs observed in the database, see `#166
+  <https://github.com/daler/gffutils/issues/166>`_.
+- Add regression tests for `#167
+  <https://github.com/daler/gffutils/issues/167>`_, `#164
+  <https://github.com/daler/gffutils/issues/164>`_
+- Add new argument for :meth:`FeatureDB.create_introns` and
+  :meth:`FeatureDB.interfeatures` to handle cases where introns are being
+  created from component exons and the numeric-like attributes (e.g.,
+  `exon_number`) should be numerically sorted rather than alphanumerical
+  sorted. This addresses `#174
+  <https://github.com/daler/gffutils/issues/174>`_.
+- Features with multiple values for their ID (e.g., `ID=gene1,gene2`) are no
+  longer permitted and a ValueError is raised with advice for addressing the
+  issue with a custom id spec. This addresses `#181
+  <https://github.com/daler/gffutils/issues/181>`_.
+
+v0.10.1
+-------
+
+- Fix issue with new merge routine (`#152
+  <https://github.com/daler/gffutils/issues/152>`_)
+
+v0.10
+-----
+
+- Support very large chromosomes (fixed issues `#94
+  <https://github.com/daler/gffutils/issues/94>`_ and `#112
+  <https://github.com/daler/gffutils/issues/112>`_)
+
+- Expand `~` to user's home directory for filenames
+  (issue `#105 <https://github.com/daler/gffutils/issues/105>`_).
+
+- When merging, make merging attributes optional (issue `#107
+  <https://github.com/daler/gffutils/issues/107>`_)
+
+- Use a proper context manager for open files, fixes `issue #110
+  <https://github.com/daler/gffutils/issues/110>`_.
+
+- Update code to reflect changes in later Python versions (`#121
+  <https://github.com/daler/gffutils/pull/121>`_ and  `#123
+  <https://github.com/daler/gffutils/pull/123>`_ thanks @abhishekkumaresan)
+
+- Dramatically improved merging routine -- many thanks to Nolan Wood
+  @innovate-invent (`#130 <https://github.com/daler/gffutils/pull/130>`_).
+
+- Previously, when merging the second feature's attributes were not
+  deep-copied, resulting in unintended changes to the underlying dict (`#133
+  <https://github.com/daler/gffutils/pull/133>`_, thanks Nolan Wood
+  @innovate-invent)
+
+- Fixed an issue that when imputing intron features, attributes were being
+  pulled from the first (or last) exon (`#139
+  <https://github.com/daler/gffutils/pull/139>`_, thanks @stekaz).
+
+- Support creating Feature objects using empty values for attributes (`#144
+  <https://github.com/daler/gffutils/pull/144>`_).
+
+- Ensure that tests work post-installation (`#145
+  <https://github.com/daler/gffutils/pull/145>`_, thanks Michael Crusoe @mr-c)
+
+- Removed redundant ``inspection.py`` module (`#147
+  <https://github.com/daler/gffutils/pull/147>`_).
+
+- Improvements to ``FeatureDB.update``, especially with respect to handling
+  autoincrementing feature IDs. Previously, upon updating a db with another,
+  autoincrement integers would restart at 1. Thanks Nolan Wood
+  (@innovate-invent) and @abhishekkumaresan (`#149
+  <https://github.com/daler/gffutils/pull/149>`_)
+
+
+v0.9
+----
+Long-overdue release with performance improvements and better handling of
+corner-case GFF and GTF files.
+
+- performance tests (thanks Andrew Lando)
+- performance improvements by building additional indexes (thanks Andrew Lando)
+- performance improvments by running ``analyze features`` on created table
+  (thanks Andrew Lando). Existing databases that have not had this run will
+  trigger a warning suggesting that this should be run to speed up queries
+  dramatically.
+- add test for corner-case GTFs (`issue #79 <https://github.com/daler/gffutils/issues/79>`_)
+- add fix for corner-case GFFs where `"="` is both a separator between fields
+  as well as part of a value inside a field even when not quoted (`issue #82
+  <https://github.com/daler/gffutils/issues/82>`_)
+- fix handling of strandedness in :meth:`gffutils.feature.Feature.sequence`
+  (`issue #87 <https://github.com/daler/gffutils/issues/87>`_)
+- fix handling of corner-case GFFs that are completely missing a start or end
+  position (`issue #85 <https://github.com/daler/gffutils/issues/85>`_)
+- improvements to test framework
+- All percent-encoded characters are decoded upon parsing (regardless of if the
+  GFF3 spec says they should have been encoded in the first place), and then
+  re-encoded when converting the Feature to a string (`issue #98
+  <https://github.com/daler/gffutils/issues/98>`_). Only characters specified
+  in the GFF3 spec are re-encoded. Note that some GFF files have spaces encoded
+  as `%20`, but spaces should not be encoded according to the GFF3 specs. In
+  this case, they will be decoded into spaces upon parsing, but not re-encoded
+  when converting to string. Set
+  `gffutils.constants.ignore_url_escape_characters=True` to disable any
+  encoding/decoding behavior.
+- improved testing framework
+
+v0.8.7.1
+--------
+Fixes bug in `gffutils.pybedtools_integration.tsses` where iterating over large
+databases and using the `as_bed6=True` argument could cause a deadlock.
+
+v0.8.7
+------
+New module, :mod:`gffutils.pybedtools_integration`. In particular, the
+:func:`gffutils.pybedtools_integration.tsses` function provides many options
+for creating a GTF, GFF, or BED file of transcription start sites (TSSes) from
+an annotation.
+
+v0.8.6.1
+--------
+Only a warning -- and not an ImportError -- is raised if BioPython is not installed.
+
+Lots of updates in the testing framework to use docker containers on travis-ci.org.
+
+v0.8.4
+------
+This version addresses issues `#48
+<https://github.com/daler/gffutils/issues/48>`_ and `#20
+<https://github.com/daler/gffutils/issues/20>`_. It only affects database
+creation using certain GTF files.
+
+To summarize, there are some publicly available GTF files that don't match the
+GTF specification and have transcripts and genes already added. By default,
+`gffutils` assumes a GTF matches spec and that there are no transcript or gene
+features. It infers transcript and gene extents from exons alone. So for these
+off-spec GTF files, `gffutils` would do a lot of extra work inferring the
+transcript and gene extents, and then it would try to the inferred features
+back into the database. Since they were already there, it triggered `gffutils`'
+feature-merging machinery.
+
+The point is, if you didn't specifically tell `gffutils` to skip this step, all
+of this extra merging work would cause database creation to take far longer
+than it should have (possibly 10-100x longer).
+
+With v0.8.4, if you create a database out of a GTF file and there are
+transcript or gene features in it, `gffutils` will emit a warning and
+a recommendation to disable inferring transcripts and/or genes to speed things
+up dramatically.
+
+The new keyword arguments for controlling this in :func:`gffutils.create_db`
+are `disable_infer_transcripts` and `disable_infer_genes`.  These are both set
+to *False* by default.
+
+The previous, soon-to-be-deprecated way of doing this was to use
+`infer_gene_extent=False`.  The new equivalent is to use
+`disable_infer_transcripts=True` and `disable_infer_genes=True`. If you use the
+old method, it will be automatically converted to the new method and a warning
+will be emitted.
+
+This new behavior is more flexible since it gives us the ability to infer
+transcripts if genes exist, or infer genes if transcripts exist (rather than
+the previous all-or-nothing approach).
+
+
+v0.8.3.1
+--------
+Thanks to Sven-Eric Schelhorn (@schellhorn on github), this version fixes a bug
+where, if multiple gffutils processes try to create databases from GTF files
+simultaneously, the resulting databases would be incomplete and incorrect.
+
+
+v0.8.3
+------
+New features
+~~~~~~~~~~~~
+- New :func:`inspect.inspect` function for examining the contents of
+  a GFF or GTF file.
+
+- New :meth:`Feature.sequence` method to extract the sequence for a feature (uses
+  `pyfaidx <https://github.com/mdshw5/pyfaidx>`_).
+
+- Expose `ignore_strand` kwarg in :meth:`FeatureDB.children_bp` method
+
+- When creating or updating a database, the provided `transform` function can
+  return a value evaluating to False which will cause that feature to be
+  skipped.
+
+- :func:`create_db()` can use remote gzipped files as input
+- New :meth:`FeatureDB.delete` method to delete features from
+  a database
+
+- Initial support for BioPython SeqFeature objects
+
+- `limit` kwarg can now be used for :meth:`FeatureDB.parents` and
+  :meth:`FeatureDB.children` to restrict returned features to
+  a genomic range
+
+- :meth:`FeatureDB.interfeatures` can now update attributes
+
+- Much more flexible :meth:`FeatureDB.region` that allows slice-like
+  operations.
+
+- Improve :meth:`FeatureDB.update` so that entire features (rather
+  than just attributes) can be replaced or updated (thanks Rintze Zelle for
+  ideas and testing)
+
+Bug fixes
+~~~~~~~~~
+- fix a bug when using a function as an `id_spec` for `create_db()` function
+  (thanks @moritzbuck on github)

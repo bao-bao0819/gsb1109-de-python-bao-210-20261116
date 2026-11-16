@@ -238,6 +238,32 @@ Calling the ``cells`` method of a ``Table`` returns table cells as ``Cell`` obje
 HTML attributes of Table, Cell, and Tag objects are accessible via
 ``get_attr``, ``set_attr``, ``has_attr``, and  ``del_attr`` methods.
 
+Incremental table exports
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+For offline page imports, ``export_page`` (or ``WikiText.export``) snapshots
+every table cell together with the template and parser-function arguments
+that syntactically occur in the cell.  The snapshot is JSON-serializable and
+can be updated incrementally:
+
+.. code:: python
+
+    >>> old = wtp.export_page("""{|
+    ... | {{Card|title={{T|x=1}}}}
+    ... |}""")
+    >>> new = """{|
+    ... | {{Card|title={{T|x=2}}}}
+    ... |}"""
+    >>> result = old.apply_revision(new, verify=True)
+    >>> result.explain()
+    "1 exported cell(s) changed; 1 recomputed, 0 reused.\n- table 0 cell (0, 0): ..."
+
+Only cells whose markup or syntactic dependencies changed are re-extracted.
+Dependencies are purely syntactic: plain text such as ``x=1`` outside a
+template is not a dependency.  The dependency path also records when an
+argument moved into a nested template, so the incremental result is identical
+to a fresh full extraction and the changed cells can be explained.
+
 Lists
 -----
 

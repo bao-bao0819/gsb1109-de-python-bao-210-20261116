@@ -275,3 +275,16 @@ class Cell(SubWikiTextWithAttrs):
     def is_header(self) -> bool:
         """Return True if this is a header cell."""
         return self._header
+
+    @property
+    def dependencies(self):
+        """Return the syntactic template dependencies of this cell.
+
+        Arguments of templates, parser functions and parameters inside the
+        cell are included, as are enclosing call arguments whose value
+        contains the cell.  Literal text is not a dependency.  See
+        :func:`wikitextparser.dependencies`.
+        """
+        from ._export import dependencies
+
+        return dependencies(self)

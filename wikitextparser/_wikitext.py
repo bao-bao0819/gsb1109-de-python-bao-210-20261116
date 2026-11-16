@@ -1391,6 +1391,21 @@ class WikiText:
         """Return a list of all tables."""
         return self.get_tables(True)
 
+    def export(self, *, extractor=None, span: bool = True):
+        """Export table cells with their syntactic dependencies.
+
+        Return a :class:`wikitextparser.PageExport` snapshot that can be
+        persisted as JSON and updated incrementally with
+        :meth:`PageExport.apply_revision`.
+
+        :param extractor: a pure callable used to compute each cell value.
+            The default mirrors :meth:`Table.data`.
+        :param span: passed to :meth:`Table.cells`.
+        """
+        from ._export import export_page
+
+        return export_page(self, extractor=extractor, span=span)
+
     def get_tables(self, recursive=False) -> list[Table]:
         """Return tables. Include nested tables if `recursive` is `True`."""
         type_to_spans = self._type_to_spans

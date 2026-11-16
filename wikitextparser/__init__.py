@@ -4,6 +4,27 @@ __version__ = '3.0.1.dev1'
 from . import _wikitext
 from ._argument import Argument  # noqa: F401
 from ._comment_bold_italic import Bold, Comment, Italic
+from ._export import (  # noqa: F401
+    CellChange,
+    Dependency,
+    DependencyChange,
+    Field,
+    PageExport,
+    RevisionResult,
+    TableExport,
+    apply_revision,
+    default_extractor,
+    dependencies,
+    diff_exports,
+    export_fields,
+    export_page,
+    export_tables,
+    field_dependencies,
+    incremental_export,
+    load_export,
+    page_export,
+    save_export,
+)
 from ._externallink import ExternalLink
 from ._parameter import Parameter
 from ._parser_function import ParserFunction

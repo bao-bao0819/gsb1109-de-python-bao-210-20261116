@@ -785,6 +785,19 @@ class WikiText:
             string = unescape(string)
         return string
 
+    def entity_view(self) -> EntityTextView:
+        """Return a plain-text view of self suitable for entity retrieval.
+
+        The view keeps name text (including apostrophes) mapped to the
+        source, records bold/italic style ranges with their source
+        ranges, and reports ambiguous apostrophe runs with candidate
+        interpretations instead of dropping them. See
+        `wikitextparser.entity_view` for details.
+        """
+        from ._entity_view import entity_view
+
+        return entity_view(self)
+
     def pformat(self, indent: str = '    ', remove_comments=False) -> str:
         """Return a pretty-print formatted version of `self.string`.
 
@@ -1745,6 +1758,7 @@ remove_markup.__doc__ += plain_text_doc  # type: ignore
 
 if TYPE_CHECKING:  # pragma: no cover
     from ._comment_bold_italic import Bold, Comment, Italic  # noqa: TC004
+    from ._entity_view import EntityTextView  # noqa: TC004
     from ._externallink import ExternalLink  # noqa: TC004
     from ._parameter import Parameter  # noqa: TC004
     from ._parser_function import ParserFunction  # noqa: TC004

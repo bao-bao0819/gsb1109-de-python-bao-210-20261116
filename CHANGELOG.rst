@@ -1,6 +1,12 @@
 Unreleased
 ----------
-* 
+* Added ``entity_view`` (also available as ``WikiText.entity_view``), a
+  plain-text view for entity retrieval. It keeps name text (including
+  apostrophes such as ``O'Brien``) mapped to the source, records
+  bold/italic style ranges with their source ranges, and reports
+  ambiguous apostrophe runs (e.g. ``''''``) with candidate
+  interpretations and the affected source range instead of dropping
+  them.
 
 v3.0.0 (2026-10-08)
 -------------------

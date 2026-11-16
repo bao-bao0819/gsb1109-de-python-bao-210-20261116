@@ -4,6 +4,14 @@ __version__ = '3.0.1.dev1'
 from . import _wikitext
 from ._argument import Argument  # noqa: F401
 from ._comment_bold_italic import Bold, Comment, Italic
+from ._entity_view import (  # noqa: F401
+    Ambiguity,
+    AmbiguityCandidate,
+    EntityTextView,
+    StyleRange,
+    ViewSegment,
+    entity_view,
+)
 from ._externallink import ExternalLink
 from ._parameter import Parameter
 from ._parser_function import ParserFunction

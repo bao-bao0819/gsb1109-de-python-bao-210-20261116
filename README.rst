@@ -238,6 +238,54 @@ Calling the ``cells`` method of a ``Table`` returns table cells as ``Cell`` obje
 HTML attributes of Table, Cell, and Tag objects are accessible via
 ``get_attr``, ``set_attr``, ``has_attr``, and  ``del_attr`` methods.
 
+Logical records and sort keys
+-----------------------------
+
+``data`` repeats a rowspan value in every physical row. To keep one business
+record per rowspan group, use ``records``:
+
+.. code:: python
+
+    >>> t = wtp.Table("""{| class="wikitable sortable"
+    ... ! 名称 !! 报价
+    ... |-
+    ... | rowspan=2 | A || data-sort-value="29800" | 约三万
+    ... |-
+    ... | 9000
+    ... |-
+    ... | B || 45000
+    ... |}""")
+    >>> view = t.records()
+    >>> view.records[0].rows
+    (1, 2)
+    >>> view.records[0].display(1)
+    '约三万'
+    >>> view.records[0].sort_value(1)
+    Decimal('29800')
+
+Each value keeps the display text, its parsed sort key (``data-sort-value``
+when present), and a ``CellSource`` describing the cell that supplied it.
+Sorting returns whole records and separates unusable keys instead of treating
+them as zero:
+
+.. code:: python
+
+    >>> result = view.sort_by('报价')
+    >>> [record.display(0) for record in result.records]
+    ['A', 'B']
+    >>> [(entry.display, entry.reason) for entry in result.unsortable]
+    []
+
+``unsortable`` is also available as ``result.separated``. A record with an
+ambiguous merged value still stays in one piece; only records whose keys are
+missing, approximate, ranges, of another kind, or carry an incompatible unit
+are moved out of the ordered list.
+
+``sort_by`` also accepts a zero-based column index. Missing, approximate,
+range, wrong-kind, and incompatible-unit keys are returned in
+``result.unsortable``. The view never rewrites the original wikitext, so a
+hidden sort value cannot replace the visible quote.
+
 Lists
 -----
 

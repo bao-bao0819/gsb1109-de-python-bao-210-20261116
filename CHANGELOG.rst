@@ -1,6 +1,14 @@
 Unreleased
 ----------
-* 
+* Added ``Table.records()`` (also ``Table.record_view()`` and the module-level
+  ``record_view()``) returning a ``RecordView``. A rowspan group is one
+  logical ``Record`` instead of repeated rows, and each value keeps its
+  display text, parsed sort key, and ``CellSource`` provenance.
+* Added ``RecordView.sort_by()``. It sorts whole records by a column name or
+  index, reads ``data-sort-value`` without rewriting the visible value, and
+  returns records with missing, approximate, range, wrong-kind, or
+  incompatible-unit keys in ``RecordSortResult.unsortable`` instead of
+  treating them as zero.
 
 v3.0.0 (2026-10-08)
 -------------------

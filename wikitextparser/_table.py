@@ -14,6 +14,7 @@ from ._cell import (
     NEWLINE_CELL_MATCH,
     Cell,
 )
+from ._records import RecordView
 from ._spans import ATTRS_MATCH
 from ._tag import SubWikiTextWithAttrs
 from ._wikitext import WS, rc
@@ -357,6 +358,51 @@ class Table(SubWikiTextWithAttrs):
         if column is None:
             return table_cells[row]
         return table_cells[row][column]
+
+    def records(
+        self,
+        *,
+        headers: list[str] | None = None,
+        strip: bool = True,
+    ) -> RecordView:
+        """Return a logical record view of the table.
+
+        Unlike :meth:`data` and :meth:`cells`, a rowspan group is represented
+        as one record instead of repeating the anchored value in every
+        physical row.  Each value exposes its display text, its parsed sort
+        key (``data-sort-value`` when present), and the cell that supplied
+        it.
+
+        :param headers: Optional header labels.  When omitted, leading header
+            rows are detected and used.
+        :param strip: Strip data values as :meth:`data` does by default.
+        """
+        return RecordView(self, headers=headers, strip=strip)
+
+    def record_view(
+        self,
+        *,
+        headers: list[str] | None = None,
+        strip: bool = True,
+    ) -> RecordView:
+        """Alias for :meth:`records`."""
+        return self.records(headers=headers, strip=strip)
+
+    def sorted_records(
+        self,
+        column: int | str,
+        *,
+        headers: list[str] | None = None,
+        strip: bool = True,
+        reverse: bool = False,
+    ):
+        """Return records sorted by one column.
+
+        This is a convenience wrapper around ``records().sort_by()``.
+        """
+        return self.records(headers=headers, strip=strip).sort_by(
+            column, reverse=reverse
+        )
 
     @property
     def caption(self) -> str | None:

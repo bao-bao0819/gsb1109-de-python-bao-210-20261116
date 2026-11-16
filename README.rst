@@ -98,6 +98,57 @@ Template parameters:
     Parameter('{{{a|{{{d|c}}}}}}')
 
 
+Storable fields
+---------------
+
+Templates are normally stored unexpanded, so only some field values are
+definite. ``extract_fields`` takes a :class:`~wikitextparser.TemplateSchema`
+describing the known template/parameter convention and splits the fields into
+literal values, values that need external expansion, and absent values. Every
+field records why it was classified that way:
+
+.. code:: python
+
+    >>> schema = wtp.TemplateSchema({
+    ...     'Infobox person': {
+    ...         'name': ('name', '1'),
+    ...         'birth_date': ('birth_date', 'birthdate'),
+    ...     },
+    ... })
+    >>> source = (
+    ...     '{{Infobox person|Alice'
+    ...     '|birth_date={{Birth date|1990|1|1}}}}'
+    ... )
+    >>> report = wtp.extract_fields(source, schema)
+    >>> report.literal_values
+    {'name': 'Alice'}
+    >>> report.expansion_dependent[0].field
+    'birth_date'
+    >>> report.expansion_dependent[0].constructs[0].text
+    '{{Birth date|1990|1|1}}'
+    >>> report.expansion_dependent[0].basis
+    "{{Infobox person}} argument 'birth_date'; depends on external expansion: {{Birth date|1990|1|1}}"
+
+Template parameters (``{{{name|default}}}``) are resolved from ``bindings``.
+Leaving a name out means it is *unbound*, so its default applies; mapping it to
+``''`` means it is *bound to the empty string*, so its default is not used.
+A nested default is only substituted when its own binding condition holds:
+
+.. code:: python
+
+    >>> schema = wtp.TemplateSchema({
+    ...     'T': {'f': wtp.FieldSpec(('f',), default='{{{x|DEFAULT}}}')},
+    ... })
+    >>> wtp.extract_fields('{{T}}', schema).literal_values
+    {'f': 'DEFAULT'}
+    >>> wtp.extract_fields('{{T}}', schema, bindings={'x': ''}).literal_values
+    {'f': ''}
+
+The same distinction is available for a single fragment through
+``wtp.resolve_value``. ``FieldReport.to_json()`` exports the values together
+with their evidence.
+
+
 WikiLinks
 ---------
 

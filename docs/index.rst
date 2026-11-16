@@ -123,6 +123,55 @@ WikiList
    :special-members:
    :show-inheritance:
 
+TemplateSchema
+--------------
+.. autoclass:: wikitextparser.TemplateSchema
+   :members:
+   :special-members:
+   :show-inheritance:
+
+FieldSpec
+---------
+.. autoclass:: wikitextparser.FieldSpec
+   :members:
+   :special-members:
+   :show-inheritance:
+
+FieldStatus
+-----------
+.. autoclass:: wikitextparser.FieldStatus
+   :members:
+   :special-members:
+   :show-inheritance:
+
+FieldValue
+----------
+.. autoclass:: wikitextparser.FieldValue
+   :members:
+   :special-members:
+   :show-inheritance:
+
+FieldReport
+-----------
+.. autoclass:: wikitextparser.FieldReport
+   :members:
+   :special-members:
+   :show-inheritance:
+
+Resolution
+----------
+.. autoclass:: wikitextparser.Resolution
+   :members:
+   :special-members:
+   :show-inheritance:
+
+Construct
+---------
+.. autoclass:: wikitextparser.Construct
+   :members:
+   :special-members:
+   :show-inheritance:
+
 SubWikiText
 -----------
 .. autoclass:: wikitextparser._comment_bold_italic.BoldItalic

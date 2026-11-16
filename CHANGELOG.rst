@@ -1,6 +1,13 @@
 Unreleased
 ----------
-* 
+* Added ``extract_fields``, ``TemplateSchema``, ``FieldSpec``, ``FieldReport``,
+  ``FieldValue``, ``FieldStatus``, ``resolve_value``, and
+  ``WikiText.extract_fields`` for extracting storable field values from
+  unexpanded templates. Values are classified as literal,
+  expansion-dependent, unbound, or absent, and each carries its basis and
+  source spans. ``{{{parameter|default}}}`` constructs are resolved from
+  ``bindings``; an unbound name uses its default while a name bound to ``''``
+  does not, so nested defaults only apply when their binding condition holds.
 
 v3.0.0 (2026-10-08)
 -------------------

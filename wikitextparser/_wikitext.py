@@ -1008,6 +1008,15 @@ class WikiText:
             for span in self._subspans('WikiLink')
         ]
 
+    def extract_fields(self, schema, *, bindings=None, template=None):
+        """Extract definite and expansion-dependent field values.
+
+        See :func:`wikitextparser.extract_fields`.
+        """
+        from ._field import _extract_from_parsed
+
+        return _extract_from_parsed(self, schema, bindings, template)
+
     @property
     def comments(self) -> list[Comment]:
         """Return a list of comment objects."""

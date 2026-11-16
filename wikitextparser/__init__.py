@@ -5,6 +5,17 @@ from . import _wikitext
 from ._argument import Argument  # noqa: F401
 from ._comment_bold_italic import Bold, Comment, Italic
 from ._externallink import ExternalLink
+from ._field import (  # noqa: F401
+    Construct,
+    FieldReport,
+    FieldSpec,
+    FieldStatus,
+    FieldValue,
+    Resolution,
+    TemplateSchema,
+    extract_fields,
+    resolve_value,
+)
 from ._parameter import Parameter
 from ._parser_function import ParserFunction
 from ._section import Section

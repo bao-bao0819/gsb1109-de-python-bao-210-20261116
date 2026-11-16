@@ -32,6 +32,19 @@ SubWikiText
    :special-members:
    :show-inheritance:
 
+PlainText
+---------
+.. autoclass:: wikitextparser.PlainText
+   :members:
+   :special-members:
+   :show-inheritance:
+
+PlainTextChar
+-------------
+.. autoclass:: wikitextparser.PlainTextChar
+   :members:
+   :show-inheritance:
+
 SubWikiTextWithAttrs
 --------------------
 .. autoclass:: wikitextparser._tag.SubWikiTextWithAttrs

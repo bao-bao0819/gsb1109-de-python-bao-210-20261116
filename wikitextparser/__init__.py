@@ -7,6 +7,7 @@ from ._comment_bold_italic import Bold, Comment, Italic
 from ._externallink import ExternalLink
 from ._parameter import Parameter
 from ._parser_function import ParserFunction
+from ._plain_text import PlainText, PlainTextChar
 from ._section import Section
 from ._table import Table
 from ._tag import Tag

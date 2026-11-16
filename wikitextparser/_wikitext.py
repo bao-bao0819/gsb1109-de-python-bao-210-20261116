@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from bisect import bisect_left, bisect_right, insort_right
 from collections.abc import Iterable, MutableSequence
-from html import unescape
 from itertools import islice
 from operator import attrgetter
 from typing import (
@@ -34,6 +33,7 @@ from ._config import (
     _tag_extensions,
     regex_pattern,
 )
+from ._plain_text import PlainText, expand_html_entities
 from ._spans import (
     BARE_EXTERNAL_LINK,
     END_TAG_PATTERN,
@@ -667,11 +667,12 @@ class WikiText:
         replace_bolds_and_italics=True,
         replace_tables: Callable[[Table], str | None] | bool = _table_to_text,
         _is_root_node=False,
-    ) -> str:
+    ) -> PlainText:
         # plain_text_doc will be added to __doc__
         """Return a plain text string representation of self."""
         if _is_root_node is False:
             sd = self._span_data
+            source_start, source_end = sd.start, sd.end
             tts = self._inner_type_to_spans_copy()
             parsed = WikiText([self._lststr[0][sd.start : sd.end]], tts)
             new_end = sd.end - sd.start
@@ -681,13 +682,34 @@ class WikiText:
                     break
             else:  # self is a dead span
                 parsed._span_data = SpanData(0, 0, None, bytearray())
+                source_end = source_start
         else:
             tts = self._type_to_spans
             parsed = self
-        lst: list[str | None] = list(parsed.string)
+            source_start = 0
+            source_end = len(parsed.string)
+        string = parsed.string
+        # ``lst`` mirrors the source region character by character.  Removed
+        # characters are set to None.  A replacement stores its text at the
+        # first character and its already-expanded (char, spans) pairs in
+        # ``overrides``.
+        lst: list[str | None] = list(string)
+        overrides: dict[
+            int, list[tuple[str, tuple[tuple[int, int], ...]]]
+        ] = {}
 
         def remove(b: int, e: int):
             lst[b:e] = [None] * (e - b)
+
+        def replace(b: int, e: int, text: str | None) -> None:
+            """Replace source characters with text that maps to (b, e)."""
+            if text is None:
+                remove(b, e)
+                return
+            spans = ((source_start + b, source_start + e),)
+            lst[b] = text
+            overrides[b] = [(char, spans) for char in text]
+            remove(b + 1, e)
 
         for span_data in tts['Comment']:
             remove(span_data.start, span_data.end)
@@ -697,8 +719,11 @@ class WikiText:
                 b, e = (sd := template._span_data).start, sd.end
                 if lst[b] is None:  # overwritten
                     continue
-                lst[b] = replace_templates(template)
-                remove(b + 1, e)
+                replacement = replace_templates(template)
+                if replacement is None:
+                    remove(b, e)
+                else:
+                    replace(b, e, replacement)
         elif replace_templates:
             for span_data in tts['Template']:
                 remove(span_data.start, span_data.end)
@@ -708,8 +733,11 @@ class WikiText:
                 b, e = (sd := pf._span_data).start, sd.end
                 if lst[b] is None:  # already overwritten
                     continue
-                lst[b] = replace_parser_functions(pf)
-                remove(b + 1, e)
+                replacement = replace_parser_functions(pf)
+                if replacement is None:
+                    remove(b, e)
+                else:
+                    replace(b, e, replacement)
         elif replace_parser_functions:
             for span_data in tts['ParserFunction']:
                 remove(span_data.start, span_data.end)
@@ -775,15 +803,39 @@ class WikiText:
                 b, e = (sd := table._span_data).start, sd.end
                 if lst[b] is None:  # overwritten
                     continue
-                lst[b] = replace_tables(
-                    Table(''.join([c for c in lst[b:e] if c is not None]))
+                replacement = replace_tables(
+                    Table(''.join(
+                        char
+                        for char in lst[b:e]
+                        if char is not None
+                    ))
                 )
-                remove(b + 1, e)
+                if replacement is None:
+                    remove(b, e)
+                else:
+                    replace(b, e, replacement)
 
-        string = ''.join([c for c in lst if c is not None])
+        pieces: list[str] = []
+        origins: list[int] = []
+        specials: dict[int, tuple[tuple[int, int], ...]] = {}
+        for index, char in enumerate(lst):
+            if char is None:
+                continue
+            override = overrides.get(index)
+            if override is None:
+                origins.append(source_start + index)
+                pieces.append(char)
+                continue
+            for char_, spans in override:
+                origins.append(spans[0][0])
+                specials[len(origins) - 1] = spans
+                pieces.append(char_)
+        string = ''.join(pieces)
         if unescape_html_entities:
-            string = unescape(string)
-        return string
+            string, origins, specials = expand_html_entities(
+                string, origins, specials
+            )
+        return PlainText(string, origins, specials, source_start, source_end)
 
     def pformat(self, indent: str = '    ', remove_comments=False) -> str:
         """Return a pretty-print formatted version of `self.string`.
@@ -1711,7 +1763,7 @@ def _outer_spans(sorted_spans: list[SpanData]) -> Iterable[SpanData]:
             yield span
 
 
-def remove_markup(s: str, **kwargs) -> str:
+def remove_markup(s: str, **kwargs) -> PlainText:
     # plain_text_doc will be added to __doc__
     """Return a string with wiki markup removed/replaced."""
     return WikiText(s).plain_text(**kwargs, _is_root_node=True)
@@ -1719,6 +1771,11 @@ def remove_markup(s: str, **kwargs) -> str:
 
 plain_text_doc = """
 
+        The returned value is a `PlainText`, a `str` subclass.  In addition
+        to the text, it records the source span of every visible character,
+        including characters expanded from HTML entities.  Use
+        `PlainText.source_spans` to map a range of visible characters back
+        to the wikitext source.
         Comments are always removed.
         :keyword replace_templates:
             A function mapping `Template` objects to strings.

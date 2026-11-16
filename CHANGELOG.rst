@@ -1,6 +1,10 @@
 Unreleased
 ----------
-* 
+* ``plain_text`` now returns a ``PlainText`` (a ``str`` subclass) that records
+  the source range of every visible character. Use ``PlainText.source_spans``
+  to map a range of visible characters back to the wikitext source; a range
+  interrupted by hidden markup returns several separate ranges, and expanded
+  HTML entities map to their whole source token.
 
 v3.0.0 (2026-10-08)
 -------------------

@@ -359,6 +359,29 @@ The ``remove_markup`` function or ``plain_text`` method can be used to remove wi
     >>> parse(s).plain_text()
     'a c d'
 
+The result of ``plain_text`` is a ``str`` subclass that can also map visible
+characters back to the wikitext source:
+
+.. code:: python
+
+    >>> parsed = parse('a<!--hidden-->b&amp;c')
+    >>> text = parsed.plain_text()
+    >>> text
+    'ab&c'
+    >>> text.source_spans(0, 2)  # 'ab' is split by the hidden comment
+    [(0, 1), (14, 15)]
+    >>> text.chars[2]  # one visible character, several source characters
+    PlainTextChar(char='&', spans=((15, 20),))
+
+Use ``source_spans(start, end)`` (alias ``raw_spans``) with a half-open range
+of visible characters.  It returns the half-open source ranges needed to
+cover them; ranges are merged only when they touch, so a range never hides
+unrelated markup.  Entities such as ``&amp;`` map to the whole token, and
+an empty range returns the zero-width insertion point.  ``chars``,
+``char_spans``, and ``range_map`` expose the character-by-character mapping,
+and ``source_start``/``source_end`` give the extracted region in the root
+wikitext.  Offsets follow the same convention as ``WikiText.span``.
+
 Compared with mwparserfromhell
 ==============================
 

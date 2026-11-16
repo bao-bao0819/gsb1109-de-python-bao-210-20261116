@@ -1,6 +1,11 @@
 Unreleased
 ----------
-* 
+* Added ``apply_edit_suggestions`` and ``EditSuggestion`` for merging
+  offline comment-deletion, external-link URL, and table-cell value edits
+  that are anchored to spans of the original wikitext. Unselected bytes are
+  preserved, the result is independent of suggestion order, and overlapping
+  or syntax-invalidating combinations raise ``EditConflictError`` without
+  applying anything.
 
 v3.0.0 (2026-10-08)
 -------------------

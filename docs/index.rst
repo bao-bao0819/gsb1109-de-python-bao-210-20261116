@@ -144,6 +144,25 @@ Italic
    :special-members:
    :show-inheritance:
 
+Offline Edit Suggestions
+------------------------
+.. autoclass:: wikitextparser.EditSuggestion
+   :members:
+   :special-members:
+   :show-inheritance:
+
+.. autoclass:: wikitextparser.EditError
+   :members:
+   :special-members:
+   :show-inheritance:
+
+.. autoclass:: wikitextparser.EditConflictError
+   :members:
+   :special-members:
+   :show-inheritance:
+
+.. autofunction:: wikitextparser.apply_edit_suggestions
+
 Indices and tables
 ==================
 

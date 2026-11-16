@@ -4,6 +4,12 @@ __version__ = '3.0.1.dev1'
 from . import _wikitext
 from ._argument import Argument  # noqa: F401
 from ._comment_bold_italic import Bold, Comment, Italic
+from ._edit import (  # noqa: F401
+    EditConflictError,
+    EditError,
+    EditSuggestion,
+    apply_edit_suggestions,
+)
 from ._externallink import ExternalLink
 from ._parameter import Parameter
 from ._parser_function import ParserFunction

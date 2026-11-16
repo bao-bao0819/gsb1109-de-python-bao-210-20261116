@@ -317,6 +317,50 @@ Accessing HTML tags:
 
 WikiTextParser is able to handle common usages of HTML and extension tags. However it is not a fully-fledged HTML parser and may fail on edge cases or malformed HTML input. Please open an issue on github if you encounter bugs.
 
+Offline Edit Suggestions
+------------------------
+
+When cleanup suggestions are produced offline, each one is anchored to a
+span of the original wikitext. ``apply_edit_suggestions`` merges comment
+deletions, external-link URL replacements, and table-cell value
+replacements while leaving every unselected byte untouched:
+
+.. code:: python
+
+    >>> parsed = wtp.parse(
+    ...     '<!-- note --> see [https://old.test page]\n{| \n| a\n|}'
+    ... )
+    >>> suggestions = [
+    ...     wtp.EditSuggestion.delete_comment(parsed.comments[0].span),
+    ...     wtp.EditSuggestion.replace_external_link(
+    ...         parsed.external_links[0].span, 'https://new.test'
+    ...     ),
+    ...     wtp.EditSuggestion.replace_cell(
+    ...         parsed.tables[0].cells(row=0, column=0).span, 'b'
+    ...     ),
+    ... ]
+    >>> wtp.apply_edit_suggestions(parsed, suggestions)
+    WikiText(' see [https://new.test page]\n{| \n|b\n|}')
+
+All spans are interpreted against the original document, so reordering
+the suggestions never changes the resulting page. Overlapping
+suggestions, or a replacement that would break the syntax next to an
+untouched region (for example a URL containing whitespace or a cell
+value introducing a new cell separator), raise ``EditConflictError``
+and leave the document unchanged:
+
+.. code:: python
+
+    >>> parsed = wtp.parse('{|\n| a <!-- c -->\n|}')
+    >>> cell = parsed.tables[0].cells(row=0, column=0)
+    >>> wtp.apply_edit_suggestions(parsed, [
+    ...     wtp.EditSuggestion.replace_cell(cell.span, 'x'),
+    ...     wtp.EditSuggestion.delete_comment(parsed.comments[0].span),
+    ... ])
+    Traceback (most recent call last):
+    ...
+    wikitextparser.EditConflictError: overlapping suggestions at spans (2, 17) (cell) and (7, 17) (comment)
+
 Miscellaneous
 -------------
 ``parent`` and ``ancestors`` methods can be used to access a node's parent or ancestors respectively:

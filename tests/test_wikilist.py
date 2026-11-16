@@ -1,4 +1,4 @@
-from wikitextparser import WikiList, parse
+from wikitextparser import WikiList, parse, parse_list_items
 
 
 def test_lists():
@@ -185,3 +185,123 @@ def test_multiline_with_carriage_return():
     assert wikilist.items == [' list item a', ' list item b', ' list item c']
     sublist = wikilist.sublists(1, r'#')[0]
     assert sublist.items == [' sub-list of b']
+
+
+def test_parse_list_items_mixed_markers():
+    text = '* a\n** b\n*# c\n; term : def\n: def2\n# num\n'
+    items = parse_list_items(text)
+    assert [i.marker for i in items] == ['*', '**', '*#', ';', ':', '#']
+    assert [i.level for i in items] == [1, 2, 2, 1, 1, 1]
+    assert [i.body for i in items] == [
+        ' a',
+        ' b',
+        ' c',
+        ' term : def',
+        ' def2',
+        ' num',
+    ]
+    # spans are in source order and map back to the source text
+    spans = [i.span for i in items]
+    assert spans == sorted(spans)
+    for item, (s, e) in zip(items, spans):
+        assert text[s:e] == item.marker + item.body
+
+
+def test_parse_list_items_parents():
+    text = '* a\n** b\n*# c\n*** d\n* e\n'
+    a, b, c, d, e = parse_list_items(text)
+    assert a.parent is None
+    assert b.parent is a
+    assert c.parent is a
+    # '*#' is not a prefix of '***', so d is re-parented to a
+    assert d.parent is a
+    assert e.parent is None
+    assert a.children == [b, c, d]
+    assert b.children == []
+    assert c.children == []
+    # a single indentation change re-parents the following items
+    a, b, c = parse_list_items('* a\n** b\n** c\n')
+    assert b.parent is a
+    assert c.parent is a
+    a, b, c = parse_list_items('* a\n** b\n*# c\n')
+    assert b.parent is a
+    assert c.parent is a
+
+
+def test_parse_list_items_continuation_lines():
+    items = parse_list_items('* a\nwrapped a\n** b\nwrapped b\n* c\n')
+    assert [i.body for i in items] == [
+        ' a\nwrapped a',
+        ' b\nwrapped b',
+        ' c',
+    ]
+    a, b, c = items
+    assert b.parent is a
+    assert c.parent is None
+    text = '* a\nwrapped a\n** b\nwrapped b\n* c\n'
+    for item in items:
+        s, e = item.span
+        assert text[s:e] == item.marker + item.body
+
+
+def test_parse_list_items_orphan_continuations():
+    # orphan continuations do not form new items
+    items = parse_list_items('orphan\n* a\n\nanother orphan\n* b\n')
+    assert [(i.marker, i.body) for i in items] == [('*', ' a'), ('*', ' b')]
+    assert parse_list_items('only an orphan\n') == []
+    assert parse_list_items('') == []
+
+
+def test_parse_list_items_definitions():
+    term, definition = parse_list_items('; term : def\n: def2\n')
+    assert term.name == ' term '
+    assert term.definition == ' def'
+    assert definition.name is None
+    assert definition.definition == ' def2'
+    # a term without an inline definition
+    (item,) = parse_list_items('; term only\n')
+    assert item.name == ' term only'
+    assert item.definition is None
+    # regular items have neither name nor definition
+    (item,) = parse_list_items('* regular\n')
+    assert item.name is None
+    assert item.definition is None
+    # colons inside external links do not split the definition
+    (item,) = parse_list_items('; https://a.b : c https://d.e : f\n')
+    assert item.name == ' https://a.b '
+    assert item.definition == ' c https://d.e : f'
+    # name and definition spans map back to the source
+    text = '; term : def\n'
+    (item,) = parse_list_items(text)
+    s, e = item.name_span
+    assert text[s:e] == ' term '
+    s, e = item.definition_span
+    assert text[s:e] == ' def'
+
+
+def test_parse_list_items_ignores_markup():
+    # markers inside templates are not list entries
+    items = parse_list_items('{{t|\n* fake\n}}\n* real\n')
+    assert [(i.marker, i.body) for i in items] == [('*', ' real')]
+    # colons inside templates do not split definitions
+    (item,) = parse_list_items('; {{t|a:b}} : def\n')
+    assert item.name == ' {{t|a:b}} '
+    assert item.definition == ' def'
+
+
+def test_wikilist_get_items():
+    wl = WikiList('* a\n** b\n* c\n', pattern=r'\*')
+    a, b, c = wl.get_items()
+    assert (a.marker, a.body) == ('*', ' a')
+    assert b.parent is a
+    assert c.parent is None
+    # spans are relative to the list string
+    s, e = b.span
+    assert wl.string[s:e] == '** b'
+    # works for mixed sub-lists as well
+    wl = WikiList('# a\n#* b\n#; t : d\n', pattern=r'\#')
+    a, b, t = wl.get_items()
+    assert b.parent is a
+    assert t.parent is a
+    assert t.name == ' t '
+    assert t.definition == ' d'

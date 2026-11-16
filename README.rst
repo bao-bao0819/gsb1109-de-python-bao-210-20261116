@@ -277,6 +277,17 @@ It also has an optional ``pattern`` argument that works similar to ``lists``, ex
     >>> wikilist.sublists(pattern='\*')
     [WikiList('#*bb\n')]
 
+For a flat view of every entry in a mixed list, use the ``get_items`` method (or the ``parse_list_items`` function on raw text). It returns ``ListItem`` objects in source order; each one knows its ``parent``, its own ``span`` and ``body_span`` (wrapped continuation lines belong to the preceding item), and for definition items the ``name`` and ``definition`` are available separately:
+
+.. code:: python
+
+    >>> items = wtp.parse_list_items('* a\n** b\n; term : definition\n')
+    >>> [(i.marker, i.body) for i in items]
+    [('*', ' a'), ('**', ' b'), (';', ' term : definition')]
+    >>> items[1].parent is items[0]
+    True
+    >>> items[2].name, items[2].definition
+    (' term ', ' definition')
 
 Convert one type of list to another using the convert method. Specifying the starting pattern of the desired lists can facilitate finding them and improves the performance:
 

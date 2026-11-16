@@ -123,6 +123,15 @@ WikiList
    :special-members:
    :show-inheritance:
 
+ListItem
+--------
+.. autoclass:: wikitextparser.ListItem
+   :members:
+   :special-members:
+   :show-inheritance:
+
+.. autofunction:: wikitextparser.parse_list_items
+
 SubWikiText
 -----------
 .. autoclass:: wikitextparser._comment_bold_italic.BoldItalic

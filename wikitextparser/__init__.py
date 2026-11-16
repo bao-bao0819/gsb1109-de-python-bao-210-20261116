@@ -12,7 +12,12 @@ from ._table import Table
 from ._tag import Tag
 from ._template import Template
 from ._wikilink import WikiLink
-from ._wikilist import LIST_PATTERN_FORMAT as _LIST_PATTERN_FORMAT, WikiList
+from ._wikilist import (
+    LIST_PATTERN_FORMAT as _LIST_PATTERN_FORMAT,
+    ListItem,  # noqa: F401
+    WikiList,
+    parse_list_items,  # noqa: F401
+)
 
 _wikitext.ExternalLink = ExternalLink
 _wikitext.WikiLink = WikiLink

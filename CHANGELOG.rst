@@ -1,6 +1,12 @@
 Unreleased
 ----------
-* 
+* Added ``parse_list_items`` function and ``WikiList.get_items`` method.
+  They return a flat, source-ordered list of ``ListItem`` objects for mixed
+  ``#``, ``*``, ``;`` and ``:`` lists. Each ``ListItem`` exposes its
+  ``marker``, ``parent``/``children``, ``span`` and ``body_span`` (wrapped
+  continuation lines are included in the preceding item), and definition
+  items expose their ``name`` and ``definition`` separately. Orphan
+  continuation lines are ignored and do not form new items.
 
 v3.0.0 (2026-10-08)
 -------------------

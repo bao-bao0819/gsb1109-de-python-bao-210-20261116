@@ -79,6 +79,75 @@ EXTERNAL_LINK_URL_TAIL = (
     rb'(?>' + LITERAL_IPV6_AND_TAIL + rb'|' + VALID_URL_CHARS + rb')'
 )
 BARE_EXTERNAL_LINK = BARE_EXTERNAL_LINK_SCHEMES + EXTERNAL_LINK_URL_TAIL
+# Characters that may end a sentence but can also be part of a URL. A trailing
+# run of them is only excluded when it is not part of a balanced pair, e.g.
+# "https://en.wikipedia.org/wiki/Foo_(bar)." ends with '.' while
+# "https://example.com/a(b)c," ends with ','. Full-width variants are safe for
+# str input and are only applied when the ASCII shadow cannot see them.
+SENTENCE_TRAILING_PUNCTUATION = '.,;:!?。，、；：！？'
+
+
+def external_link_trim_steps(
+    url: str | bytes,
+) -> list[tuple[int, str]]:
+    """Return possible ends of a free external link target.
+
+    Each item is ``(end, kind)``. ``end`` is the position of the candidate
+    target's end, and ``kind`` explains why the character after it may or may
+    not belong to the target. The canonical end is the final item's ``end``
+    (or ``len(url)`` when there is nothing to trim).
+
+    MediaWiki's ``Parser::makeFreeExternalLink`` removes a trailing run of
+    sentence punctuation first and then removes closing parentheses that do
+    not have a matching opening parenthesis. Both rules are ambiguous in an
+    offline parser: a punctuation mark can be URL data, and parentheses in the
+    surrounding text can be mistaken for URL parentheses. This function
+    therefore preserves every trim step as a candidate instead of discarding
+    the evidence.
+    """
+    if isinstance(url, (bytes, bytearray)):
+        punctuation = b'.,;:!?'
+        open_paren, close_paren = 40, 41
+    else:
+        punctuation = '.,;:!?\'"。，、；：！？'
+        open_paren, close_paren = '(', ')'
+    steps = []
+    end = len(url)
+    while end and url[end - 1] in punctuation:
+        steps.append((end, 'punctuation'))
+        end -= 1
+    num_open = 0
+    num_close = 0
+    for char in url[:end]:
+        if char == open_paren:
+            num_open += 1
+        elif char == close_paren:
+            num_close += 1
+    while end and url[end - 1] == close_paren and num_close > num_open:
+        steps.append((end, 'unbalanced_closing_parenthesis'))
+        end -= 1
+        num_close -= 1
+    return steps
+
+
+def external_link_target_end(url: str | bytes) -> int:
+    """Return the canonical end of the target part of a free external link."""
+    steps = external_link_trim_steps(url)
+    if steps:
+        return steps[-1][0] - 1
+    return len(url)
+
+
+def external_link_target_cuts(url: str | bytes) -> list[int]:
+    """Return candidate ends of a free external link target.
+
+    The first item is the raw end. Subsequent items are produced by removing
+    one ambiguous trailing character at a time. The canonical target end is
+    not included.
+    """
+    return [end for end, _ in external_link_trim_steps(url)]
+
+
 # Wikilinks
 # https://www.mediawiki.org/wiki/Help:Links#Internal_links
 WIKILINK_PARAM_FINDITER = rc(

@@ -41,6 +41,7 @@ from ._spans import (
     INVALID_URL_CHARS,
     START_TAG_PATTERN,
     TypeToSpans,
+    external_link_target_end,
     parse_to_spans,
     rc,
 )
@@ -1283,6 +1284,13 @@ class WikiText:
             for m in EXTERNAL_LINK_FINDITER(el_shadow, start, end):
                 ms, me = m.span()
                 s, e = ss + ms, ss + me
+                if el_shadow[ms] != 91:  # 91 == ord('[')
+                    # A free link's end is decided by MediaWiki's
+                    # makeFreeExternalLink rule. Keep the span canonical and
+                    # leave ambiguous trailing bytes outside the link; they
+                    # remain available through ExternalLink.candidates.
+                    e = s + external_link_target_end(lststr[0][s:e])
+                    me = e - ss
                 span = SpanData(s, e, None, el_shadow[ms:me])
                 old_span = span_tuple_to_span_get((s, e))
                 if old_span is None:
@@ -1299,6 +1307,31 @@ class WikiText:
             el_shadow[s:e] = (e - s) * b' '
         _extract(None, None)
         return external_links
+
+    def replace_external_link_targets(
+        self,
+        replacements,
+        *,
+        with_report: bool = False,
+    ):
+        """Replace external-link targets by exact canonical target match.
+
+        Only target bytes are changed; display text and body prose that happen
+        to equal an old target are left untouched. See
+        :func:`wikitextparser.replace_external_link_targets`.
+        """
+        from ._externallink import replace_external_link_targets
+
+        return replace_external_link_targets(
+            self, replacements, with_report=with_report
+        )
+
+    @property
+    def external_links_info(self):
+        """Return an analysis object for each external link in self."""
+        from ._externallink import analyze_external_links
+
+        return analyze_external_links(self)
 
     def _section_spans_to_sections(
         self, section_spans: list[tuple[int, int]], shadow: bytearray

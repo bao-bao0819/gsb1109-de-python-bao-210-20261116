@@ -33,6 +33,46 @@ WikiTextParser can detect sections, parser functions, templates, wiki links, ext
 
 You may also want to have a look at the test modules for more examples and probable pitfalls (expected failures).
 
+External links
+--------------
+
+A bracketed external link has a proven boundary: its target is the bytes
+between ``[`` and the first space, and its display text is the remainder before
+``]``. A free link has no delimiter, so trailing sentence punctuation and
+unbalanced closing parentheses may either belong to the URL or to the
+surrounding prose. ``ExternalLink.analyze`` returns the canonical boundary,
+the display range, and every alternative as a candidate:
+
+.. code:: python
+
+    >>> el = wtp.parse('See https://en.wikipedia.org/wiki/Foo_(bar). Next.').external_links[0]
+    >>> info = el.analyze()
+    >>> info.link_span, info.target_span, info.display_span
+    ((4, 43), (4, 43), None)
+    >>> info.target
+    'https://en.wikipedia.org/wiki/Foo_(bar)'
+    >>> [c.target for c in info.candidates]
+    ['https://en.wikipedia.org/wiki/Foo_(bar)', 'https://en.wikipedia.org/wiki/Foo_(bar).']
+
+Bracketed links also report whether the display text merely repeats the
+target:
+
+.. code:: python
+
+    >>> info = wtp.parse('[https://example.com/a https://example.com/a]').external_links[0].analyze()
+    >>> info.display_equals_target
+    True
+
+Use ``replace_external_link_targets`` (or ``WikiText.replace_external_link_targets``) to change only the target bytes of matching occurrences. Display
+text and prose with the same bytes are left alone, and the replacement is
+rejected before any mutation if reparsing would not yield the same link:
+
+.. code:: python
+
+    >>> s = 'See [https://old.example/a https://old.example/a].'
+    >>> wtp.replace_external_link_targets(s, {'https://old.example/a': 'https://new.example/b'})
+    'See [https://new.example/b https://old.example/a].'
+
 Templates
 ---------
 

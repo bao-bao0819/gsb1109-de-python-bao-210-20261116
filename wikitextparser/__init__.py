@@ -4,7 +4,16 @@ __version__ = '3.0.1.dev1'
 from . import _wikitext
 from ._argument import Argument  # noqa: F401
 from ._comment_bold_italic import Bold, Comment, Italic
-from ._externallink import ExternalLink
+from ._externallink import (
+    ExternalLink,
+    ExternalLinkCandidate,  # noqa: F401
+    ExternalLinkInfo,  # noqa: F401
+    ExternalLinkReplacement,  # noqa: F401
+    ExternalLinkReplacements,  # noqa: F401
+    analyze_external_links,  # noqa: F401
+    replace_external_link_targets,  # noqa: F401
+    replace_external_link_targets_in_text,  # noqa: F401
+)
 from ._parameter import Parameter
 from ._parser_function import ParserFunction
 from ._section import Section

@@ -1,6 +1,15 @@
 Unreleased
 ----------
-* 
+* Added ``ExternalLink.analyze()``/``ExternalLink.info`` and
+  ``WikiText.external_links_info`` for link boundaries, display ranges,
+  canonical targets, and boundary candidates.
+* Free external links now end at the MediaWiki ``makeFreeExternalLink``
+  boundary: trailing sentence punctuation and unbalanced closing parentheses
+  are excluded from the target, while balanced parentheses remain.
+* Added ``replace_external_link_targets`` and
+  ``WikiText.replace_external_link_targets`` to change only target bytes.
+  Replacement is rejected before mutation if reparsing would not recognize the
+  same link occurrence or preserve the display text.
 
 v3.0.0 (2026-10-08)
 -------------------

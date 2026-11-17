@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- Add `edfio.clock_sync` module for querying raw sample ranges across devices on a unified experiment timeline using per-device piecewise clock correction tables, distinguishing definite from only-possible matches when corrections carry error ranges, and keeping all valid intervals at overlapping segment switches without resampling signals to a common sampling frequency
+
 ## [0.4.18] - 2026-10-01
 
 ### Fixed

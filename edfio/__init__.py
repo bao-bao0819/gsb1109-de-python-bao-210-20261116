@@ -1,3 +1,11 @@
+from edfio.clock_sync import (
+    ClockCorrectionSegment,
+    ClockCorrectionTable,
+    DeviceTimeWindow,
+    ExperimentWindowMapping,
+    SampleRange,
+    SignalSampleRanges,
+)
 from edfio.edf import Bdf, Edf, read_bdf, read_edf
 from edfio.edf_annotations import EdfAnnotation
 from edfio.edf_header import AnonymizedDateError, Patient, Recording
@@ -15,11 +23,17 @@ __all__ = [
     "AnonymizedDateError",
     "Bdf",
     "BdfSignal",
+    "ClockCorrectionSegment",
+    "ClockCorrectionTable",
+    "DeviceTimeWindow",
     "Edf",
     "EdfAnnotation",
     "EdfSignal",
+    "ExperimentWindowMapping",
     "Patient",
     "Recording",
+    "SampleRange",
+    "SignalSampleRanges",
     "read_bdf",
     "read_edf",
 ]

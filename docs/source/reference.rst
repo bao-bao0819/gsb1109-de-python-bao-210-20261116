@@ -17,3 +17,9 @@ API reference
    Patient
    Recording
    AnonymizedDateError
+   ClockCorrectionSegment
+   ClockCorrectionTable
+   DeviceTimeWindow
+   ExperimentWindowMapping
+   SampleRange
+   SignalSampleRanges

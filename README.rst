@@ -32,6 +32,9 @@ Features
   ``zipfile``;
 - Supports read and write the descriptions of files;
 - Supports missing values and names with spaces;
+- Supports cross-attribute constraint checking (allowed combinations,
+  implications and mutual exclusions) with completion ranges for missing
+  values and minimal conflict reports;
 - Supports unicode values and names;
 - Fully compatible with Python 3.6+;
 - Under `MIT License <http://opensource.org/licenses/MIT>`_

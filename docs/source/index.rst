@@ -41,6 +41,59 @@ Basic Usage
 .. autofunction:: arff.loads
 .. autofunction:: arff.dump
 .. autofunction:: arff.dumps
+.. autofunction:: arff.check_constraints
+
+
+---------------------
+Cross-attribute rules
+---------------------
+
+ARFF validates each value independently.  Device configurations often also
+have rules that span attributes: allowed combinations, implications and
+mutual exclusions.  ``arff_constraints`` checks those rules without turning
+missing values into errors.
+
+.. code-block:: python
+
+    import arff
+    import arff_constraints
+
+    rules = {
+        'allowed': [
+            {'power': 'on', 'mode': 'fast', 'cooling': 'active'},
+            {'power': 'off', 'mode': 'idle', 'cooling': 'inactive'},
+        ],
+        'implies': [
+            {'if': {'power': 'on'}, 'then': {'bypass': 'disabled'}},
+        ],
+        'excludes': [
+            ('cooling', 'active', 'bypass', 'enabled'),
+        ],
+    }
+
+    report = arff_constraints.check_constraints('devices.arff', rules,
+                                                include_completions=True)
+    for row in report['rows']:
+        if not row['has_completion']:
+            print(row['index'], row['conflict'])
+
+Every row result has a ``status`` of ``complete``, ``completable`` or
+``conflict``.  A ``completable`` row reports ``possible_values`` for each
+originally missing field; it never picks one completion arbitrarily.  A
+``conflict`` row reports an inclusion-minimal (and, when the bounded search
+finishes, minimum-cardinality) set of observed fields that cannot hold
+together, together with the rules they violate.
+
+The ``python -m arff_constraints`` command takes an ARFF file and a JSON rule
+file and writes the same report as JSON.  It exits with status 1 when at
+least one observation has no legal completion.
+
+.. autoclass:: arff_constraints.ConstraintChecker
+   :members:
+
+.. autoexception:: arff_constraints.BadRule
+
+.. autoexception:: arff_constraints.BadObservation
 
 
 ---------------------

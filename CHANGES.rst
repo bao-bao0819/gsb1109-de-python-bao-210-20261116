@@ -2,6 +2,14 @@
 What's New in LIAC-ARFF
 ~~~~~~~~~~~~~~~~~~~~~~~
 
+Unreleased
+
+* new: ``arff_constraints`` module and ``arff.check_constraints`` for
+  cross-attribute allowed combinations, implications and mutual exclusions.
+  Missing values are treated as variables and reported as value ranges; rows
+  with no legal completion report an inclusion-minimal conflict field set.
+* new: ``python -m arff_constraints`` command-line checker.
+
 LIAC-ARFF 2.5
 
 This is the last release supporting Python 2.

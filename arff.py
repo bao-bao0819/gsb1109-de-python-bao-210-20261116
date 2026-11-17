@@ -1087,4 +1087,28 @@ def dumps(obj):
     '''
     encoder = ArffEncoder()
     return encoder.encode(obj)
+
+
+def check_constraints(source, rules, include_completions=False,
+                      max_completions=100):
+    '''Check ARFF observations against cross-attribute constraints.
+
+    The rules describe allowed value combinations, implications and mutual
+    exclusions that apply to whole observations.  Missing fields are treated
+    as variables: a row is valid when at least one legal completion exists,
+    and the possible values of each originally missing field are returned
+    instead of being guessed.
+
+    This is a thin wrapper over :mod:`arff_constraints`.
+
+    :param source: a decoded ARFF dictionary, ARFF text or file-like object.
+    :param rules: the constraint rules.
+    :param include_completions: include example completions.
+    :param max_completions: limit for those examples.
+    :return: a dictionary with one result per observation.
+    '''
+    from arff_constraints import check_constraints as _check_constraints
+    return _check_constraints(source, rules,
+                              include_completions=include_completions,
+                              max_completions=max_completions)
 # =============================================================================

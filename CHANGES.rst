@@ -2,6 +2,14 @@
 What's New in LIAC-ARFF
 ~~~~~~~~~~~~~~~~~~~~~~~
 
+Unreleased
+
+* enhancement: add `compare_imports`, `data_equivalent`, `needs_reimport`,
+  `data_version`, `metadata_version` and `import_signature` to distinguish
+  data changes from metadata-only changes in incremental imports. Nominal
+  label replacements are detected even when encoded positions are unchanged;
+  comments never trigger a re-import.
+
 LIAC-ARFF 2.5
 
 This is the last release supporting Python 2.

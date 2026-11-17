@@ -150,6 +150,11 @@ __version__ = '2.4.0'
 import re
 import sys
 import csv
+import math
+import numbers
+import hashlib
+import json
+from collections import Counter
 from typing import Optional
 
 # CONSTANTS ===================================================================
@@ -1087,4 +1092,445 @@ def dumps(obj):
     '''
     encoder = ArffEncoder()
     return encoder.encode(obj)
+# =============================================================================
+
+# IMPORT COMPARISON ===========================================================
+# An import result is the dictionary returned by `load`/`loads` (or an
+# equivalent object).  Incremental importers need two independent answers:
+#
+# * Is the observed data the same?
+# * Which metadata version describes it?
+#
+# The conventions below are intentionally explicit:
+#
+# * Nominal *label order* is metadata.  It belongs to `metadata_version`, but
+#   not to data equivalence when values are symbolic.  When values were decoded
+#   with `encode_nominal=True`, integers are positions in that declaration, so
+#   reordering the labels changes what an unchanged integer means and is
+#   therefore a data change.  Replacing labels is always a data change, even
+#   when the integer positions are unchanged.
+# * Missing values are one value.  ``None``, ``?``, the empty string and NaN
+#   all compare equal.
+# * Row order is ignored by default and rows are compared as a multiset, so
+#   duplicate rows still count.  Pass ``row_order='ordered'`` for a sequence
+#   comparison.
+# * Relation names, descriptions/comments and attribute names are metadata, not
+#   data.  A changed or moved comment produces a new `metadata_version` but
+#   never a re-import.  Attribute order is structural: columns are compared
+#   positionally.
+# * Columns are compared positionally.
+
+ROW_ORDER_UNORDERED = 'unordered'
+ROW_ORDER_ORDERED = 'ordered'
+
+_ROW_ORDER_ALIASES = {
+    None: ROW_ORDER_UNORDERED,
+    False: ROW_ORDER_UNORDERED,
+    True: ROW_ORDER_ORDERED,
+    'unordered': ROW_ORDER_UNORDERED,
+    'ignore': ROW_ORDER_UNORDERED,
+    'ignored': ROW_ORDER_UNORDERED,
+    'multiset': ROW_ORDER_UNORDERED,
+    'set': ROW_ORDER_UNORDERED,
+    'ordered': ROW_ORDER_ORDERED,
+    'strict': ROW_ORDER_ORDERED,
+    'sequence': ROW_ORDER_ORDERED,
+}
+
+_MISSING = ('missing',)
+
+
+def _normalise_row_order(row_order, ordered=None):
+    if ordered is not None:
+        row_order = ordered
+    try:
+        return _ROW_ORDER_ALIASES[row_order]
+    except (KeyError, TypeError):
+        raise ValueError(
+            "row_order must be 'unordered'/'ordered' (or a boolean), got %r"
+            % (row_order,)
+        )
+
+
+def _attribute_semantics(type_):
+    '''Return a hashable description of an attribute's value domain.'''
+    if isinstance(type_, str):
+        type_name = type_.strip().upper()
+        if type_name in ('NUMERIC', 'REAL', 'INTEGER'):
+            return ('numeric',)
+        if type_name == 'STRING':
+            return ('string',)
+        return ('type', type_name)
+
+    try:
+        labels = tuple(str(label) for label in type_)
+    except TypeError:
+        return ('type', str(type_))
+    return ('nominal', labels)
+
+
+def _data_kind(semantics):
+    '''The part of a declaration that affects how data values are compared.'''
+    if semantics[0] == 'nominal':
+        # Order belongs to metadata; the labels themselves belong to data.
+        return ('nominal', tuple(sorted(set(semantics[1]))))
+    if semantics[0] in ('numeric', 'string'):
+        return (semantics[0],)
+    return ('type', semantics[1])
+
+
+def _attributes(obj):
+    attributes = obj.get('attributes', []) if isinstance(obj, dict) else []
+    result = []
+    for attribute in attributes:
+        if not isinstance(attribute, (tuple, list)) or len(attribute) != 2:
+            raise ValueError('Invalid attribute declaration %r' % (attribute,))
+        result.append((attribute[0], attribute[1]))
+    return result
+
+
+def _is_missing(value, semantics):
+    if value is None:
+        return True
+    try:
+        if bool(value != value):
+            return True
+    except (TypeError, ValueError):
+        pass
+
+    if isinstance(value, str):
+        kind = semantics[0]
+        if kind == 'nominal':
+            # A declared label, including a quoted '?' or empty label, is a
+            # value; an undeclared ARFF missing token is missing.
+            if value in semantics[1]:
+                return False
+            return value == '' or value == '?'
+        if kind == 'string':
+            # Quoted empty strings and quoted '?' are legitimate STRING
+            # values.  Unquoted forms have already been decoded to None.
+            return False
+        # Numerical attributes cannot hold these tokens as values.
+        return value == '' or value == '?'
+    return False
+
+
+def _is_encoded_nominal_value(value):
+    return isinstance(value, numbers.Integral) and not isinstance(value, bool)
+
+
+def _canonical_value(value, semantics):
+    if _is_missing(value, semantics):
+        return _MISSING
+
+    kind = semantics[0]
+    if kind == 'numeric':
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return ('raw', str(value))
+        if math.isnan(number):
+            return _MISSING
+        if number == 0:
+            number = 0.0
+        return ('number', number)
+
+    if kind == 'string':
+        return ('string', str(value))
+
+    if kind == 'nominal':
+        labels = semantics[1]
+        if _is_encoded_nominal_value(value):
+            index = int(value)
+            if 0 <= index < len(labels):
+                return ('nominal', labels[index])
+            return ('nominal-index', index)
+        return ('nominal', str(value))
+
+    return ('raw', str(value))
+
+
+def _default_canonical(semantics):
+    '''The value a sparse representation implies for an omitted column.
+
+    This mirrors the decoders: numeric slots default to 0, nominal slots to
+    their first label and STRING slots to the literal ``'0'``.
+    '''
+    if semantics[0] == 'numeric':
+        return _canonical_value(0.0, semantics)
+    if semantics[0] == 'nominal' and semantics[1]:
+        return _canonical_value(semantics[1][0], semantics)
+    if semantics[0] == 'string':
+        return _canonical_value('0', semantics)
+    return _MISSING
+
+
+def _looks_like_coo(data):
+    # `load(return_type=COO)` returns a (data, rows, cols) tuple; dense data is
+    # always a list.  scipy COO matrices expose a `format` attribute.
+    if hasattr(data, 'row') and hasattr(data, 'col') and hasattr(data, 'data'):
+        return True
+    if not isinstance(data, tuple) or len(data) != 3:
+        return False
+    values, row_indices, col_indices = data
+    if not all(isinstance(part, list) for part in data):
+        return False
+    if not (len(values) == len(row_indices) == len(col_indices)):
+        return False
+    return (all(isinstance(index, numbers.Integral) for index in row_indices)
+            and all(isinstance(index, numbers.Integral) for index in col_indices))
+
+
+def _row_from_mapping(row, semantics):
+    result = []
+    for index, attribute_semantics in enumerate(semantics):
+        if index in row:
+            result.append(_canonical_value(row[index], attribute_semantics))
+        else:
+            result.append(_default_canonical(attribute_semantics))
+
+    for key in sorted(row, key=repr):
+        if not isinstance(key, numbers.Integral) or key < 0 or key >= len(semantics):
+            result.append(('extra-index', str(key),
+                           _canonical_value(row[key], ('type', 'raw'))))
+    return tuple(result)
+
+
+def _row_from_dense(row, semantics):
+    if isinstance(row, dict):
+        return _row_from_mapping(row, semantics)
+
+    values = list(row)
+    result = [
+        _canonical_value(values[index], attribute_semantics)
+        if index < len(values) else _MISSING
+        for index, attribute_semantics in enumerate(semantics)
+    ]
+    for value in values[len(semantics):]:
+        result.append(('extra', _canonical_value(value, ('type', 'raw'))))
+    if len(values) != len(semantics):
+        result.append(('length', len(values)))
+    return tuple(result)
+
+
+def _rows_from_coo(data, semantics):
+    if hasattr(data, 'format'):
+        values = data.data
+        row_indices = data.row
+        col_indices = data.col
+        row_count = int(data.shape[0])
+    else:
+        values, row_indices, col_indices = data
+        row_count = max((int(index) for index in row_indices), default=-1) + 1
+
+    rows = [dict() for _ in range(row_count)]
+    for value, row_index, col_index in zip(values, row_indices, col_indices):
+        rows[int(row_index)][int(col_index)] = value
+    return [_row_from_mapping(row, semantics) for row in rows]
+
+
+def _materialise_rows(obj, semantics):
+    data = obj.get('data', []) if isinstance(obj, dict) else []
+    if data is None:
+        return []
+    if isinstance(data, dict):
+        return [_row_from_mapping(data, semantics)]
+    if _looks_like_coo(data):
+        return _rows_from_coo(data, semantics)
+    if hasattr(data, '__next__'):
+        raise ValueError(
+            'Progressive data (return_type=DENSE_GEN/LOD_GEN) must be '
+            'materialised before comparison; a consumed iterator cannot be '
+            'compared reliably.'
+        )
+
+    iterator = iter(data)
+    try:
+        first = next(iterator)
+    except StopIteration:
+        return []
+
+    if isinstance(first, dict):
+        rows = [_row_from_mapping(first, semantics)]
+        rows.extend(_row_from_mapping(row, semantics) for row in iterator)
+    else:
+        rows = [_row_from_dense(first, semantics)]
+        rows.extend(_row_from_dense(row, semantics) for row in iterator)
+    return rows
+
+
+def _canonical_data(obj):
+    attributes = _attributes(obj)
+    semantics = [_attribute_semantics(type_) for _, type_ in attributes]
+    rows = _materialise_rows(obj, semantics)
+    return semantics, rows
+
+
+def _canonical_dumps(value):
+    return json.dumps(value, ensure_ascii=False, sort_keys=True,
+                      separators=(',', ':'))
+
+
+def _digest(payload):
+    return hashlib.sha256(_canonical_dumps(payload).encode('utf-8')).hexdigest()
+
+
+def data_equivalent(left, right, row_order=ROW_ORDER_UNORDERED, ordered=None):
+    '''Return whether two import results contain equivalent data.
+
+    Metadata such as relation names, comments and attribute names is ignored.
+    Nominal label sets are part of the data (a renamed label is a data change),
+    while nominal label order is metadata for symbolic values.  A nominal value
+    decoded with ``encode_nominal=True`` is resolved through its declaration,
+    so its label - not merely its integer position - is compared.
+
+    ``None``, ``?``, ``''`` and NaN are all the same missing value.  Row order
+    is ignored unless ``row_order='ordered'`` (or ``ordered=True``) is given.
+    Duplicate rows are counted in both modes.
+    '''
+    mode = _normalise_row_order(row_order, ordered)
+
+    left_semantics, left_rows = _canonical_data(left)
+    right_semantics, right_rows = _canonical_data(right)
+
+    if len(left_semantics) != len(right_semantics):
+        return False
+    if any(_data_kind(left_semantics[index]) !=
+           _data_kind(right_semantics[index])
+           for index in range(len(left_semantics))):
+        return False
+
+    if mode == ROW_ORDER_ORDERED:
+        return left_rows == right_rows
+    return Counter(left_rows) == Counter(right_rows)
+
+
+def data_version(obj, row_order=ROW_ORDER_UNORDERED, ordered=None):
+    '''Return a stable digest of the data in an import result.
+
+    The digest follows the same comparison contract as `data_equivalent`.
+    Equivalent import results have the same digest.
+    '''
+    mode = _normalise_row_order(row_order, ordered)
+    semantics, rows = _canonical_data(obj)
+
+    serialised_rows = [_canonical_dumps(list(row)) for row in rows]
+    if mode == ROW_ORDER_UNORDERED:
+        serialised_rows.sort()
+
+    return _digest({
+        'columns': [_data_kind(attribute_semantics)
+                    for attribute_semantics in semantics],
+        'rows': serialised_rows,
+    })
+
+
+def _metadata_payload(obj, include_comments=True):
+    attributes = []
+    for name, type_ in _attributes(obj):
+        semantics = _attribute_semantics(type_)
+        if semantics[0] == 'nominal':
+            attributes.append({
+                'name': str(name),
+                'type': 'NOMINAL',
+                'values': [str(label) for label in semantics[1]],
+            })
+        elif semantics[0] in ('numeric', 'string'):
+            attributes.append({
+                'name': str(name),
+                'type': str(type_).upper(),
+            })
+        else:
+            attributes.append({
+                'name': str(name),
+                'type': semantics[1],
+            })
+
+    payload = {
+        'relation': str(obj.get('relation', '')),
+        'attributes': attributes,
+    }
+    if include_comments:
+        payload['description'] = str(obj.get('description', '') or '')
+    return payload
+
+
+def metadata_version(obj, include_comments=True):
+    '''Return a stable digest of an import result's metadata.
+
+    The version covers the relation name, attribute declarations and the
+    description/comment block.  It includes attribute names, attribute order,
+    numeric/string types and the *ordered* nominal labels.  Comments never
+    affect data equivalence or `needs_reimport`; they only produce a new
+    metadata version.  Pass ``include_comments=False`` when the importer treats
+    comments as non-versioned annotations.
+    '''
+    return _digest(_metadata_payload(obj, include_comments))
+
+
+def import_signature(obj, row_order=ROW_ORDER_UNORDERED, ordered=None):
+    '''Return the data and metadata versions of one import result.'''
+    return ImportSignature({
+        'data_version': data_version(obj, row_order=row_order, ordered=ordered),
+        'metadata_version': metadata_version(obj),
+    })
+
+
+class _AttributeDict(dict):
+    '''A dict whose keys are also readable as attributes.'''
+
+    def __getattr__(self, name):
+        try:
+            return self[name]
+        except KeyError:
+            raise AttributeError(name)
+
+
+class ImportComparison(_AttributeDict):
+    '''Result of `compare_imports`, usable as a mapping or with attributes.'''
+
+
+class ImportSignature(_AttributeDict):
+    '''Data and metadata versions for one import result.'''
+
+
+def compare_imports(previous, current, row_order=ROW_ORDER_UNORDERED,
+                    ordered=None):
+    '''Compare two import results without conflating data and metadata.
+
+    Returns a mapping with ``data_equivalent``, ``data_changed``,
+    ``metadata_changed``, ``needs_reimport`` and the two metadata versions.
+    ``needs_reimport`` is true only when the data changed: relation renames and
+    comment changes are metadata updates, not reasons to re-import samples.
+    '''
+    mode = _normalise_row_order(row_order, ordered)
+    same_data = data_equivalent(previous, current, row_order=mode)
+    previous_metadata = _metadata_payload(previous)
+    current_metadata = _metadata_payload(current)
+    previous_version = metadata_version(previous)
+    current_version = metadata_version(current)
+
+    return ImportComparison({
+        'data_equivalent': same_data,
+        'data_changed': not same_data,
+        'metadata_changed': previous_version != current_version,
+        'metadata_equivalent': previous_version == current_version,
+        'previous_metadata_version': previous_version,
+        'metadata_version': current_version,
+        'relation_changed': (
+            previous_metadata['relation'] != current_metadata['relation']),
+        'attributes_changed': (
+            previous_metadata['attributes'] != current_metadata['attributes']),
+        'description_changed': (
+            str(previous.get('description', '') or '') !=
+            str(current.get('description', '') or '')),
+        'needs_reimport': not same_data,
+    })
+
+
+def needs_reimport(previous, current, row_order=ROW_ORDER_UNORDERED,
+                   ordered=None):
+    '''Return whether the data changed enough to require a re-import.'''
+    return not data_equivalent(previous, current, row_order=row_order,
+                               ordered=ordered)
 # =============================================================================

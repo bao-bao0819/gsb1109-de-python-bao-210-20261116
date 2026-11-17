@@ -43,6 +43,50 @@ Basic Usage
 .. autofunction:: arff.dumps
 
 
+--------------------------------
+Comparing Import Results
+--------------------------------
+
+Incremental importers need to distinguish a data change from a metadata-only
+change. A relation rename or a comment edit should not reload the samples,
+while renaming a nominal category should. Use `arff.compare_imports`::
+
+    previous = arff.loads(old_arff)
+    current = arff.loads(new_arff)
+
+    result = arff.compare_imports(previous, current)
+    if result.needs_reimport:
+        reimport(current)
+    elif result.metadata_changed:
+        update_metadata(result.metadata_version)
+
+The comparison follows these conventions:
+
+- **Nominal labels** are data. Replacing a label is a data change, even when
+  the encoded integer positions stay the same.
+- **Nominal declaration order** is metadata when values are symbolic. With
+  ``encode_nominal=True``, values are positions, so reordering labels changes
+  their meaning and is a data change.
+- **Missing values** are one value: ``None``, ``?``, ``''`` and NaN compare
+  equal. A quoted ``'?'`` or empty string in a nominal/string column is a
+  declared value, not a missing value.
+- **Row order** is ignored by default; rows compare as a multiset, so
+  duplicate rows still count. Use ``row_order='ordered'`` (or
+  ``ordered=True``) for a strict sequence comparison.
+- **Relation names, descriptions, comments and attribute names** are metadata,
+  not data. Comments produce a new `arff.metadata_version` but never a
+  re-import. Pass ``include_comments=False`` to `arff.metadata_version` to
+  leave them out of the metadata version too.
+- **Columns** are compared positionally. Progressive data
+  (``return_type=DENSE_GEN`` or ``LOD_GEN``) must be materialised first, since
+  a consumed iterator cannot be compared reliably.
+
+`arff.data_equivalent`, `arff.needs_reimport`, `arff.data_version`,
+`arff.metadata_version` and `arff.import_signature` expose the same contract
+individually. Versions are SHA-256 digests over a canonical form, so equivalent
+imports produce equal digests.
+
+
 ---------------------
 Encoders and Decoders
 ---------------------

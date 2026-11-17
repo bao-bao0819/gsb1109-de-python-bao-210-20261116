@@ -1,7 +1,21 @@
+from edfio.derived import (
+    ChannelDerivationReport,
+    DerivationRegistry,
+    DerivationReport,
+    DerivationResult,
+    DerivedChannel,
+    DerivedChannelSpec,
+    UpdateReport,
+    compute_differential_channel,
+    derive_differential_channels,
+    get_derived_channel,
+    normalize_bad_segments,
+    set_bad_segments,
+)
 from edfio.edf import Bdf, Edf, read_bdf, read_edf
 from edfio.edf_annotations import EdfAnnotation
 from edfio.edf_header import AnonymizedDateError, Patient, Recording
-from edfio.edf_signal import BdfSignal, EdfSignal
+from edfio.edf_signal import BadSegment, BdfSignal, EdfSignal
 
 try:
     from importlib.metadata import version
@@ -13,13 +27,26 @@ except Exception:  # pragma: no cover
 
 __all__ = [
     "AnonymizedDateError",
+    "BadSegment",
     "Bdf",
     "BdfSignal",
+    "ChannelDerivationReport",
+    "DerivationRegistry",
+    "DerivationReport",
+    "DerivationResult",
+    "DerivedChannel",
+    "DerivedChannelSpec",
     "Edf",
     "EdfAnnotation",
     "EdfSignal",
     "Patient",
     "Recording",
+    "UpdateReport",
+    "compute_differential_channel",
+    "derive_differential_channels",
+    "get_derived_channel",
+    "normalize_bad_segments",
     "read_bdf",
     "read_edf",
+    "set_bad_segments",
 ]

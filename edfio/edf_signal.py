@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import sys
 import warnings
+from dataclasses import dataclass
 from typing import Any, Callable, ClassVar, Generic, Literal, NamedTuple
 
 import numpy as np
@@ -35,6 +36,41 @@ class _IntRange(NamedTuple):
 class _FloatRange(NamedTuple):
     min: float
     max: float
+
+
+@dataclass(frozen=True)
+class BadSegment:
+    """A time interval of a source signal that must not be used for derivation.
+
+    Intervals are half-open (``[start_time, stop_time)``) and specified in seconds
+    relative to the recording start. They cover gaps (missing samples), saturated
+    portions, and otherwise unusable data. A measured value of exactly zero is not a bad
+    segment by itself; such values remain valid inputs.
+
+    Parameters
+    ----------
+    start_time : float
+        Start of the interval in seconds from the recording start.
+    stop_time : float
+        End of the interval in seconds from the recording start.
+    reason : str, default: `""`
+        Optional human-readable explanation, e.g. `"gap"` or `"saturation"`.
+    """
+
+    start_time: float
+    stop_time: float
+    reason: str = ""
+
+    def __post_init__(self) -> None:
+        if self.stop_time < self.start_time:
+            raise ValueError(
+                f"Bad segment stop_time ({self.stop_time}) must not be before "
+                f"start_time ({self.start_time})"
+            )
+
+    def overlaps(self, start_time: float, stop_time: float) -> bool:
+        """Return whether the half-open interval overlaps this bad segment."""
+        return self.start_time < stop_time and start_time < self.stop_time
 
 
 def _round_float_to_8_characters(
@@ -99,6 +135,7 @@ class _BaseSignal(Generic[_DigitalDtype]):
     _bytes_per_sample: ClassVar[Literal[2, 3]]
     _digital: npt.NDArray[_DigitalDtype] | None = None
     _lazy_loader: LazyLoader[_DigitalDtype] | None = None
+    _bad_segments: tuple[BadSegment, ...] = ()
 
     def __init__(
         self,
@@ -125,6 +162,7 @@ class _BaseSignal(Generic[_DigitalDtype]):
         self._set_digital_range(digital_range)
         self._set_data(data)
         self._header_encoding = "ascii"
+        self._bad_segments: tuple[BadSegment, ...] = ()
 
     @classmethod
     def from_digital(
@@ -362,6 +400,19 @@ class _BaseSignal(Generic[_DigitalDtype]):
     def sampling_frequency(self) -> float:
         """The sampling frequency in Hz."""
         return self._sampling_frequency
+
+    @property
+    def bad_segments(self) -> tuple[BadSegment, ...]:
+        """
+        Time intervals of this signal that must not be used when deriving new signals.
+
+        The intervals are half-open (``[start_time, stop_time)``), given in seconds
+        relative to the recording start, and represent gaps, saturation, or other
+        unusable data. A measured zero value is not considered bad. Use
+        :func:`edfio.set_bad_segments` to update them; signals derived from this one are
+        then recomputed or withdrawn over the affected intervals.
+        """
+        return self._bad_segments
 
     @property
     def digital(self) -> npt.NDArray[_DigitalDtype]:

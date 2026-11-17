@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Added
+- Add differential channel derivation (`compute_differential_channel`, `derive_differential_channels`) that subtracts calibrated physical values on a common LCM time grid and only emits samples where every source is usable
+- Add `BadSegment` and the `EdfSignal.bad_segments` property to mark gaps, saturation, and other unusable intervals; `set_bad_segments` recomputes derived channels and reports withdrawn, restored, and recomputed intervals
+- Add saturation detection at the digital rails, separate tracking of genuine zero samples, and per-source availability masks for provenance
+
 ## [0.4.18] - 2026-10-01
 
 ### Fixed

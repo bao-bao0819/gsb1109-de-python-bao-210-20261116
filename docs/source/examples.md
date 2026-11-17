@@ -105,3 +105,55 @@ edf = read_edf("example.edf")
 edf.anonymize()
 edf.write("example_anonymized.edf")
 ```
+
+## Derive differential channels
+A differential channel is computed as the calibrated physical difference
+`positive - negative`. It is evaluated on a common time grid (the least common
+multiple of the source sampling frequencies), and a derived sample is only
+emitted at a time at which every source has a usable sample. Gaps, marked bad
+segments, and saturated samples make an output sample unavailable (represented
+as `NaN`), whereas a measured value of exactly zero is kept as a valid sample.
+
+```python
+import numpy as np
+
+from edfio import (
+    BadSegment,
+    DerivedChannelSpec,
+    Edf,
+    EdfSignal,
+    derive_differential_channels,
+    get_derived_channel,
+    set_bad_segments,
+)
+
+eeg_a = EdfSignal(np.random.randn(100), 10, label="EEG A", physical_dimension="uV")
+reference = EdfSignal(np.random.randn(100), 10, label="EEG Ref", physical_dimension="uV")
+edf = Edf([eeg_a, reference])
+
+result = derive_differential_channels(
+    edf,
+    [DerivedChannelSpec(label="EEG A-Ref", positive="EEG A", negative="EEG Ref")],
+)
+channel = result.channels[0]
+channel.data            # physical differences, NaN where a source is unusable
+channel.available_mask  # True where every source was usable
+channel.zero_mask       # genuine zero samples, separate from missing data
+channel.source_available_masks  # per-source provenance of every sample
+```
+
+Mark a bad interval of a source (a gap or saturation). Every derived channel
+that uses the source is recomputed, including channels that only use it as a
+shared reference. The report lists the withdrawn, restored, and recomputed
+intervals; samples of unrelated channels stay available and traceable.
+
+```python
+report = set_bad_segments(reference, [BadSegment(2.0, 2.5, "gap")], recording=edf)
+report.withdrawn_intervals    # {"EEG A-Ref": ((2.0, 2.5),)}
+report.unaffected_channels    # channels not using "EEG Ref"
+
+# clearing the bad segments restores the previously withdrawn samples
+set_bad_segments(reference, [], recording=edf)
+get_derived_channel(edf, "EEG A-Ref").available_mask
+```
+

@@ -17,3 +17,16 @@ API reference
    Patient
    Recording
    AnonymizedDateError
+   BadSegment
+   DerivedChannelSpec
+   DerivedChannel
+   DerivationResult
+   DerivationReport
+   ChannelDerivationReport
+   UpdateReport
+   DerivationRegistry
+   compute_differential_channel
+   derive_differential_channels
+   get_derived_channel
+   set_bad_segments
+   normalize_bad_segments

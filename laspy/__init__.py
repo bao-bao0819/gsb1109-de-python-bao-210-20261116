@@ -5,6 +5,13 @@ import logging
 from . import errors, file, vlrs
 from .copc import Bounds, CopcReader
 from .errors import LaspyException
+from .grid import (
+    GridDefinition,
+    GridIndexBuilder,
+    GridOrigin,
+    PointGridIndex,
+    build_point_grid_index,
+)
 from .header import LasHeader
 from .lasdata import LasData
 from .lasreader import LasReader

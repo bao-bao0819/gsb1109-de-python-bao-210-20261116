@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Global grid indexing of point clouds (`laspy.grid`, also exported as
+  `laspy.build_point_grid_index`). Points of one or several LAS/LAZ files are
+  assigned to cells of an explicit, input-defined grid using a half-open
+  `floor` rule, so boundary points are never counted twice and the assignment
+  is independent of file order, reading chunk size and the bounding boxes
+  stored in file headers. Each indexed point keeps its source file and its
+  index inside that file.
+
 ## Version 2.7.0 (14/01/2026)
 
 ### Added

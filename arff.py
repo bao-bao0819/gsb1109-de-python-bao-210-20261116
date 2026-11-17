@@ -130,8 +130,10 @@ This module provides several features, including:
 - Supports `scipy.sparse.coo <http://docs.scipy
   .org/doc/scipy/reference/generated/scipy.sparse.coo_matrix.html#scipy.sparse.coo_matrix>`_
   and lists of dictionaries as used by SVMLight
-- Supports the following attribute types: NUMERIC, REAL, INTEGER, STRING, and
-  NOMINAL;
+- Supports the following attribute types: NUMERIC, REAL, INTEGER, STRING,
+  NOMINAL and RELATIONAL (multi-instance attributes, whose value is a list of
+  sub-rows, an empty list for an empty sub-table, or ``None`` for a missing
+  value);
 - Has an interface similar to other built-in modules such as ``json``, or
   ``zipfile``;
 - Supports read and write the descriptions of files;
@@ -160,6 +162,7 @@ _TK_COMMENT     = '%'
 _TK_RELATION    = '@RELATION'
 _TK_ATTRIBUTE   = '@ATTRIBUTE'
 _TK_DATA        = '@DATA'
+_TK_END         = '@END'
 
 _RE_RELATION     = re.compile(r'^([^\{\}%,\s]*|\".*\"|\'.*\')$', re.UNICODE)
 _RE_ATTRIBUTE    = re.compile(r'^(\".*\"|\'.*\'|[^\{\}%,\s]*)\s+(.+)$', re.UNICODE)
@@ -167,6 +170,12 @@ _RE_QUOTE_CHARS = re.compile(r'["\'\\\s%,\000-\031]', re.UNICODE)
 _RE_ESCAPE_CHARS = re.compile(r'(?=["\'\\%])|[\n\r\t\000-\031]')
 _RE_SPARSE_LINE = re.compile(r'^\s*\{.*\}\s*$', re.UNICODE)
 _RE_NONTRIVIAL_DATA = re.compile('["\'{}\\s]', re.UNICODE)
+_RE_RELATIONAL_TYPE = re.compile(r'^relational\s*$', re.IGNORECASE)
+_RE_END_LINE = re.compile(r'^@end\b', re.IGNORECASE)
+
+# Marker used as the type of a RELATIONAL attribute. The decoded attribute is
+# represented as ``(name, ('RELATIONAL', (sub-attributes...)))``.
+RELATIONAL = 'RELATIONAL'
 
 
 def _build_re_values():
@@ -293,6 +302,35 @@ def _parse_values(s):
         raise BadLayout('Unknown parsing error')
 
 
+def _make_conversor(attr, encode_nominal=False):
+    '''(INTERNAL) Build the value conversor for a decoded attribute.'''
+    type_ = attr[1]
+    if isinstance(type_, (list, tuple)) and not (
+            isinstance(type_, tuple) and type_
+            and type_[0] == RELATIONAL):
+        if encode_nominal:
+            return EncodedNominalConversor(type_)
+        return NominalConversor(type_)
+
+    if isinstance(type_, tuple) and type_ and type_[0] == RELATIONAL:
+        return None
+
+    CONVERSOR_MAP = {'STRING': str,
+                     'INTEGER': lambda x: int(float(x)),
+                     'NUMERIC': float,
+                     'REAL': float}
+    return CONVERSOR_MAP[type_]
+
+
+def _build_conversors(attributes, encode_nominal=False):
+    '''(INTERNAL) Build conversors, skipping RELATIONAL slots.
+
+    The conversor for a RELATIONAL attribute is ``None``; the sub-table is
+    decoded recursively instead of through a scalar conversor.
+    '''
+    return [_make_conversor(attr, encode_nominal) for attr in attributes]
+
+
 DENSE = 0     # Constant value representing a dense matrix
 COO = 1       # Constant value representing a sparse matrix in coordinate format
 LOD = 2       # Constant value representing a sparse matrix in list of
@@ -308,9 +346,29 @@ class ArffException(Exception):
 
     def __init__(self):
         self.line = -1
+        # 1-based index of the offending outer (parent) data row.
+        self.row = None
+        # 1-based index of the offending row inside a RELATIONAL sub-table.
+        self.sub_row = None
+        # Dotted attribute path, e.g. ``bag.item.value``.
+        self.attribute_path = None
+
+    def _location_suffix(self):
+        suffix = []
+        if self.row is not None:
+            suffix.append('row %d' % self.row)
+        if self.sub_row is not None:
+            suffix.append('sub-row %d' % self.sub_row)
+        if self.attribute_path is not None:
+            suffix.append("attribute '%s'" % self.attribute_path)
+        return ', '.join(suffix)
 
     def __str__(self):
-        return self.message%self.line
+        text = self.message % self.line
+        suffix = self._location_suffix()
+        if suffix:
+            text += ' (%s)' % suffix
+        return text
 
 class BadRelationFormat(ArffException):
     '''Error raised when the relation declaration is in an invalid format.'''
@@ -328,6 +386,19 @@ class BadDataFormat(ArffException):
             'Bad @DATA instance format in line %d: ' +
             ('%s' % value)
         )
+
+class BadRelationalFormat(ArffException):
+    '''Error raised when a RELATIONAL attribute declaration or a sub-table
+    data value is in an invalid format.'''
+    def __init__(self, msg='Bad RELATIONAL format.'):
+        super().__init__()
+        self._msg = msg
+
+    def __str__(self):
+        suffix = self._location_suffix()
+        if suffix:
+            return '%s (%s)' % (self._msg, suffix)
+        return self._msg
 
 class BadAttributeType(ArffException):
     '''Error raised when some invalid type is provided into the attribute
@@ -436,38 +507,170 @@ class NominalConversor:
         return str(value)
 
 
+class RelationalConversor:
+    '''Conversor for a RELATIONAL (multi-instance) attribute.
+
+    A relational value is stored in a Python object as a list of sub-rows
+    (``[]`` for an empty sub-table, ``None`` for an explicit missing value).
+    On disk the sub-table is a quoted string whose payload is a standalone
+    ARFF data block, with sub-rows separated by ``\\n`` escapes; literal line
+    breaks appearing inside sub-row string values are escaped as well, so the
+    two can never be confused.
+    '''
+
+    def __init__(self, sub_attributes, encode_nominal=False, path=''):
+        self.sub_attributes = sub_attributes
+        self.encode_nominal = encode_nominal
+        self.path = path
+        self._sub_names = [attr[0] for attr in sub_attributes]
+        self._conversors = _build_conversors(sub_attributes, encode_nominal)
+        self._nested = [
+            self._nested_conversor(attr, self._join(attr[0]))
+            for attr in sub_attributes
+        ]
+
+    def _join(self, name):
+        return '%s.%s' % (self.path, name) if self.path else name
+
+    def _nested_conversor(self, attr, path):
+        type_ = attr[1]
+        if isinstance(type_, tuple) and type_ and type_[0] == RELATIONAL:
+            return RelationalConversor(
+                type_[1], self.encode_nominal, path)
+        return None
+
+    def decode(self, raw, row):
+        # An explicit missing value arrives as None (an unquoted '?' or an
+        # empty token). A quoted empty string "" arrives as '' and denotes an
+        # empty sub-table instead.
+        if raw is None:
+            return None
+        if raw == '':
+            return []
+
+        # Sub-rows are separated by escaped newlines. ``_parse_values`` has
+        # already unquoted the cell and turned the ``\n`` escapes into real
+        # newline characters, while literal newlines belonging to sub-row
+        # string values are escaped as well, so splitting on the real newline
+        # can only separate sub-rows.
+        lines = raw.split('\n')
+        sub_rows = []
+        # Sub-table rows are always dense, regardless of the outer matrix
+        # type (even when the parent records use sparse notation).
+        data_helper = _get_data_object_for_decoding(DENSE)
+        for sub_index, line in enumerate(lines):
+            if not line:
+                continue
+            try:
+                decoded = data_helper.decode_rows(
+                    iter([line]), self._conversors,
+                    relational_conversors=self._nested,
+                    row=row, path=self.path,
+                    attribute_names=self._sub_names)
+            except ArffException as exc:
+                # Pin every failure to the parent record and the sub-row that
+                # triggered it, while preserving the deepest attribute path.
+                exc.row = row
+                if exc.sub_row is None:
+                    exc.sub_row = sub_index + 1
+                if exc.attribute_path is None:
+                    exc.attribute_path = self.path
+                raise
+            sub_rows.extend(decoded)
+        return sub_rows
+
+    def encode(self, value):
+        if value is None:
+            return '?'
+        if not isinstance(value, (list, tuple)):
+            raise BadObject(
+                'RELATIONAL attribute %r expects a list of sub-rows or None'
+                % self.path)
+
+        data_helper = _get_data_object_for_decoding(DENSE)
+        lines = data_helper.encode_data(
+            value, self.sub_attributes,
+            relational_conversors=self._nested, path=self.path)
+        # Sub-rows are joined by real newlines and then the whole payload is
+        # escaped once for the outer quoting layer. That turns each sub-row
+        # separator into the two-character ``\n`` escape while pushing any
+        # escape already produced by the inner layer one level deeper, so a
+        # literal newline inside a sub-row string can never be mistaken for a
+        # sub-row separator.
+        payload = '\n'.join(lines)
+        payload = _RE_ESCAPE_CHARS.sub(_unescape_sub_callback, payload)
+        return '"%s"' % payload
+
+
 class DenseGeneratorData:
     '''Internal helper class to allow for different matrix types without
     making the code a huge collection of if statements.'''
 
-    def decode_rows(self, stream, conversors):
-        for row in stream:
-            values = _parse_values(row)
+    def decode_rows(self, stream, conversors, relational_conversors=None,
+                    row=0, path='', attribute_names=None):
+        relational_conversors = relational_conversors or [None] * len(
+            conversors)
+        if attribute_names is None:
+            attribute_names = [str(i) for i in range(len(conversors))]
+        for raw_row in stream:
+            row += 1
+            try:
+                values = _parse_values(raw_row)
 
-            if isinstance(values, dict):
-                if values and max(values) >= len(conversors):
-                    raise BadDataFormat(row)
-                # XXX: int 0 is used for implicit values, not '0'
-                values = [values[i] if i in values else 0 for i in
-                          range(len(conversors))]
-            else:
-                if len(values) != len(conversors):
-                    raise BadDataFormat(row)
+                if isinstance(values, dict):
+                    if values and max(values) >= len(conversors):
+                        raise BadDataFormat(raw_row)
+                    # XXX: int 0 is used for implicit values, not '0'
+                    values = [values[i] if i in values else 0 for i in
+                              range(len(conversors))]
+                else:
+                    if len(values) != len(conversors):
+                        raise BadDataFormat(raw_row)
 
-            yield self._decode_values(values, conversors)
+                yield self._decode_values(values, conversors,
+                                          relational_conversors, row, path,
+                                          attribute_names)
+            except ArffException as exc:
+                if exc.row is None:
+                    exc.row = row
+                raise
 
     @staticmethod
-    def _decode_values(values, conversors):
-        try:
-            values = [None if value is None else conversor(value)
-                      for conversor, value
-                      in zip(conversors, values)]
-        except ValueError as exc:
-            if 'float: ' in str(exc):
-                raise BadNumericalValue()
-        return values
+    def _decode_values(values, conversors, relational_conversors, row, path,
+                       attribute_names):
+        decoded = []
+        for index, (conversor, value) in enumerate(
+                zip(conversors, values)):
+            attr_path = '%s.%s' % (path, attribute_names[index]) \
+                if path else attribute_names[index]
+            rel_conversor = relational_conversors[index]
+            if rel_conversor is not None:
+                decoded.append(rel_conversor.decode(value, row))
+                continue
 
-    def encode_data(self, data, attributes):
+            if value is None:
+                decoded.append(None)
+                continue
+
+            try:
+                decoded.append(conversor(value))
+            except ValueError as exc:
+                if 'float: ' in str(exc):
+                    err = BadNumericalValue()
+                    err.row = row
+                    err.attribute_path = attr_path
+                    raise err
+                raise
+            except ArffException as exc:
+                if exc.row is None:
+                    exc.row = row
+                if exc.attribute_path is None:
+                    exc.attribute_path = attr_path
+                raise
+        return decoded
+
+    def encode_data(self, data, attributes, relational_conversors=None,
+                    path=''):
         '''(INTERNAL) Encodes a line of data.
 
         Data instances follow the csv format, i.e, attribute values are
@@ -477,6 +680,8 @@ class DenseGeneratorData:
         :param attributes: a list of attributes. Used to check if data is valid.
         :return: a string with the encoded data line.
         '''
+        relational_conversors = relational_conversors or [None] * len(
+            attributes)
         current_row = 0
 
         for inst in data:
@@ -487,12 +692,14 @@ class DenseGeneratorData:
                 )
 
             new_data = []
-            for value in inst:
-                if value is None or value == '' or value != value:
-                    s = '?'
+            for index, value in enumerate(inst):
+                rel_conversor = relational_conversors[index]
+                if rel_conversor is not None:
+                    new_data.append(rel_conversor.encode(value))
+                elif value is None or value == '' or value != value:
+                    new_data.append('?')
                 else:
-                    s = encode_string(str(value))
-                new_data.append(s)
+                    new_data.append(encode_string(str(value)))
 
             current_row += 1
             yield ','.join(new_data)
@@ -500,8 +707,12 @@ class DenseGeneratorData:
 
 class _DataListMixin:
     """Mixin to return a list from decode_rows instead of a generator"""
-    def decode_rows(self, stream, conversors):
-        return list(super().decode_rows(stream, conversors))
+    def decode_rows(self, stream, conversors, relational_conversors=None,
+                    row=0, path='', attribute_names=None):
+        return list(super().decode_rows(
+            stream, conversors,
+            relational_conversors=relational_conversors, row=row, path=path,
+            attribute_names=attribute_names))
 
 
 class Data(_DataListMixin, DenseGeneratorData):
@@ -509,10 +720,15 @@ class Data(_DataListMixin, DenseGeneratorData):
 
 
 class COOData:
-    def decode_rows(self, stream, conversors):
+    def decode_rows(self, stream, conversors, relational_conversors=None,
+                    row=0, path='', attribute_names=None):
+        if relational_conversors and any(relational_conversors):
+            raise BadRelationalFormat(
+                'COO matrix type is not supported with RELATIONAL '
+                'attributes')
         data, rows, cols = [], [], []
-        for i, row in enumerate(stream):
-            values = _parse_values(row)
+        for i, raw_row in enumerate(stream):
+            values = _parse_values(raw_row)
             if not isinstance(values, dict):
                 raise BadLayout()
             if not values:
@@ -527,7 +743,7 @@ class COOData:
                 raise
             except IndexError:
                 # conversor out of range
-                raise BadDataFormat(row)
+                raise BadDataFormat(raw_row)
 
             data.extend(values)
             rows.extend([i] * len(values))
@@ -535,7 +751,12 @@ class COOData:
 
         return data, rows, cols
 
-    def encode_data(self, data, attributes):
+    def encode_data(self, data, attributes, relational_conversors=None,
+                    path=''):
+        if relational_conversors and any(relational_conversors):
+            raise BadObject(
+                'COO matrix type is not supported with RELATIONAL '
+                'attributes')
         num_attributes = len(attributes)
         new_data = []
         current_row = 0
@@ -572,24 +793,54 @@ class COOData:
         yield " ".join(["{", ','.join(new_data), "}"])
 
 class LODGeneratorData:
-    def decode_rows(self, stream, conversors):
-        for row in stream:
-            values = _parse_values(row)
+    def decode_rows(self, stream, conversors, relational_conversors=None,
+                    row=0, path='', attribute_names=None):
+        relational_conversors = relational_conversors or [None] * len(
+            conversors)
+        if attribute_names is None:
+            attribute_names = [str(i) for i in range(len(conversors))]
+        for raw_row in stream:
+            row += 1
+            values = _parse_values(raw_row)
 
             if not isinstance(values, dict):
-                raise BadLayout()
+                err = BadLayout()
+                err.row = row
+                raise err
+            decoded = {}
             try:
-                yield {key: None if value is None else conversors[key](value)
-                       for key, value in values.items()}
+                for key, value in values.items():
+                    attr_path = '%s.%s' % (path, attribute_names[key]) \
+                        if path else attribute_names[key]
+                    rel_conversor = relational_conversors[key]
+                    if rel_conversor is not None:
+                        decoded[key] = rel_conversor.decode(value, row)
+                    elif value is None:
+                        decoded[key] = None
+                    else:
+                        try:
+                            decoded[key] = conversors[key](value)
+                        except ArffException as exc:
+                            if exc.attribute_path is None:
+                                exc.attribute_path = attr_path
+                            raise
             except ValueError as exc:
                 if 'float: ' in str(exc):
-                    raise BadNumericalValue()
+                    err = BadNumericalValue()
+                    err.row = row
+                    raise err
                 raise
             except IndexError:
                 # conversor out of range
-                raise BadDataFormat(row)
+                idx_err = BadDataFormat(raw_row)
+                idx_err.row = row
+                raise idx_err
+            yield decoded
 
-    def encode_data(self, data, attributes):
+    def encode_data(self, data, attributes, relational_conversors=None,
+                    path=''):
+        relational_conversors = relational_conversors or [None] * len(
+            attributes)
         current_row = 0
 
         num_attributes = len(attributes)
@@ -604,7 +855,10 @@ class LODGeneratorData:
 
             for col in sorted(row):
                 v = row[col]
-                if v is None or v == '' or v != v:
+                rel_conversor = relational_conversors[col]
+                if rel_conversor is not None:
+                    s = rel_conversor.encode(v)
+                elif v is None or v == '' or v != v:
                     s = '?'
                 else:
                     s = encode_string(str(v))
@@ -693,7 +947,7 @@ class ArffDecoder:
         res = str(v.strip('"\''))
         return res
 
-    def _decode_attribute(self, s):
+    def _decode_attribute(self, s, line_iter=None):
         '''(INTERNAL) Decodes an attribute line.
 
         The attribute is the most complex declaration in an arff file. All
@@ -711,6 +965,13 @@ class ArffDecoder:
 
             {<nominal-name1>, <nominal-name2>, <nominal-name3>, ...}
 
+        - Relational (multi-instance) attributes with format::
+
+            @attribute <name> relational
+                @attribute <sub-name> <datatype>
+                ...
+            @end
+
         The nominal names follow the rules for the attribute names, i.e., they
         must be quoted if the name contains whitespaces.
 
@@ -718,7 +979,10 @@ class ArffDecoder:
         padding, including the "\r\n" characters.
 
         :param s: a normalized string.
-        :return: a tuple (ATTRIBUTE_NAME, TYPE_OR_VALUES).
+        :param line_iter: (INTERNAL) an iterator over the remaining header
+            lines, required to read multi-line ``RELATIONAL`` declarations.
+        :return: a tuple (ATTRIBUTE_NAME, TYPE_OR_VALUES). A RELATIONAL
+            attribute has the type ``('RELATIONAL', (sub-attributes...))``.
         '''
         _, v = s.split(' ', 1)
         v = v.strip()
@@ -743,6 +1007,14 @@ class ArffDecoder:
             if isinstance(type_, dict):
                 raise BadAttributeType()
 
+        elif _RE_RELATIONAL_TYPE.match(type_):
+            if line_iter is None:
+                # A RELATIONAL declaration spans several lines and cannot be
+                # decoded from a single string.
+                raise BadAttributeType()
+            sub_attributes = self._decode_relational_body(line_iter, name)
+            type_ = (RELATIONAL, tuple(sub_attributes))
+
         else:
             # If not nominal, verify the type name
             type_ = str(type_).upper()
@@ -751,11 +1023,57 @@ class ArffDecoder:
 
         return (name, type_)
 
+    def _decode_relational_body(self, line_iter, parent_name):
+        '''(INTERNAL) Read the nested ``@ATTRIBUTE`` ... ``@END`` block of a
+        RELATIONAL attribute.
+
+        Nested RELATIONAL attributes are supported: a nested block consumes
+        through its own matching ``@END`` via recursion, so each call only has
+        to wait for its own terminating ``@END``. A missing ``@END`` raises
+        `BadRelationalFormat`.
+        '''
+        sub_attributes = []
+        sub_names = set()
+        while True:
+            try:
+                raw_line = next(line_iter)
+            except StopIteration:
+                raise BadRelationalFormat(
+                    'RELATIONAL attribute %r is missing a matching @END'
+                    % parent_name)
+
+            self._current_line += 1
+            line = raw_line.strip(' \r\n')
+            if not line:
+                continue
+
+            upper = line.upper()
+            if upper.startswith(_TK_COMMENT):
+                continue
+
+            if _RE_END_LINE.match(line):
+                return sub_attributes
+
+            if upper.startswith(_TK_ATTRIBUTE):
+                attr = self._decode_attribute(line, line_iter)
+                if attr[0] in sub_names:
+                    raise BadAttributeName(
+                        attr[0], self._current_line)
+                sub_names.add(attr[0])
+                sub_attributes.append(attr)
+                continue
+
+            raise BadRelationalFormat(
+                'Unexpected line inside RELATIONAL attribute %r: %s'
+                % (parent_name, line))
+
     def _decode(self, s, encode_nominal=False, matrix_type=DENSE):
         '''Do the job the ``encode``.'''
 
         # Make sure this method is idempotent
         self._current_line = 0
+        self._conversors = []
+        self._relational_conversors = []
 
         # If string, convert to a list of lines
         if isinstance(s, str):
@@ -805,26 +1123,22 @@ class ArffDecoder:
 
                 STATE = _TK_ATTRIBUTE
 
-                attr = self._decode_attribute(row)
+                attr = self._decode_attribute(row, s)
                 if attr[0] in attribute_names:
                     raise BadAttributeName(attr[0], attribute_names[attr[0]])
                 else:
                     attribute_names[attr[0]] = self._current_line
                 obj['attributes'].append(attr)
 
-                if isinstance(attr[1], (list, tuple)):
-                    if encode_nominal:
-                        conversor = EncodedNominalConversor(attr[1])
-                    else:
-                        conversor = NominalConversor(attr[1])
-                else:
-                    CONVERSOR_MAP = {'STRING': str,
-                                     'INTEGER': lambda x: int(float(x)),
-                                     'NUMERIC': float,
-                                     'REAL': float}
-                    conversor = CONVERSOR_MAP[attr[1]]
-
+                conversor = _make_conversor(attr, encode_nominal)
                 self._conversors.append(conversor)
+                if (isinstance(attr[1], tuple) and attr[1]
+                        and attr[1][0] == RELATIONAL):
+                    rel = RelationalConversor(
+                        attr[1][1], encode_nominal, attr[0])
+                    self._relational_conversors.append(rel)
+                else:
+                    self._relational_conversors.append(None)
             # -----------------------------------------------------------------
 
             # DATA ------------------------------------------------------------
@@ -852,7 +1166,10 @@ class ArffDecoder:
                     yield row
 
         # Alter the data object
-        obj['data'] = data.decode_rows(stream(), self._conversors)
+        obj['data'] = data.decode_rows(
+            stream(), self._conversors,
+            relational_conversors=self._relational_conversors,
+            attribute_names=[attr[0] for attr in obj['attributes']])
         if obj['description'].endswith('\n'):
             obj['description'] = obj['description'][:-1]
 
@@ -933,6 +1250,10 @@ class ArffEncoder:
 
             {<nominal-name1>, <nominal-name2>, <nominal-name3>, ...}
 
+        - Relational attributes, whose type is
+          ``('RELATIONAL', (sub-attributes...))``, are encoded as a
+          multi-line ``RELATIONAL`` ... ``@END`` block.
+
         This method must receive a the name of the attribute and its type, if
         the attribute type is nominal, ``type`` must be a list of values.
 
@@ -944,6 +1265,14 @@ class ArffEncoder:
             if char in name:
                 name = '"%s"'%name
                 break
+
+        if isinstance(type_, tuple) and len(type_) == 2 \
+                and type_[0] == RELATIONAL:
+            lines = ['%s %s %s' % (_TK_ATTRIBUTE, name, RELATIONAL)]
+            for sub_name, sub_type in type_[1]:
+                lines.append(self._encode_attribute(sub_name, sub_type))
+            lines.append(_TK_END)
+            return '\n'.join(lines)
 
         if isinstance(type_, (tuple, list)):
             type_tmp = ['%s' % encode_string(type_k) for type_k in type_]
@@ -999,6 +1328,13 @@ class ArffEncoder:
                 if attr[1] not in _SIMPLE_TYPES:
                     raise BadObject('Invalid attribute type "%s"'%str(attr))
 
+            elif self._is_relational_type(attr[1]):
+                sub_attributes = attr[1][1]
+                if not isinstance(sub_attributes, (tuple, list)) or \
+                        not sub_attributes:
+                    raise BadObject(
+                        'Invalid RELATIONAL attribute type "%s"' % str(attr))
+
             # Verify for bad object format
             elif not isinstance(attr[1], (tuple, list)):
                 raise BadObject('Invalid attribute type "%s"'%str(attr))
@@ -1018,9 +1354,31 @@ class ArffEncoder:
         yield _TK_DATA
         if 'data' in obj:
             data = _get_data_object_for_encoding(obj.get('data'))
-            yield from data.encode_data(obj.get('data'), attributes)
+            relational_conversors = self._build_relational_conversors(
+                attributes)
+            yield from data.encode_data(
+                obj.get('data'), attributes,
+                relational_conversors=relational_conversors)
 
         yield ''
+
+    @staticmethod
+    def _is_relational_type(type_):
+        return isinstance(type_, tuple) and len(type_) == 2 \
+            and type_[0] == RELATIONAL
+
+    def _build_relational_conversors(self, attributes, path_prefix=''):
+        conversors = []
+        for attr in attributes:
+            type_ = attr[1]
+            if self._is_relational_type(type_):
+                path = '%s.%s' % (path_prefix, attr[0]) \
+                    if path_prefix else attr[0]
+                conversors.append(RelationalConversor(
+                    type_[1], path=path))
+            else:
+                conversors.append(None)
+        return conversors
 
 # =============================================================================
 

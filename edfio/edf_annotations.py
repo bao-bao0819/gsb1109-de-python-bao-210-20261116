@@ -73,6 +73,44 @@ class EdfAnnotation(NamedTuple):
 _Signal = TypeVar("_Signal", bound=Union[EdfSignal, BdfSignal])
 
 
+def _slice_annotation(
+    annotation: EdfAnnotation,
+    start: float,
+    stop: float,
+    *,
+    keep_all_annotations: bool,
+) -> EdfAnnotation | None:
+    """Return the part of one annotation that falls inside a slice.
+
+    The returned onset is relative to `start`. Zero-duration (point) events use
+    the half-open interval ``[start, stop)``: an event whose onset coincides with
+    a boundary is assigned to the slice starting there, so it is counted exactly
+    once when adjacent slices are reassembled. Sustained annotations are clipped
+    to the interval, allowing a long event to contribute to two neighboring
+    slices without overhanging past either edge.
+
+    Returns `None` when the annotation does not overlap the slice (unless
+    `keep_all_annotations` is set, in which case it is always retained as-is and
+    merely shifted).
+    """
+    onset = annotation.onset
+    duration = annotation.duration
+    if not keep_all_annotations:
+        if duration is None or duration == 0:
+            # Zero-duration events (both `None` and an explicit 0) are points:
+            # assign them with the half-open convention without altering duration.
+            if not start <= onset < stop:
+                return None
+        else:
+            clipped_onset = max(onset, start)
+            clipped_end = min(onset + duration, stop)
+            if clipped_end <= clipped_onset:
+                return None
+            onset = clipped_onset
+            duration = round(clipped_end - clipped_onset, 12)
+    return EdfAnnotation(round(onset - start, 12), duration, annotation.text)
+
+
 def _create_annotations_signal(
     annotations: Iterable[EdfAnnotation],
     *,

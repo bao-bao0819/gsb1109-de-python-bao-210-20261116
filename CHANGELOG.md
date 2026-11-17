@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Fixed
+- `Edf.slice_between_seconds()` and `Edf.slice_between_annotations()` now clip sustained annotations to the slice interval instead of keeping them whole and letting them overhang past a boundary, so an event spanning a boundary contributes to both neighboring slices. Zero-duration annotations continue to follow the half-open `[start, stop)` convention, ensuring boundary point events are assigned to exactly one slice and reassembled slices preserve annotation counts and total covered duration.
+
 ## [0.4.18] - 2026-10-01
 
 ### Fixed

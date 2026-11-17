@@ -733,7 +733,8 @@ def test_edf_slice_between_seconds_drops_annotations_starting_outside_limits(
     assert edf_sliced.annotations == (
         EdfAnnotation(0, 1, "an annotation"),
         EdfAnnotation(2, None, "another annotation"),
-        EdfAnnotation(4.999, 2, "the last annotation"),
+        # sustained annotation spanning `stop` is clipped to the slice end
+        EdfAnnotation(4.999, 0.001, "the last annotation"),
     )
 
 
@@ -867,6 +868,109 @@ def test_edf_slice_between_seconds_keeps_annotations_at_subsecond_start():
     )
     edf.slice_between_seconds(3.5, 5.5)
     assert [ann.onset for ann in edf.annotations] == [0, 0.2, 0.5]
+
+
+def test_edf_slice_between_seconds_point_event_on_boundary_is_counted_once():
+    # A zero-duration event whose onset coincides with a slice boundary uses the
+    # half-open convention [start, stop): it belongs to the slice starting there.
+    edf = Edf(
+        [EdfSignal(np.zeros(20), 1)],
+        annotations=(EdfAnnotation(10, None, "key press"),),
+    )
+    left = edf.copy()
+    left.slice_between_seconds(0, 10)
+    right = edf.copy()
+    right.slice_between_seconds(10, 20)
+    assert left.annotations == ()
+    assert right.annotations == (EdfAnnotation(0, None, "key press"),)
+
+
+def test_edf_slice_between_seconds_keeps_explicit_zero_duration_annotations():
+    # An explicit duration of 0 is a point event too, and its duration must be
+    # preserved rather than dropped by the clipping of sustained annotations.
+    edf = Edf(
+        [EdfSignal(np.zeros(20), 1)],
+        annotations=(
+            EdfAnnotation(4, 0.0, "zero inside"),
+            EdfAnnotation(10, 0.0, "zero on boundary"),
+        ),
+    )
+    left = edf.copy()
+    left.slice_between_seconds(0, 10)
+    right = edf.copy()
+    right.slice_between_seconds(10, 20)
+    assert left.annotations == (EdfAnnotation(4, 0.0, "zero inside"),)
+    assert right.annotations == (EdfAnnotation(0, 0.0, "zero on boundary"),)
+
+
+def test_edf_slice_between_seconds_clips_sustained_annotation_to_both_edges(
+    tmp_file: Path,
+):
+    edf = Edf(
+        [EdfSignal(np.zeros(20), 1)],
+        annotations=(EdfAnnotation(8, 4, "long event"),),  # spans the boundary at 10
+    )
+    left = edf.copy()
+    left.slice_between_seconds(0, 10)
+    left.write(tmp_file)
+    assert read_edf(tmp_file).annotations == (EdfAnnotation(8, 2, "long event"),)
+    right = edf.copy()
+    right.slice_between_seconds(10, 20)
+    right.write(tmp_file)
+    assert read_edf(tmp_file).annotations == (EdfAnnotation(0, 2, "long event"),)
+
+
+def test_edf_slice_between_seconds_reassembled_slices_preserve_counts_and_coverage():
+    annotations = (
+        EdfAnnotation(5, None, "point inside"),
+        EdfAnnotation(10, None, "point on boundary"),
+        EdfAnnotation(20, None, "point on boundary"),
+        EdfAnnotation(25, None, "point inside"),
+        EdfAnnotation(2, 3, "fully inside"),
+        EdfAnnotation(8, 4, "crosses 10"),
+        EdfAnnotation(10, 6, "starts on boundary"),
+        EdfAnnotation(18, 5, "crosses 20"),
+        EdfAnnotation(28, 2, "ends at recording end"),
+    )
+    edf = Edf([EdfSignal(np.zeros(30), 1)], annotations=annotations)
+    slices = []
+    for start in (0, 10, 20):
+        segment = edf.copy()
+        segment.slice_between_seconds(start, start + 10)
+        slices.append((start, segment))
+
+    point_onsets = []
+    sustained_segments: dict[str, list[tuple[float, float]]] = {}
+    for base, segment in slices:
+        for ann in segment.annotations:
+            global_onset = ann.onset + base
+            if ann.duration is None:
+                point_onsets.append(global_onset)
+            else:
+                sustained_segments.setdefault(ann.text, []).append(
+                    (global_onset, global_onset + ann.duration)
+                )
+
+    # Point events map back to their original onsets, each exactly once.
+    assert sorted(point_onsets) == [5, 10, 20, 25]
+
+    # Sustained contributions tile the original interval without gaps or overlap.
+    expected_intervals = {
+        "fully inside": [(2, 5)],
+        "crosses 10": [(8, 10), (10, 12)],
+        "starts on boundary": [(10, 16)],
+        "crosses 20": [(18, 20), (20, 23)],
+        "ends at recording end": [(28, 30)],
+    }
+    for text, segments in sustained_segments.items():
+        assert sorted(segments) == expected_intervals[text]
+    total_coverage = sum(
+        end - onset
+        for segments in sustained_segments.values()
+        for onset, end in segments
+    )
+    original_coverage = sum(ann.duration for ann in annotations if ann.duration)
+    assert total_coverage == original_coverage
 
 
 @pytest.mark.parametrize("data_record_duration", [1 / 4, 1 / 2, 2, 4])

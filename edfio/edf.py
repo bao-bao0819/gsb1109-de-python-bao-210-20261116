@@ -34,6 +34,7 @@ from edfio.edf_annotations import (
     _create_annotations_signal,
     _EdfAnnotationsDataRecord,
     _get_data_record_onset,
+    _slice_annotation,
 )
 from edfio.edf_header import (
     AnonymizedDateError,
@@ -1082,6 +1083,14 @@ class _Base(Generic[_Signal]):
         given in seconds from recording start and have to correspond exactly to a sample
         time in all non-annotation signals.
 
+        Annotations are handled so that adjacent slices reassemble without changing
+        counts or covered duration. Zero-duration (point) annotations follow the
+        half-open interval ``[start, stop)``: one whose onset coincides with a shared
+        boundary is assigned only to the slice starting there. Sustained annotations
+        are clipped to the interval, so an annotation spanning a boundary contributes
+        to both neighboring slices, each restricted to its own range. Annotation onsets
+        are reported relative to `start`; their text and identity are preserved.
+
         Parameters
         ----------
         start : float
@@ -1214,9 +1223,17 @@ class _Base(Generic[_Signal]):
             else:
                 annotations.extend(annot_dr.annotations)
         annotations = [
-            EdfAnnotation(round(a.onset - start, 12), a.duration, a.text)
-            for a in annotations
-            if keep_all_annotations or start <= a.onset < stop
+            sliced
+            for annotation in annotations
+            if (
+                sliced := _slice_annotation(
+                    annotation,
+                    start,
+                    stop,
+                    keep_all_annotations=keep_all_annotations,
+                )
+            )
+            is not None
         ]
         return _create_annotations_signal(
             annotations,

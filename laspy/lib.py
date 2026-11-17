@@ -7,7 +7,9 @@ import io
 import logging
 import os
 from pathlib import Path
-from typing import Optional, Union
+from typing import List, NamedTuple, Optional, Tuple, Union
+
+import numpy as np
 
 from .compression import DecompressionSelection, LazBackend
 from .errors import LaspyException
@@ -17,7 +19,7 @@ from .lasdata import LasData
 from .lasmmap import LasMMAP
 from .lasreader import LasReader
 from .laswriter import LasWriter
-from .point import PointFormat, dims, record
+from .point import ExtraBytesParams, PointFormat, dims, record
 from .vlrs.vlrlist import VLRList
 from .waveform.mode import WaveformMode
 
@@ -424,6 +426,314 @@ def convert(source_las, *, point_format_id=None, file_version=None):
         las.evlrs = evlrs
 
     return las
+
+
+class MergeConflict(NamedTuple):
+    """Describes an extra dimension that could not be merged by
+    :func:`merge_las`.
+
+    The dimension is left out of the merged result and reported
+    here instead of being silently merged (or dropped).
+    """
+
+    dimension: str
+    """Name of the extra dimension concerned"""
+
+    reason: str
+    """Why the dimension could not be merged, one of
+    'units_mismatch', 'dtype_overflow' or 'shape_mismatch'"""
+
+    sources: Tuple[int, ...]
+    """Indices of the input las files involved in the conflict"""
+
+    message: str
+    """Human readable description of the conflict"""
+
+
+MERGE_SOURCE_DIM_NAME = "source_file_id"
+"""Name of the extra dimension added by merge_las to map each
+merged point back to the index of the las file it comes from"""
+
+
+def merge_las(las_files):
+    """Merges multiple las files into a single one.
+
+    The points of all the input files are concatenated, and their extra
+    dimensions are harmonized using the declarations (scales, offsets,
+    no_data, description) found in each file, so that e.g. a 'temperature'
+    dimension stored as raw integer codes in one file and as scaled values
+    with an invalid (no_data) code in another file still produces a single
+    mergeable column:
+
+    - invalid values are recognized on the *raw* codes first (a raw value
+      equal to the declared no_data is invalid), then only the valid values
+      are converted (``value * scale + offset``).
+    - if a dimension is scaled, has a no_data code, or is missing from some
+      of the input files, the merged column is float64 and invalid or
+      missing values are represented as NaN. A point whose file simply does
+      not have the dimension gets NaN, which stays distinguishable from an
+      actual value of exactly 0.0.
+    - otherwise the merged column keeps the type declared by the first file
+      holding the dimension. If the values of another file do not fit in
+      that target type, or if the files declare disagreeing units
+      (descriptions), the dimension is *not* merged: it is reported as a
+      :class:`MergeConflict` instead.
+
+    A 'source_file_id' extra dimension is added to the merged result,
+    mapping each point to the index of the input file it comes from.
+
+    The returned :class:`laspy.LasData` also carries a ``conflicts``
+    attribute: the list of :class:`MergeConflict` encountered (empty when
+    everything could be merged).
+
+    >>> import numpy as np
+    >>> las_a = create_las(point_format=3)
+    >>> las_a.add_extra_dim(ExtraBytesParams("temperature", "i2", description="celsius"))
+    >>> las_a.points = record.ScaleAwarePointRecord.zeros(3, header=las_a.header)
+    >>> las_a.temperature = np.array([0, 21, 22], dtype=np.int16)
+    >>> las_b = create_las(point_format=3)
+    >>> las_b.add_extra_dim(ExtraBytesParams(
+    ...     "temperature", "u1", description="celsius",
+    ...     scales=[0.5], offsets=[-20.0], no_data=[255]))
+    >>> las_b.points = record.ScaleAwarePointRecord.zeros(2, header=las_b.header)
+    >>> las_b.points.array["temperature"][:] = [100, 255]
+    >>> merged = merge_las([las_a, las_b])
+    >>> [float(t) for t in merged.temperature]
+    [0.0, 21.0, 22.0, 30.0, nan]
+    >>> [int(s) for s in merged.source_file_id]
+    [0, 0, 0, 1, 1]
+    >>> merged.conflicts
+    []
+
+    Parameters
+    ----------
+    las_files: iterable of laspy.LasData (or a single laspy.LasData)
+        The files to merge. They must all have the same point format id.
+
+    Returns
+    -------
+    laspy.LasData
+        The merged las data.
+    """
+    if isinstance(las_files, LasData):
+        return las_files
+
+    las_files = list(las_files)
+    if len(las_files) == 0:
+        raise LaspyException("Cannot merge 0 las files")
+    if len(las_files) == 1:
+        return las_files[0]
+
+    point_format_ids = {las.point_format.id for las in las_files}
+    if len(point_format_ids) != 1:
+        raise LaspyException(
+            "Cannot merge las files with different point format ids "
+            f"({sorted(point_format_ids)})"
+        )
+
+    if any(
+        MERGE_SOURCE_DIM_NAME in las.point_format.extra_dimension_names
+        for las in las_files
+    ):
+        raise LaspyException(
+            f"Cannot merge: an input file already has a "
+            f"'{MERGE_SOURCE_DIM_NAME}' extra dimension"
+        )
+
+    per_file_decls = []
+    dim_names = []
+    for las in las_files:
+        decls = {dim.name: dim for dim in las.point_format.extra_dimensions}
+        per_file_decls.append(decls)
+        for name in decls:
+            if name not in dim_names:
+                dim_names.append(name)
+
+    conflicts: List[MergeConflict] = []
+    merged_dim_params: List[ExtraBytesParams] = []
+    merged_dim_converters = []
+
+    for name in dim_names:
+        decls = [decls.get(name) for decls in per_file_decls]
+        present = [(i, d) for i, d in enumerate(decls) if d is not None]
+
+        # The units must be agreed upon: all the non-empty
+        # descriptions must be identical
+        descriptions = {d.description for _, d in present if d.description}
+        if len(descriptions) > 1:
+            conflicts.append(
+                MergeConflict(
+                    dimension=name,
+                    reason="units_mismatch",
+                    sources=tuple(i for i, _ in present),
+                    message=(
+                        f"extra dimension '{name}' has disagreeing "
+                        f"unit/description declarations: {sorted(descriptions)}"
+                    ),
+                )
+            )
+            continue
+
+        num_elements = {d.num_elements for _, d in present}
+        if len(num_elements) != 1:
+            conflicts.append(
+                MergeConflict(
+                    dimension=name,
+                    reason="shape_mismatch",
+                    sources=tuple(i for i, _ in present),
+                    message=(
+                        f"extra dimension '{name}' has incompatible "
+                        f"element counts: {sorted(num_elements)}"
+                    ),
+                )
+            )
+            continue
+        num_element = num_elements.pop()
+
+        is_missing_somewhere = any(d is None for d in decls)
+        needs_float = is_missing_somewhere or any(
+            d.is_scaled or d.no_data is not None for _, d in present
+        )
+
+        if needs_float:
+            # float64 can hold any converted value as well as
+            # NaN for invalid / missing values
+            target_base = np.dtype(np.float64)
+        else:
+            # The target type is the one declared by the first
+            # file holding the dimension, every other file's
+            # values must fit in it
+            target_base = present[0][1].dtype.base
+            overflowing = []
+            for i, d in present:
+                src_base = d.dtype.base
+                if src_base == target_base or np.can_cast(
+                    src_base, target_base, casting="safe"
+                ):
+                    continue
+                if src_base.kind in "iu" and target_base.kind in "iu":
+                    values = np.asarray(las_files[i].points.array[name])
+                    if values.size == 0:
+                        continue
+                    info = np.iinfo(target_base)
+                    if values.min() >= info.min and values.max() <= info.max:
+                        continue
+                overflowing.append(i)
+            if overflowing:
+                conflicts.append(
+                    MergeConflict(
+                        dimension=name,
+                        reason="dtype_overflow",
+                        sources=tuple(overflowing),
+                        message=(
+                            f"extra dimension '{name}': values from source(s) "
+                            f"{overflowing} do not fit in the target "
+                            f"type '{target_base}'"
+                        ),
+                    )
+                )
+                continue
+
+        if num_element == 1:
+            target_dtype = target_base
+        else:
+            target_dtype = np.dtype((target_base, (num_element,)))
+
+        description = next(iter(descriptions), "")
+        merged_dim_params.append(
+            ExtraBytesParams(name, target_dtype, description=description)
+        )
+
+        def make_converter(decls=decls, target_base=target_base, num_element=num_element):
+            def convert(file_index):
+                las = las_files[file_index]
+                decl = decls[file_index]
+                if decl is None:
+                    # The file does not have this dimension: NaN,
+                    # which must not be confused with an actual 0.0
+                    count = len(las.points)
+                    shape = (count,) if num_element == 1 else (count, num_element)
+                    return np.full(shape, np.nan, dtype=target_base)
+
+                raw = np.asarray(las.points.array[decl.name])
+                if target_base.kind == "f":
+                    scale = 1.0
+                    if decl.scales is not None:
+                        scale = np.asarray(decl.scales, dtype=np.float64)
+                    offset = 0.0
+                    if decl.offsets is not None:
+                        offset = np.asarray(decl.offsets, dtype=np.float64)
+                    # 1) invalid values are recognized on the raw codes,
+                    #    before any conversion
+                    invalid = None
+                    if decl.no_data is not None:
+                        invalid = raw == np.asarray(decl.no_data)
+                    # 2) then the values are converted
+                    converted = raw.astype(np.float64) * scale + offset
+                    if invalid is not None:
+                        converted = np.where(invalid, np.nan, converted)
+                    return converted
+
+                return raw.astype(target_base)
+
+            return convert
+
+        merged_dim_converters.append(make_converter())
+
+    header = copy.deepcopy(las_files[0].header)
+    existing_extra_dims = list(header.point_format.extra_dimension_names)
+    if existing_extra_dims:
+        header.remove_extra_dims(existing_extra_dims)
+    header.add_extra_dims(merged_dim_params)
+
+    num_files = len(las_files)
+    if num_files <= np.iinfo(np.uint8).max + 1:
+        source_dtype = np.dtype(np.uint8)
+    elif num_files <= np.iinfo(np.uint16).max + 1:
+        source_dtype = np.dtype(np.uint16)
+    else:
+        source_dtype = np.dtype(np.uint32)
+    header.add_extra_dim(
+        ExtraBytesParams(
+            MERGE_SOURCE_DIM_NAME,
+            source_dtype,
+            description="Index of the source las file",
+        )
+    )
+
+    total_points = sum(len(las.points) for las in las_files)
+    points = record.ScaleAwarePointRecord.zeros(total_points, header=header)
+    merged = LasData(header=header, points=points)
+
+    start = 0
+    for file_index, las in enumerate(las_files):
+        end = start + len(las.points)
+        sl = slice(start, end)
+
+        # x, y, z go through the scaled views so that files with
+        # different header scales/offsets are properly rescaled
+        merged.x[sl] = las.x
+        merged.y[sl] = las.y
+        merged.z[sl] = las.z
+
+        # The other standard fields share the same layout
+        # (same point format id) and are copied raw
+        extra_names = set(per_file_decls[file_index])
+        for field_name in las.points.array.dtype.names:
+            if field_name in extra_names or field_name in ("X", "Y", "Z"):
+                continue
+            merged.points.array[field_name][sl] = las.points.array[field_name]
+
+        for params, convert in zip(merged_dim_params, merged_dim_converters):
+            merged.points.array[params.name][sl] = convert(file_index)
+
+        merged.points.array[MERGE_SOURCE_DIM_NAME][sl] = file_index
+
+        start = end
+
+    merged.update_header()
+    merged.conflicts = conflicts
+    return merged
 
 
 def write_then_read_again(

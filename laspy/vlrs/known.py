@@ -518,6 +518,13 @@ class ExtraBytesVlr(BaseKnownVLR):
                 else:
                     scales = np.array(scales[:num_elements])
 
+            no_data = eb_struct.no_data
+            if no_data is not None and len(no_data) != num_elements:
+                # Can happen for 'raw bytes' dims (data_type == 0) with
+                # more than 3 elements: per-element no_data does not
+                # make sense there
+                no_data = None
+
             dim_info_list.append(
                 ExtraBytesParams(
                     eb_struct.format_name(),
@@ -525,6 +532,7 @@ class ExtraBytesVlr(BaseKnownVLR):
                     description=eb_struct.description.rstrip(NULL_BYTE).decode(),
                     scales=scales,
                     offsets=offsets,
+                    no_data=no_data,
                 )
             )
         return dim_info_list

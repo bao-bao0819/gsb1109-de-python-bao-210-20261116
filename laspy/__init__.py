@@ -9,8 +9,9 @@ from .header import LasHeader
 from .lasdata import LasData
 from .lasreader import LasReader
 from .laswriter import LasWriter
-from .lib import DecompressionSelection, LazBackend, convert
+from .lib import DecompressionSelection, LazBackend, convert, merge_las
 from .lib import create_las as create
+from .lib import merge_las as merge
 from .lib import mmap_las as mmap
 from .lib import open_las as open
 from .lib import read_las as read

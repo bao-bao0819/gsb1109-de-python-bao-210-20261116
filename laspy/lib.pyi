@@ -1,4 +1,4 @@
-from typing import BinaryIO, Iterable, Literal, Optional, Union, overload
+from typing import BinaryIO, Iterable, Literal, NamedTuple, Optional, Tuple, Union, overload
 
 from . import LasWriter, PointFormat
 from .compression import DecompressionSelection, LazBackend
@@ -11,6 +11,14 @@ from .typehints import PathLike
 
 LazBackend = LazBackend
 DecompressionSelection = DecompressionSelection
+
+class MergeConflict(NamedTuple):
+    dimension: str
+    reason: str
+    sources: Tuple[int, ...]
+    message: str
+
+MERGE_SOURCE_DIM_NAME: str
 
 @overload
 def open_las(

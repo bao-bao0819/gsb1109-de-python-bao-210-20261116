@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `laspy.merge_las` (also available as `laspy.merge`): merges multiple las files
+  into one. Extra dimensions are harmonized using their declarations
+  (scales, offsets, no_data, description): invalid (no_data) values are
+  recognized on the raw codes before any scaling is applied, missing
+  dimensions become NaN (staying distinguishable from an actual 0.0), and
+  dimensions whose values do not fit the target type or whose units
+  disagree are reported as conflicts instead of being silently merged.
+  A `source_file_id` extra dimension maps each merged point back to its
+  input file.
+
+### Fixed
+
+- The `no_data` declaration of extra dimensions is now preserved when
+  reading a file (it was dropped from the point format information)
+
 ## Version 2.7.0 (14/01/2026)
 
 ### Added

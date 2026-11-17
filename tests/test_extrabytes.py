@@ -438,3 +438,28 @@ def test_remove_some_extra_dimensions():
     assert new_las.point_format == las.point_format
     for name, copied_value in copied_standard_values:
         assert np.all(new_las[name] == copied_value)
+
+
+def test_extra_bytes_no_data_declaration_survives_roundtrip():
+    """
+    The no_data declaration of an extra dimension must still be
+    available from the point format after a write/read roundtrip.
+    """
+    las = laspy.create(point_format=3)
+    las.add_extra_dim(
+        laspy.ExtraBytesParams(
+            "temperature",
+            "u1",
+            scales=[0.5],
+            offsets=[-20.0],
+            no_data=[255],
+        )
+    )
+
+    las = write_then_read_again(las)
+
+    dim_info = {d.name: d for d in las.point_format.extra_dimensions}["temperature"]
+    assert dim_info.no_data is not None
+    assert list(dim_info.no_data) == [255]
+    assert list(dim_info.scales) == [0.5]
+    assert list(dim_info.offsets) == [-20.0]

@@ -105,3 +105,23 @@ edf = read_edf("example.edf")
 edf.anonymize()
 edf.write("example_anonymized.edf")
 ```
+
+## Anonymize a multi-session study
+```python
+from edfio import StudyAnonymizer, read_edf
+
+anonymizer = StudyAnonymizer(
+    seed="my-study",  # same seed -> reproducible pseudonyms and date shifts
+    allowed_annotations=["Sleep stage W", "Sleep stage N1"],  # known-safe texts
+)
+
+# sessions of the same subject get the same pseudonym and date shift,
+# so intervals between sessions are preserved and sessions stay linkable
+for subject_id, files in sessions.items():
+    for file in files:
+        edf = read_edf(file)
+        report = anonymizer.anonymize(edf, subject_id)
+        edf.write(output_dir / f"{report.pseudonym}_{file.name}")
+        # free text removed from headers and annotations is returned in
+        # report.review_items for manual confirmation
+```

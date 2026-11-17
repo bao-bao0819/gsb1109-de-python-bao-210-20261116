@@ -1,3 +1,8 @@
+from edfio.anonymization import (
+    ReviewItem,
+    SessionAnonymizationReport,
+    StudyAnonymizer,
+)
 from edfio.edf import Bdf, Edf, read_bdf, read_edf
 from edfio.edf_annotations import EdfAnnotation
 from edfio.edf_header import AnonymizedDateError, Patient, Recording
@@ -20,6 +25,9 @@ __all__ = [
     "EdfSignal",
     "Patient",
     "Recording",
+    "ReviewItem",
+    "SessionAnonymizationReport",
+    "StudyAnonymizer",
     "read_bdf",
     "read_edf",
 ]

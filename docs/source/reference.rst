@@ -17,3 +17,6 @@ API reference
    Patient
    Recording
    AnonymizedDateError
+   StudyAnonymizer
+   SessionAnonymizationReport
+   ReviewItem

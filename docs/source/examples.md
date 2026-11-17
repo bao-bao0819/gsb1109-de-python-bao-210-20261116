@@ -105,3 +105,24 @@ edf = read_edf("example.edf")
 edf.anonymize()
 edf.write("example_anonymized.edf")
 ```
+
+## Distinguish sampling gaps from zero signal
+A discontinuous recording (EDF+D) contains data records whose timekeeping annotations
+are not adjacent. The intervals actually covered by recorded samples are available via
+`sampled_intervals`, while the missing time in between is reported as `gap_intervals`:
+
+```python
+edf = read_edf("recording_with_gap.edf")
+edf.is_continuous  # False
+edf.sampled_intervals  # e.g. (EdfInterval(0.0, 120.0), EdfInterval(720.0, 840.0))
+edf.gap_intervals  # (EdfInterval(120.0, 720.0),)
+edf.gap_duration  # 600.0 seconds without any samples
+edf.sampling_duration  # 240.0 seconds of actual recording
+```
+
+A gap is not the same as silence: `zero_signal_intervals` only contains intervals for
+which samples exist and all ordinary signals are zero. Gap time is therefore excluded
+from `sampling_duration` and must not be counted as recorded silence. If the header
+claims continuity but the timekeeping annotations prove otherwise, the gap is still
+reported based on the annotation evidence.
+

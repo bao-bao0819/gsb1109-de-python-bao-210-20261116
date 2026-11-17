@@ -35,7 +35,7 @@ It requires Python>=3.9 and NumPy>=1.22 and is available on PyPI:
 
 
 ## Known limitations
-- Discontiguous files (EDF+D) are treated as contiguous ones.
+- Discontiguous files (EDF+D): sampling gaps are detected from the EDF+ timekeeping annotations and exposed via `Edf.sampled_intervals`, `Edf.gap_intervals`, and the corresponding duration properties, but editing operations (e.g. slicing) still operate on the stored data records without inserting gap time.
 - The maximum data record size of 61440 bytes recommended by the [EDF specs](https://www.edfplus.info/specs/edf.html) is not enforced.
 - To write an EDF with a non-integer seconds duration, the data record duration has to be manually set to an appropriate value.
 - Slicing an EDF to a timespan that is not an integer multiple of the data record duration does not work.

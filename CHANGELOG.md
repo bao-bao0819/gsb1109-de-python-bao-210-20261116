@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- Add `EdfInterval` and the `Edf.sampled_intervals`, `Edf.gap_intervals`, and `Edf.zero_signal_intervals` properties, together with the `Edf.sampling_duration`, `Edf.gap_duration`, and `Edf.zero_signal_duration` properties. They reconstruct the true sampling periods of discontinuous (EDF+D) recordings from the EDF+ timekeeping annotations, distinguish sampling gaps (no recorded samples) from recorded zero signal, and keep the gap evidence even when the header claims continuity.
+
 ## [0.4.18] - 2026-10-01
 
 ### Fixed

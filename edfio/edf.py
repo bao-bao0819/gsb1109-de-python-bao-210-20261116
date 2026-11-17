@@ -33,13 +33,19 @@ from edfio.edf_annotations import (
     EdfAnnotation,
     _create_annotations_signal,
     _EdfAnnotationsDataRecord,
-    _get_data_record_onset,
 )
 from edfio.edf_header import (
     AnonymizedDateError,
     Patient,
     Recording,
     _encode_edfplus_date,
+)
+from edfio.edf_intervals import (
+    EdfInterval,
+    _get_data_record_onsets,
+    _interval_difference,
+    _intervals_for_records,
+    _sampled_intervals_from_onsets,
 )
 from edfio.edf_signal import BdfSignal, EdfSignal
 
@@ -890,6 +896,14 @@ class _Base(Generic[_Signal]):
         return next(iter(self._annotation_signals))
 
     @property
+    def _data_record_onsets(self) -> tuple[Decimal, ...]:
+        timekeeping_signal = self._timekeeping_signal
+        return _get_data_record_onsets(
+            timekeeping_signal.digital,
+            timekeeping_signal._bytes_per_data_record,
+        )
+
+    @property
     def is_continuous(self) -> bool:
         """
         Whether the recording is continuous, based on EDF+ timekeeping annotations.
@@ -904,26 +918,149 @@ class _Base(Generic[_Signal]):
             True if the recording is continuous, False otherwise.
         """
         try:
-            timekeeping_signal = self._timekeeping_signal
+            onsets = self._data_record_onsets
         except StopIteration:
             return True
 
         data_record_duration = Decimal(self._data_record_duration.decode())
-        data_records = timekeeping_signal.digital.reshape(
-            (-1, timekeeping_signal._bytes_per_data_record)
-        )
-        prev_onset = _get_data_record_onset(data_records[0])
-        for data_record in data_records[1:]:
-            onset = _get_data_record_onset(data_record)
-            if onset != prev_onset + data_record_duration:
+        previous_onset = onsets[0]
+        for onset in onsets[1:]:
+            if onset != previous_onset + data_record_duration:
                 return False
-            prev_onset = onset
+            previous_onset = onset
         return True
 
     @property
     def duration(self) -> float:
-        """Recording duration in seconds."""
+        """Recording duration in seconds, as declared by the header.
+
+        This is the number of data records multiplied by the data record duration, i.e.
+        the time covered by the stored data records. For discontinuous (EDF+D)
+        recordings the gaps between records are not stored as data and are therefore
+        not included. Use :attr:`sampled_intervals` and :attr:`gap_intervals` to
+        reconstruct the true recording timeline.
+        """
         return self.num_data_records * self.data_record_duration
+
+    @property
+    def sampled_intervals(self) -> tuple[EdfInterval, ...]:
+        """
+        Time intervals that contain recorded signal data, sorted chronologically.
+
+        The intervals are derived from the onset timestamps of the EDF+ timekeeping
+        annotations: each data record covers ``onset`` to
+        ``onset + data_record_duration``, and adjacent or overlapping records are merged
+        into a single interval. They thus represent the true sampling periods of the
+        recording and make gaps visible, instead of treating the data as one continuous
+        curve.
+
+        Files without an EDF+ annotations signal contain no timekeeping evidence, so a
+        single interval covering the whole recording (i.e. ``0`` to :attr:`duration`) is
+        returned. Note that in this case continuity cannot be verified from the file
+        itself.
+
+        Returns
+        -------
+        tuple[EdfInterval, ...]
+            The half-open intervals (in seconds from recording start) with recorded
+            data.
+        """
+        try:
+            onsets = self._data_record_onsets
+        except StopIteration:
+            return (EdfInterval(0.0, self.duration),)
+        return _sampled_intervals_from_onsets(
+            onsets, Decimal(self._data_record_duration.decode())
+        )
+
+    @property
+    def gap_intervals(self) -> tuple[EdfInterval, ...]:
+        """
+        Time intervals without recorded data (sampling gaps), sorted chronologically.
+
+        Gaps are the parts of the recording timespan that are not covered by any data
+        record according to the EDF+ timekeeping annotations. Contrary to zero signal
+        values inside a recorded interval, a gap contains no samples at all and must not
+        be counted as recorded silence in downstream statistics.
+
+        Returns an empty tuple for continuous recordings and for files without an EDF+
+        annotations signal (where gaps cannot be identified).
+
+        Returns
+        -------
+        tuple[EdfInterval, ...]
+            The half-open gap intervals (in seconds from recording start).
+        """
+        try:
+            onsets = self._data_record_onsets
+        except StopIteration:
+            return ()
+        data_record_duration = Decimal(self._data_record_duration.decode())
+        sampled = _sampled_intervals_from_onsets(onsets, data_record_duration)
+        recording_span = (EdfInterval(0.0, sampled[-1].stop),)
+        return _interval_difference(recording_span, sampled)
+
+    @property
+    def zero_signal_intervals(self) -> tuple[EdfInterval, ...]:
+        """
+        Recorded intervals whose signal data consists exclusively of zero values.
+
+        Unlike :attr:`gap_intervals`, these intervals contain actual recorded samples;
+        the measured signal is merely zero (silence), so they belong to the true
+        sampling time and must not be confused with missing data. A data record counts
+        as zero signal only if all ordinary signals are zero throughout it.
+
+        Returns
+        -------
+        tuple[EdfInterval, ...]
+            The half-open intervals (in seconds from recording start) recorded with
+            all-zero signals.
+        """
+        if not self.signals:
+            return ()
+        zero_record_indices: np.ndarray = np.ones(self.num_data_records, dtype=bool)
+        for signal in self.signals:
+            samples_per_record = round(
+                signal.sampling_frequency * self.data_record_duration
+            )
+            record_values = signal.data.reshape(
+                self.num_data_records, samples_per_record
+            )
+            zero_record_indices &= np.all(record_values == 0, axis=1)
+        record_indices = tuple(
+            index for index, is_zero in enumerate(zero_record_indices) if is_zero
+        )
+        try:
+            onsets = self._data_record_onsets
+        except StopIteration:
+            data_record_duration = Decimal(self._data_record_duration.decode())
+            onsets = tuple(
+                index * data_record_duration for index in range(self.num_data_records)
+            )
+        return _intervals_for_records(
+            onsets,
+            Decimal(self._data_record_duration.decode()),
+            record_indices,
+        )
+
+    @property
+    def sampling_duration(self) -> float:
+        """Total duration in seconds for which signal data was recorded.
+
+        This is the sum of the :attr:`sampled_intervals` durations and excludes
+        :attr:`gap_intervals`. For continuous recordings it equals :attr:`duration`.
+        """
+        return sum(interval.duration for interval in self.sampled_intervals)
+
+    @property
+    def gap_duration(self) -> float:
+        """Total duration in seconds of sampling gaps without any recorded data."""
+        return sum(interval.duration for interval in self.gap_intervals)
+
+    @property
+    def zero_signal_duration(self) -> float:
+        """Total duration in seconds recorded with all-zero signal values."""
+        return sum(interval.duration for interval in self.zero_signal_intervals)
 
     def get_annotations(
         self, start_second: float | None = None, stop_second: float | None = None

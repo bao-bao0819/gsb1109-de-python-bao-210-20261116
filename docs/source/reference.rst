@@ -14,6 +14,7 @@ API reference
    Edf
    EdfSignal
    EdfAnnotation
+   EdfInterval
    Patient
    Recording
    AnonymizedDateError

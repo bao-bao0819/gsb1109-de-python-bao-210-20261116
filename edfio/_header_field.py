@@ -36,10 +36,26 @@ def encode_int(value: int, length: int) -> bytes:
     return encode_str(str(value), length)
 
 
-def encode_float(value: float) -> bytes:
+def _float_to_text(value: float) -> str:
     if float(value).is_integer():
         value = int(value)
-    return encode_str(str(value), 8)
+    return str(value)
+
+
+def encode_float(value: float) -> bytes:
+    return encode_str(_float_to_text(value), 8)
+
+
+def is_encodable_float(value: float, length: int = 8) -> bool:
+    """
+    Whether `value` can be stored exactly in an EDF float header field.
+
+    EDF represents floating-point header fields as ASCII text with a fixed width
+    (the data record duration field is 8 characters wide). A value whose text
+    representation is longer than `length` would be rejected at write time, so this
+    can be used to validate such values upfront.
+    """
+    return len(_float_to_text(value)) <= length
 
 
 def decode_float(field: bytes) -> float:

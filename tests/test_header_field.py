@@ -7,6 +7,7 @@ from edfio._header_field import (
     decode_time,
     encode_float,
     encode_int,
+    is_encodable_float,
 )
 
 
@@ -18,6 +19,32 @@ def test_encode_int_exceeding_field_length_fails():
 def test_encode_float_exceeding_field_length_fails():
     with pytest.raises(ValueError, match="exceeds maximum field length"):
         encode_float(123456789.12345)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (1.234, True),
+        (1.234567, True),
+        (12345678, True),
+        (0.3333333333333333, False),
+        (123456789.0, False),
+        (2.25e16, False),
+        (0.1, True),
+        (50.0, True),
+    ],
+)
+def test_is_encodable_float(*, value: float, expected: bool):
+    assert is_encodable_float(value) is expected
+
+
+def test_is_encodable_float_agrees_with_encode_float():
+    for value in (1.234, 12345678, 0.3333333333333333, 123456789.0, 2.25e16):
+        if is_encodable_float(value):
+            encode_float(value)
+        else:
+            with pytest.raises(ValueError, match="exceeds maximum field length"):
+                encode_float(value)
 
 
 @pytest.mark.parametrize(

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Added
+- Validate that the data record duration fits into the 8-character EDF header field and verify the full data record layout (samples per record, record count, duration, and total timing error) across every signal when creating, updating, or writing an `Edf`/`Bdf`. A `ValueError` is raised when no representable, error-bounded layout exists instead of silently producing a recording whose duration drifts.
+
+### Fixed
+- Raising a low-level field-length error when the automatically determined data record duration (the LCM of the sampling-rate denominators) exceeds the 8-character header field. This is now reported as an explicit layout conflict with an actionable message.
+
 ## [0.4.18] - 2026-10-01
 
 ### Fixed

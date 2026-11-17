@@ -22,7 +22,12 @@ from edfio import (
     Recording,
     read_edf,
 )
-from edfio.edf import _calc_age_in_years, _calculate_num_data_records
+from edfio.edf import (
+    _calc_age_in_years,
+    _calculate_data_record_duration,
+    _calculate_num_data_records,
+    _verify_data_record_layout,
+)
 from edfio.edf_annotations import _create_annotations_signal
 from edfio.edf_signal import _FloatRange
 from tests import TEST_DATA_DIR
@@ -243,6 +248,75 @@ def test_data_record_duration_does_not_exactly_divide_signal_duration(
     signals = [EdfSignal(sine(20, 2, 30), 30, physical_range=(-1, 1))]
     with pytest.raises(ValueError, match="Signal duration .* not exactly divisible"):
         Edf(signals, data_record_duration=data_record_duration)
+
+
+@pytest.mark.parametrize(
+    "data_record_duration",
+    [1 / 3, 0.123456789, 1 / 7, 2.3456789],
+)
+def test_data_record_duration_not_representable_in_8_char_field_fails(
+    data_record_duration: float,
+):
+    signals = [EdfSignal(np.arange(30), 10)]
+    with pytest.raises(ValueError, match="can not be represented in the 8-character"):
+        Edf(signals, data_record_duration=data_record_duration)
+
+
+def test_auto_data_record_duration_raises_conflict_when_no_encodable_layout():
+    # Two signals with equal durations but coprime rate denominators whose LCM
+    # (the smallest exact record duration) exceeds the 8-character field.
+    p, q = 10007, 10009
+    signals = [
+        EdfSignal(np.arange(q), 1 / p),
+        EdfSignal(np.arange(p), 1 / q),
+    ]
+    with pytest.raises(
+        ValueError,
+        match="Could not determine a data record duration that fits into the 8-character",
+    ):
+        Edf(signals)
+
+
+def test_calculate_data_record_duration_returns_lcm_when_encodable():
+    signals = [
+        EdfSignal(np.arange(10), 1 / 4),
+        EdfSignal(np.arange(10), 1 / 6),
+    ]
+    assert _calculate_data_record_duration(signals) == 12
+
+
+def test_update_data_record_duration_rejects_unrepresentable_value_without_changes():
+    edf = Edf([EdfSignal(np.arange(100), 10)])
+    original_duration = edf.data_record_duration
+    original_records = edf.num_data_records
+    with pytest.raises(
+        ValueError, match="can not be represented in the 8-character"
+    ):
+        edf.update_data_record_duration(1 / 7)
+    assert edf.data_record_duration == original_duration
+    assert edf.num_data_records == original_records
+
+
+def test_verify_data_record_layout_detects_timing_drift():
+    # 100 samples at 10 Hz last 10 s, but 10 records of 0.9 s only cover 9 s.
+    signals = [EdfSignal(np.arange(100), 10)]
+    with pytest.raises(ValueError, match="total timing error"):
+        _verify_data_record_layout(signals, 10, 0.9)
+
+
+def test_verify_data_record_layout_accepts_exact_layout():
+    signals = [EdfSignal(np.arange(100), 10)]
+    _verify_data_record_layout(signals, 10, 1.0)
+
+
+def test_verify_data_record_layout_skips_annotation_only_and_zero_duration():
+    annotations_signal = _create_annotations_signal(
+        (),
+        num_data_records=1,
+        data_record_duration=0,
+        signal_class=EdfSignal,
+    )
+    _verify_data_record_layout([annotations_signal], 1, 0)
 
 
 def test_read_write_roundtrip(tmp_file: Path):

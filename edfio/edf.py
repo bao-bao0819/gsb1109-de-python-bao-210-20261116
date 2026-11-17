@@ -27,6 +27,7 @@ from edfio._header_field import (
     encode_int,
     encode_str,
     encode_time,
+    is_encodable_float,
 )
 from edfio._lazy_loading import LazyLoader
 from edfio.edf_annotations import (
@@ -164,6 +165,12 @@ class _Base(Generic[_Signal]):
         self._num_data_records = encode_int(num_data_records, 8)
 
     def _set_data_record_duration(self, data_record_duration: float) -> None:
+        if not is_encodable_float(data_record_duration):
+            raise ValueError(
+                f"data_record_duration of {data_record_duration}s can not be "
+                "represented in the 8-character EDF header field without losing "
+                "precision"
+            )
         self._data_record_duration = encode_float(data_record_duration)
 
     def _set_num_signals(self, num_signals: int) -> None:
@@ -344,11 +351,7 @@ class _Base(Generic[_Signal]):
                 signal_durations[0],
                 self.data_record_duration,
             )
-            signal_lengths = [s._num_samples for s in signals]
-            if any(l % num_data_records for l in signal_lengths):
-                raise ValueError(
-                    f"Not all signal lengths can be split into {num_data_records} data records: {signal_lengths}"
-                )
+            _verify_data_record_layout(signals, num_data_records, self.data_record_duration)
         self._set_num_data_records(num_data_records)
 
     def _parse_signal_headers(
@@ -407,6 +410,9 @@ class _Base(Generic[_Signal]):
             )
         else:
             num_data_records = self.num_data_records
+        _verify_data_record_layout(
+            self._signals, num_data_records, self.data_record_duration
+        )
         for signal in self._signals:
             signal._set_samples_per_data_record(signal._num_samples // num_data_records)
         header_records = []
@@ -678,6 +684,12 @@ class _Base(Generic[_Signal]):
             raise ValueError(
                 f"Data record duration must be positive, got {data_record_duration}"
             )
+        if not is_encodable_float(data_record_duration):
+            raise ValueError(
+                f"Data record duration of {data_record_duration}s can not be "
+                "represented in the 8-character EDF header field without losing "
+                "precision"
+            )
         if not self.signals:
             raise ValueError(
                 "Data record duration must be zero for annotation-only files"
@@ -690,6 +702,9 @@ class _Base(Generic[_Signal]):
                 )
 
         num_data_records = self._pad_or_truncate_signals(data_record_duration, method)
+        _verify_data_record_layout(
+            tuple(self.signals), num_data_records, data_record_duration
+        )
         self._update_record_duration_in_annotation_signals(
             data_record_duration, num_data_records
         )
@@ -1260,7 +1275,10 @@ class Edf(_Base[EdfSignal]):
         contains microseconds, an EDF+C file is created.
     data_record_duration : float | None, default: None
         The duration of each data record in seconds. If `None`, an appropriate value is
-        chosen automatically.
+        chosen automatically. The value has to be exactly representable in the
+        8-character EDF header field, and the resulting record layout has to split
+        every signal into an integer number of samples per record without exceeding
+        the total timing error; otherwise a `ValueError` is raised.
     annotations : Iterable[EdfAnnotation] | None, default: None
         The annotations, consisting of onset, duration (optional), and text. If not
         `None`, an EDF+C file is created.
@@ -1300,6 +1318,10 @@ class Bdf(_Base[BdfSignal]):
         return decode_str(self._version)
 
 
+# Maximum acceptable difference between the recorded and intended total duration.
+_MAX_TIMING_ERROR_SECONDS = Fraction(1, 1_000_000)
+
+
 def _calculate_num_data_records(
     signal_duration: float,
     data_record_duration: float,
@@ -1318,8 +1340,54 @@ def _calculate_num_data_records(
 
 
 def _calculate_data_record_duration(signals: Sequence[_Signal]) -> float:
-    fs = (Fraction(s.sampling_frequency).limit_denominator(99999999) for s in signals)
-    return math.lcm(*(fs_.denominator for fs_ in fs))
+    if not signals:
+        return 1.0
+    sampling_frequencies = [
+        Fraction(s.sampling_frequency).limit_denominator(99999999) for s in signals
+    ]
+    record_duration = math.lcm(*(fs.denominator for fs in sampling_frequencies))
+    if is_encodable_float(record_duration):
+        return record_duration
+    raise ValueError(
+        "Could not determine a data record duration that fits into the 8-character "
+        "EDF header field and is compatible with the sampling frequencies of all "
+        f"signals: {[float(fs) for fs in sampling_frequencies]}. Any record duration "
+        f"that yields an integer number of samples per record is a multiple of "
+        f"{record_duration}s, which exceeds the field width. Provide an explicit, "
+        "exactly representable `data_record_duration` instead."
+    )
+
+
+def _verify_data_record_layout(
+    signals: Sequence[_Signal],
+    num_data_records: int,
+    data_record_duration: float,
+) -> None:
+    if not signals or data_record_duration == 0:
+        return
+    signal_lengths = [s._num_samples for s in signals]
+    for length in signal_lengths:
+        if length % num_data_records:
+            raise ValueError(
+                f"Not all signal lengths can be split into {num_data_records} data records: {signal_lengths}"
+            )
+    recorded_duration = num_data_records * Fraction(str(data_record_duration))
+    for signal in signals:
+        if signal._is_annotation_signal:
+            continue
+        intended_duration = Fraction(signal._num_samples) / Fraction(
+            str(signal.sampling_frequency)
+        )
+        timing_error = abs(recorded_duration - intended_duration)
+        if timing_error > _MAX_TIMING_ERROR_SECONDS:
+            raise ValueError(
+                f"Data record layout of {num_data_records} record(s) with a duration "
+                f"of {data_record_duration}s is incompatible with signal "
+                f"{signal.label!r} (sampling_frequency={signal.sampling_frequency} Hz, "
+                f"{signal._num_samples} samples): total timing error of "
+                f"{float(timing_error)}s exceeds the maximum allowed error of "
+                f"{float(_MAX_TIMING_ERROR_SECONDS)}s"
+            )
 
 
 _T = TypeVar("_T", bound=Union[Edf, Bdf])

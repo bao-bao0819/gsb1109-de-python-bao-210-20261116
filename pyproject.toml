@@ -28,6 +28,9 @@ classifiers = [
 ]
 dynamic = ["version"]
 
+[project.scripts]
+edfio-trigger-ledger = "edfio.trigger_ledger:main"
+
 [tool.hatch.build.targets.sdist]
 only-include = ["edfio"]
 

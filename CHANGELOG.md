@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- Add `edfio.trigger_ledger` module and `edfio-trigger-ledger` CLI to reconcile stimulus annotations with a digital trigger channel into a per-trial synchronization ledger. Trigger edges are detected via threshold and debounce, matched one-to-one against annotations within an allowed latency window calibrated by confirmed pairs, and latencies are reported as intervals including the trigger channel's sampling boundary. Dropped annotations and extra triggers are preserved in the ledger.
+
 ## [0.4.18] - 2026-10-01
 
 ### Fixed

@@ -171,5 +171,98 @@ class TestPathInputs(unittest.TestCase):
         self.assertEqual(next(agency_rows)[0], "agency_id")
 
 
+class TestLoopLine(unittest.TestCase):
+    """A loop line visits the same stop_id twice in one trip.
+
+    Each stop visit is a distinct StopTime row keyed by stop_sequence, and
+    they all point at the same Stop entity rather than being deduplicated by
+    stop_id.
+    """
+
+    def setUp(self):
+        self.schedule = Schedule(":memory:")
+        data_location = os.path.join(os.path.dirname(__file__),
+                                     "data", "loop_feed")
+        overwrite_feed(self.schedule, data_location)
+
+    def test_repeated_stop_visits_are_both_exported(self):
+        from pygtfs.gtfs_entities import StopTime
+        rows = (self.schedule.session.query(StopTime)
+                .filter_by(trip_id='LOOP', stop_id='STAGECOACH')
+                .order_by(StopTime.stop_sequence).all())
+        self.assertEqual([st.stop_sequence for st in rows], [1, 4])
+        self.assertEqual(
+            [(st.arrival_time, st.departure_time) for st in rows],
+            [(datetime.timedelta(hours=6), datetime.timedelta(hours=6)),
+             (datetime.timedelta(seconds=23400),
+              datetime.timedelta(seconds=23520))])
+
+    def test_trip_stop_times_follow_stop_sequence(self):
+        from pygtfs.gtfs_entities import Trip
+        trip = self.schedule.session.query(Trip).filter_by(
+            trip_id='LOOP').one()
+        self.assertEqual(
+            [(st.stop_sequence, st.stop_id) for st in trip.stop_times],
+            [(1, 'STAGECOACH'), (2, 'NANAA'), (3, 'NADAV'),
+             (4, 'STAGECOACH'), (5, 'DADAN')])
+
+    def test_visits_share_a_single_stop_entity(self):
+        from pygtfs.gtfs_entities import Stop, Trip
+        stop = self.schedule.session.query(Stop).filter_by(
+            stop_id='STAGECOACH').one()
+        trip = self.schedule.session.query(Trip).filter_by(
+            trip_id='LOOP').one()
+        visits = [st for st in trip.stop_times if st.stop_id == 'STAGECOACH']
+        self.assertEqual(len(visits), 2)
+        self.assertTrue(all(st.stop is stop for st in visits))
+        self.assertEqual(
+            sorted(st.stop_sequence for st in stop.stop_times), [1, 4])
+
+    def test_boarding_second_visit_does_not_revisit_first(self):
+        from pygtfs.gtfs_entities import Trip
+        trip = self.schedule.session.query(Trip).filter_by(
+            trip_id='LOOP').one()
+        ordered = trip.stop_times
+        second_visit = next(st for st in ordered
+                            if st.stop_id == 'STAGECOACH'
+                            and st.stop_sequence == 4)
+        onward = ordered[ordered.index(second_visit):]
+        self.assertEqual(
+            [(st.stop_sequence, st.stop_id) for st in onward],
+            [(4, 'STAGECOACH'), (5, 'DADAN')])
+        sequences = [st.stop_sequence for st in onward]
+        self.assertEqual(sequences, sorted(sequences))
+        self.assertEqual(sequences.count(1), 0)
+
+
+class TestDuplicateStopTimeConflict(unittest.TestCase):
+    """Two rows sharing the same (trip, stop, sequence) primary key.
+
+    The first occurrence is retained and the conflicting row is skipped with a
+    warning instead of aborting the whole feed.
+    """
+
+    def setUp(self):
+        self.schedule = Schedule(":memory:")
+        self.data_location = os.path.join(os.path.dirname(__file__),
+                                          "data", "loop_conflict_feed")
+
+    def test_original_row_is_kept_and_duplicate_skipped(self):
+        import logging
+        from pygtfs.gtfs_entities import StopTime
+        with self.assertLogs('pygtfs.loader', level=logging.WARNING) as logs:
+            overwrite_feed(self.schedule, self.data_location)
+        rows = (self.schedule.session.query(StopTime)
+                .filter_by(trip_id='LOOP')
+                .order_by(StopTime.stop_sequence).all())
+        self.assertEqual(len(rows), 5)
+        conflicting = [st for st in rows if st.stop_sequence == 4]
+        self.assertEqual(len(conflicting), 1)
+        self.assertEqual(conflicting[0].stop_headsign,
+                         'first occurrence')
+        self.assertTrue(any('duplicate' in msg.lower()
+                            for msg in logs.output))
+
+
 if __name__ == '__main__':
     unittest.main()

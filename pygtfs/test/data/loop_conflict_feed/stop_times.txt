@@ -1,0 +1,7 @@
+trip_id,arrival_time,departure_time,stop_id,stop_sequence,stop_headsign,pickup_type,drop_off_type,shape_dist_traveled
+LOOP,6:00:00,6:00:00,STAGECOACH,1,,,,
+LOOP,6:10:00,6:12:00,NANAA,2,,,,
+LOOP,6:20:00,6:22:00,NADAV,3,,,,
+LOOP,6:30:00,6:32:00,STAGECOACH,4,first occurrence,,,
+LOOP,6:31:00,6:33:00,STAGECOACH,4,duplicate occurrence,,,
+LOOP,6:40:00,6:40:00,DADAN,5,,,,

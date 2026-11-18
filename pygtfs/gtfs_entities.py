@@ -10,7 +10,7 @@ import datetime
 
 from sqlalchemy import Column, ForeignKey, ForeignKeyConstraint, and_, Table, Index
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import relationship, validates, synonym, foreign
+from sqlalchemy.orm import relationship, validates, synonym, foreign, backref
 from sqlalchemy.types import (Unicode, Integer, Float, Boolean, Date, Interval,
                               Numeric)
 
@@ -375,7 +375,8 @@ class StopTime(Base):
     stop = relationship(Stop, backref='stop_times',
             primaryjoin=and_(Stop.stop_id==foreign(stop_id),
                              Stop.feed_id==feed_id))
-    trip = relationship(Trip, backref="stop_times",
+    trip = relationship(Trip, backref=backref("stop_times",
+                                              order_by=stop_sequence),
             primaryjoin=and_(Trip.trip_id==foreign(trip_id),
                              Trip.feed_id==feed_id))
 

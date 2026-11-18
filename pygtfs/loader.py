@@ -84,6 +84,10 @@ def append_feed(schedule, feed_filename, strip_fields=True,
             continue
         gtfs_table = gtfs_tables[gtfs_class]
 
+        pk_column_names = set(c.name for c in gtfs_class.__table__.primary_key.columns)
+        pk_fields = tuple(name for name in gtfs_table.Tuple._fields
+                          if name in pk_column_names)
+        seen_keys = set()
 
         for i, record in enumerate(gtfs_table):
             if not record:
@@ -96,6 +100,25 @@ def append_feed(schedule, feed_filename, strip_fields=True,
                 print("Failure while writing {0}".format(record))
                 logger.error("Failure while writing {0}".format(record))
                 raise
+
+            if pk_fields:
+                key = tuple(getattr(instance, name) for name in pk_fields)
+                if key in seen_keys:
+                    # A loop line can visit the same stop more than once, but
+                    # two rows must not share the same primary key. Keep the
+                    # original row and leave the conflicting one out instead of
+                    # aborting the whole feed; the conflict is flagged for
+                    # manual adjudication.
+                    key_desc = dict(zip(pk_fields, key))
+                    print("Skipping duplicate row for {0} with key {1}; "
+                          "keeping the first row.".format(
+                              gtfs_class.__tablename__, key_desc))
+                    logger.warning("Skipping duplicate row for %s with key %s; "
+                                   "keeping the first row.",
+                                   gtfs_class.__tablename__, key_desc)
+                    continue
+                seen_keys.add(key)
+
             schedule.session.add(instance)
 
             if isinstance(instance, ServiceException):

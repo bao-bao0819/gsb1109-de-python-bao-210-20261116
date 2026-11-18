@@ -18,3 +18,19 @@ CopcReader
 
     .. automethod:: __init__
 
+QueryManifest
+-------------
+
+.. autoclass:: laspy.copc.QueryManifest
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+.. autoclass:: laspy.copc.NodeStatus
+    :members:
+    :undoc-members:
+
+.. autoclass:: laspy.copc.PendingPage
+    :members:
+    :undoc-members:
+

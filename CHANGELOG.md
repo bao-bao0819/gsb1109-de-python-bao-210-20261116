@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `CopcReader.query_with_manifest` returns the points together with a
+  `QueryManifest` recording node coverage, known point counts and child
+  hierarchy pages that still need to be read. `CopcReader.plan_query`
+  builds the same manifest offline.
+- The `QueryManifest` lets callers distinguish a confirmed empty region
+  from one whose hierarchy page was not resolved yet.
+
+### Changed
+
+- Child hierarchy pages are cached per `CopcReader`, so adjacent queries
+  that need the same page only fetch it once.
+
 ## Version 2.7.0 (14/01/2026)
 
 ### Added

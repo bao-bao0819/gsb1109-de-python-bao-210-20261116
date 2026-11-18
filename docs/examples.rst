@@ -99,3 +99,54 @@ COPC
 
 
 .. literalinclude:: ../examples/copc.py
+
+
+Knowing whether a spatial query is really empty
+-----------------------------------------------
+
+A COPC query returns no points both for a true empty region and for a
+region whose child hierarchy page is not loaded yet. Use
+:meth:`.CopcReader.query_with_manifest` (or :meth:`.CopcReader.query`)
+to get the points, and inspect the accompanying
+:class:`.QueryManifest` before concluding that the region is empty.
+
+.. code-block:: python
+
+    import laspy
+
+    bounds = laspy.Bounds(
+        mins=np.array([636600.0, 849000.0, 400.0]),
+        maxs=np.array([636700.0, 849100.0, 500.0]),
+    )
+
+    with laspy.CopcReader.open("file.copc.laz") as reader:
+        points, manifest = reader.query_with_manifest(bounds=bounds)
+
+        assert manifest.known_point_count >= len(points)
+        assert manifest.node_coverage  # hierarchy nodes that were visited
+
+        if manifest.is_empty_region_confirmed:
+            print("the hierarchy proves this region holds no points")
+        elif manifest.has_pending_pages:
+            print("still unknown, missing pages:", manifest.pending_pages)
+        else:
+            print("query returned", len(points), "points")
+
+        # Kept for offline reporting, and JSON serializable.
+        report = manifest.as_dict()
+
+Child hierarchy pages are cached on the reader, so a later query that
+needs the same page does not fetch it again:
+
+.. code-block:: python
+
+    with laspy.CopcReader.open("file.copc.laz") as reader:
+        first = reader.plan_query(bounds=bounds)
+        assert first.has_pending_pages
+
+        points, resolved = reader.query_with_manifest(bounds=bounds)
+        assert resolved.pages_fetched == 1
+
+        second = reader.plan_query(bounds=other_bounds)
+        assert second.pages_fetched == 0
+        assert resolved.newly_resolved_nodes

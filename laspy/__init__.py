@@ -3,7 +3,7 @@ __version__ = "2.7.0"
 import logging
 
 from . import errors, file, vlrs
-from .copc import Bounds, CopcReader
+from .copc import Bounds, CopcReader, QueryManifest
 from .errors import LaspyException
 from .header import LasHeader
 from .lasdata import LasData

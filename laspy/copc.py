@@ -3,12 +3,13 @@ import multiprocessing
 import os
 import struct
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import Enum, auto
 from math import ceil, log2
 from operator import attrgetter
 from queue import Queue, SimpleQueue
 from threading import Thread
-from typing import Dict, Iterator, List, Optional, Tuple, Union
+from typing import Dict, Iterator, List, Optional, Set, Tuple, Union
 
 try:
     import requests
@@ -193,18 +194,21 @@ class VoxelKey:
     __slots__ = ["level", "x", "y", "z"]
     unpacker = struct.Struct("<iiii")
 
-    def __init__(self) -> None:
+    def __init__(self, level: int = -1, x: int = 0, y: int = 0, z: int = 0) -> None:
         # <0 means invalid
-        self.level = -1
-        self.x = 0
-        self.y = 0
-        self.z = 0
+        self.level = level
+        self.x = x
+        self.y = y
+        self.z = z
 
     @classmethod
     def from_bytes(cls, data: bytes):
         key = cls()
         key.level, key.x, key.y, key.z = cls.unpacker.unpack(data)
         return key
+
+    def as_tuple(self) -> Tuple[int, int, int, int]:
+        return (self.level, self.x, self.y, self.z)
 
     def child(self, dir: int) -> "VoxelKey":
         key = VoxelKey()
@@ -356,28 +360,346 @@ class OctreeNode:
         return f"OctreeNode(key={self.key})"
 
 
+class NodeStatus(Enum):
+    """Resolution status of an octree node inside a query manifest.
+
+    ``EMPTY`` means the hierarchy explicitly declared zero points for the
+    node, ``ABSENT`` means the fully-loaded parent page did not list it,
+    and ``PENDING`` means the page describing it has not been read yet.
+    """
+
+    EMPTY = auto()
+    ABSENT = auto()
+    POINTS = auto()
+    PENDING = auto()
+    OUT_OF_BOUNDS = auto()
+    LEVEL_EXCLUDED = auto()
+
+
+@dataclass
+class PendingPage:
+    """A child hierarchy page that the query needs but has not read yet."""
+
+    key: VoxelKey
+    offset: int
+    byte_size: int
+
+    def as_tuple(self) -> Tuple[Tuple[int, int, int, int], int, int]:
+        return (self.key.as_tuple(), self.offset, self.byte_size)
+
+
+@dataclass
+class QueryManifest:
+    """Offline record of what a COPC query actually resolved.
+
+    The manifest distinguishes three cases that otherwise all look like
+    "zero points returned":
+
+    - :attr:`empty_nodes`: the hierarchy explicitly declares these nodes
+      to hold zero points,
+    - :attr:`absent_nodes`: the parent page is fully loaded and does not
+      list this key, so it holds no points either,
+    - :attr:`pending_pages`: the hierarchy entry points to a child page
+      that has not been read, so the region is still unknown,
+    - :attr:`covered_nodes`: nodes whose point chunks the query resolved.
+
+    ``known_point_count`` is the number of points the hierarchy says the
+    covered nodes contain. ``selected_point_count`` is the subset matching
+    the requested level range. Neither is affected by coordinate filtering.
+
+    ``is_empty_region_confirmed`` is only true when the hierarchy evidence
+    covers the whole requested region and rules out points. A pending page
+    or unresolved key keeps it false; so does any point actually returned.
+    """
+
+    bounds: Optional[Bounds] = None
+    level_range: Optional[range] = None
+    covered_nodes: Dict[VoxelKey, int] = field(default_factory=dict)
+    selected_nodes: Set[VoxelKey] = field(default_factory=set)
+    empty_nodes: Set[VoxelKey] = field(default_factory=set)
+    absent_nodes: Set[VoxelKey] = field(default_factory=set)
+    pending_pages: Dict[VoxelKey, PendingPage] = field(default_factory=dict)
+    resolved_pages: Set[VoxelKey] = field(default_factory=set)
+    out_of_bounds_nodes: Set[VoxelKey] = field(default_factory=set)
+    level_excluded_nodes: Set[VoxelKey] = field(default_factory=set)
+    unresolved_keys: Set[VoxelKey] = field(default_factory=set)
+    previously_pending: Set[VoxelKey] = field(default_factory=set)
+    pages_fetched: int = 0
+    points_fetched: bool = False
+    returned_point_count: Optional[int] = None
+
+    @property
+    def node_coverage(self) -> Dict[VoxelKey, "NodeStatus"]:
+        """Map every visited node to the status the hierarchy gave it.
+
+        ``PENDING`` wins over ``EMPTY``: a node must never look confirmed
+        empty while a page that describes it is still missing.
+        """
+        coverage: Dict[VoxelKey, NodeStatus] = {}
+        for key in self.covered_nodes:
+            coverage[key] = NodeStatus.POINTS
+        for key in self.pending_pages:
+            coverage[key] = NodeStatus.PENDING
+        for key in self.unresolved_keys:
+            coverage[key] = NodeStatus.PENDING
+        for key in self.empty_nodes:
+            coverage.setdefault(key, NodeStatus.EMPTY)
+        for key in self.absent_nodes:
+            coverage.setdefault(key, NodeStatus.ABSENT)
+        for key in self.out_of_bounds_nodes:
+            coverage[key] = NodeStatus.OUT_OF_BOUNDS
+        for key in self.level_excluded_nodes:
+            coverage[key] = NodeStatus.LEVEL_EXCLUDED
+        return coverage
+
+    @property
+    def unresolved_nodes(self) -> Set[VoxelKey]:
+        """Nodes still waiting for a hierarchy page."""
+        return set(self.pending_pages) | set(self.unresolved_keys)
+
+    @property
+    def resolved_nodes(self) -> Set[VoxelKey]:
+        """Nodes for which the hierarchy evidence is now complete."""
+        return (
+            set(self.covered_nodes)
+            | self.empty_nodes
+            | self.absent_nodes
+            | self.resolved_pages
+        )
+
+    @property
+    def newly_resolved_nodes(self) -> Set[VoxelKey]:
+        """Nodes that were unknown in an earlier query but are now known."""
+        return self.previously_pending & self.resolved_nodes
+
+    @property
+    def still_unknown_nodes(self) -> Set[VoxelKey]:
+        """Nodes that were unknown in an earlier query and remain so."""
+        return self.previously_pending - self.resolved_nodes
+
+    @property
+    def known_point_count(self) -> int:
+        return sum(self.covered_nodes.values())
+
+    @property
+    def selected_point_count(self) -> int:
+        return sum(
+            count
+            for key, count in self.covered_nodes.items()
+            if key in self.selected_nodes
+        )
+
+    @property
+    def has_pending_pages(self) -> bool:
+        return bool(self.pending_pages)
+
+    @property
+    def is_complete(self) -> bool:
+        return not self.pending_pages and not self.unresolved_keys
+
+    @property
+    def is_empty_region_confirmed(self) -> bool:
+        """True only when the hierarchy fully rules out points.
+
+        Any pending child page or unresolved key keeps this false, even
+        if the query already returned zero points. For a query that has
+        actually run, zero returned points over a complete hierarchy is
+        enough; for an offline plan, every selected node must be known
+        empty or outside the query bounds.
+        """
+        if not self.is_complete:
+            return False
+        if not (self.selected_nodes or self.out_of_bounds_nodes):
+            # Nothing in the requested region was selected (for example a
+            # level filter that matches no existing level). That is not an
+            # empty area, it is an empty selection.
+            return False
+        if self.points_fetched:
+            return self.returned_point_count == 0
+        return self.selected_point_count == 0
+
+    def status_of(self, key: VoxelKey) -> Optional[NodeStatus]:
+        """Resolution status of a node, or None if it was never visited."""
+        if key in self.covered_nodes:
+            return NodeStatus.POINTS
+        if key in self.pending_pages:
+            return NodeStatus.PENDING
+        if key in self.unresolved_keys:
+            return NodeStatus.PENDING
+        if key in self.empty_nodes:
+            return NodeStatus.EMPTY
+        if key in self.absent_nodes:
+            return NodeStatus.ABSENT
+        if key in self.out_of_bounds_nodes:
+            return NodeStatus.OUT_OF_BOUNDS
+        if key in self.level_excluded_nodes:
+            return NodeStatus.LEVEL_EXCLUDED
+        return None
+
+    def __repr__(self) -> str:
+        return (
+            f"QueryManifest(covered_nodes={len(self.covered_nodes)}, "
+            f"known_point_count={self.known_point_count}, "
+            f"selected_point_count={self.selected_point_count}, "
+            f"empty_nodes={len(self.empty_nodes)}, "
+            f"pending_pages={len(self.pending_pages)}, "
+            f"unresolved_keys={len(self.unresolved_keys)})"
+        )
+
+    def record_page(self, page: PendingPage) -> None:
+        """Mark a hierarchy page as needed but not fetched."""
+        self.pending_pages[page.key] = page
+        self.unresolved_keys.add(page.key)
+
+    def mark_page_loaded(self, page_key: VoxelKey) -> None:
+        """Remove a pending page once its entries are available."""
+        self.pending_pages.pop(page_key, None)
+        self.unresolved_keys.discard(page_key)
+        self.resolved_pages.add(page_key)
+
+    def merge(self, other: "QueryManifest") -> "QueryManifest":
+        """Merge ``other`` into this manifest, keeping unresolved evidence.
+
+        Entries resolved by ``other`` replace older pending/unknown
+        evidence for the same key. Pending pages that ``other`` did not
+        resolve stay pending, so earlier conclusions that remain unknown
+        are still visible.
+        """
+        # `other` may have started from a snapshot of the unknowns it was
+        # meant to resolve. Keep it plus what is unknown here before the
+        # merge, so the result describes the latest change rather than an
+        # ever-growing history.
+        self.previously_pending = self.unresolved_nodes | other.previously_pending
+
+        self.covered_nodes.update(other.covered_nodes)
+        self.empty_nodes.update(other.empty_nodes)
+        self.absent_nodes.update(other.absent_nodes)
+        self.out_of_bounds_nodes.update(other.out_of_bounds_nodes)
+        self.level_excluded_nodes.update(other.level_excluded_nodes)
+        self.selected_nodes.update(other.selected_nodes)
+        self.resolved_pages.update(other.resolved_pages)
+        for key in other.covered_nodes:
+            self.empty_nodes.discard(key)
+            self.absent_nodes.discard(key)
+        for key in other.resolved_pages:
+            # A page resolved by `other` supersedes any earlier plan that
+            # could only mark this node absent or empty.
+            self.pending_pages.pop(key, None)
+            self.unresolved_keys.discard(key)
+            self.absent_nodes.discard(key)
+        for key, page in other.pending_pages.items():
+            if key not in self.resolved_pages and key not in self.covered_nodes:
+                self.pending_pages[key] = page
+                self.unresolved_keys.add(key)
+        for key in other.unresolved_keys:
+            if key not in self.resolved_pages:
+                self.unresolved_keys.add(key)
+        for key in self.covered_nodes:
+            self.pending_pages.pop(key, None)
+            self.unresolved_keys.discard(key)
+        if other.returned_point_count is not None:
+            self.returned_point_count = other.returned_point_count
+        self.points_fetched = self.points_fetched or other.points_fetched
+        self.pages_fetched += other.pages_fetched
+        return self
+
+    def as_dict(self) -> dict:
+        """Plain, JSON-serializable representation.
+
+        Node keys become ``[level, x, y, z]`` lists.
+        """
+
+        def sorted_keys(keys):
+            return [
+                list(key.as_tuple()) for key in sorted(keys, key=lambda k: k.as_tuple())
+            ]
+
+        return {
+            "bounds": None
+            if self.bounds is None
+            else [self.bounds.mins.tolist(), self.bounds.maxs.tolist()],
+            "level_range": None if self.level_range is None else list(self.level_range),
+            "covered_nodes": {
+                "{},{},{},{}".format(*key.as_tuple()): count
+                for key, count in sorted(
+                    self.covered_nodes.items(), key=lambda item: item[0].as_tuple()
+                )
+            },
+            "covered_node_counts": [
+                [list(key.as_tuple()), count]
+                for key, count in sorted(
+                    self.covered_nodes.items(), key=lambda item: item[0].as_tuple()
+                )
+            ],
+            "selected_nodes": sorted_keys(self.selected_nodes),
+            "empty_nodes": sorted_keys(self.empty_nodes),
+            "pending_pages": [
+                [list(page.key.as_tuple()), page.offset, page.byte_size]
+                for page in sorted(
+                    self.pending_pages.values(), key=lambda p: p.key.as_tuple()
+                )
+            ],
+            "resolved_pages": sorted_keys(self.resolved_pages),
+            "absent_nodes": sorted_keys(self.absent_nodes),
+            "out_of_bounds_nodes": sorted_keys(self.out_of_bounds_nodes),
+            "level_excluded_nodes": sorted_keys(self.level_excluded_nodes),
+            "unresolved_keys": sorted_keys(self.unresolved_keys),
+            "newly_resolved_nodes": sorted_keys(self.newly_resolved_nodes),
+            "still_unknown_nodes": sorted_keys(self.still_unknown_nodes),
+            "pages_fetched": self.pages_fetched,
+            "known_point_count": self.known_point_count,
+            "selected_point_count": self.selected_point_count,
+            "returned_point_count": self.returned_point_count,
+            "has_pending_pages": self.has_pending_pages,
+            "is_complete": self.is_complete,
+            "is_empty_region_confirmed": self.is_empty_region_confirmed,
+        }
+
+
 def load_octree_for_query(
     source,
     info: CopcInfoVlr,
     hierarchy_page: HierarchyPage,
     query_bounds: Optional[Bounds] = None,
     level_range: Optional[range] = None,
+    manifest: Optional[QueryManifest] = None,
+    page_cache: Optional[Dict[Tuple[int, int], HierarchyPage]] = None,
+    fetch_pages: bool = True,
 ) -> List[OctreeNode]:
     """
     Loads the nodes of the COPC octree from the `source` that
     satisfies the parameters `query_bounds` and `level_range`.
 
-    It returns the root node of the loaded 'sub-octree'
+    It returns the root node of the loaded 'sub-octree'.
+
+    When ``manifest`` is given it is filled with what the traversal
+    actually resolved: covered nodes and their point counts, confirmed
+    empty nodes, and child hierarchy pages that still need to be read.
+
+    With ``fetch_pages=False`` no child page is read; each one is recorded
+    in ``manifest.pending_pages`` instead, which makes the traversal an
+    offline planning step.
     """
+    if manifest is None:
+        manifest = QueryManifest()
+
+    manifest.bounds = query_bounds
+    manifest.level_range = level_range
+
     root_bounds = Bounds(
         mins=info.center - info.halfsize,
         maxs=info.center + info.halfsize,
     )
 
+    if query_bounds is not None and not root_bounds.overlaps(query_bounds):
+        manifest.out_of_bounds_nodes.add(VoxelKey(0))
+        return []
+
     root_node = OctreeNode()
     root_node.key.level = 0
 
-    satisfying_nodes = []
+    visited_pages: Set[VoxelKey] = set()
+    satisfying_nodes: List[OctreeNode] = []
     nodes_to_load: List[OctreeNode] = [root_node]
     while nodes_to_load:
         current_node = nodes_to_load.pop()
@@ -388,38 +710,90 @@ def load_octree_for_query(
         )
 
         if not is_in_bounds:
+            manifest.out_of_bounds_nodes.add(current_node.key)
             continue
 
         if level_range is not None and current_node.key.level >= level_range.stop:
+            manifest.level_excluded_nodes.add(current_node.key)
             continue
+
+        is_in_level = level_range is None or current_node.key.level in level_range
 
         try:
             entry = hierarchy_page.entries[current_node.key]
         except KeyError:
+            if current_node.key.level == 0:
+                manifest.unresolved_keys.add(current_node.key)
+            else:
+                # The parent page was resolved and did not list this key,
+                # so no point data exists for it.
+                manifest.absent_nodes.add(current_node.key)
+                if is_in_level:
+                    manifest.selected_nodes.add(current_node.key)
             continue
 
-        # get the info of the node
         if entry.point_count == -1:
-            source.seek(entry.offset)
-            page_bytes = source.read(entry.byte_size)
-            page = HierarchyPage.from_bytes(page_bytes)
+            page_key = current_node.key
+            cache_key = (entry.offset, entry.byte_size)
+            page = None if page_cache is None else page_cache.get(cache_key)
+
+            if page is None and not fetch_pages:
+                manifest.record_page(
+                    PendingPage(page_key, entry.offset, entry.byte_size)
+                )
+                continue
+
+            if page is None:
+                source.seek(entry.offset)
+                page_bytes = source.read(entry.byte_size)
+                page = HierarchyPage.from_bytes(page_bytes)
+                manifest.pages_fetched += 1
+                if page_cache is not None:
+                    page_cache[cache_key] = page
+
             hierarchy_page.entries.update(page.entries)
-            nodes_to_load.insert(0, current_node)
+            manifest.mark_page_loaded(page_key)
+
+            if page_key in visited_pages:
+                # The page did not describe its own key (or kept pointing
+                # to itself). Its children may still be described by it,
+                # so visit them without looping forever, but keep the
+                # node itself marked as unresolved.
+                manifest.resolved_pages.discard(page_key)
+                manifest.unresolved_keys.add(page_key)
+                for child_key in page_key.childs():
+                    child_node = OctreeNode()
+                    child_node.key = child_key
+                    current_node.childs.append(child_node)
+                    nodes_to_load.append(child_node)
+                continue
+            visited_pages.add(page_key)
+            nodes_to_load.append(current_node)
             continue
-        elif entry.point_count >= 0:
+
+        if entry.point_count > 0:
             current_node.offset = entry.offset
             current_node.byte_size = entry.byte_size
             current_node.point_count = entry.point_count
+            manifest.covered_nodes[current_node.key] = entry.point_count
+            if is_in_level:
+                manifest.selected_nodes.add(current_node.key)
+                satisfying_nodes.append(current_node)
+        else:
+            # point_count == 0: the hierarchy explicitly says this node
+            # has no point data of its own. Its children may still exist.
+            current_node.offset = entry.offset
+            current_node.byte_size = entry.byte_size
+            current_node.point_count = 0
+            manifest.empty_nodes.add(current_node.key)
+            if is_in_level:
+                manifest.selected_nodes.add(current_node.key)
 
-            for child_key in current_node.key.childs():
-                child_node = OctreeNode()
-                child_node.key = child_key
-                current_node.childs.append(child_node)
-                nodes_to_load.append(child_node)
-
-        is_in_level = level_range is None or current_node.key.level in level_range
-        if is_in_level:
-            satisfying_nodes.append(current_node)
+        for child_key in current_node.key.childs():
+            child_node = OctreeNode()
+            child_node.key = child_key
+            current_node.childs.append(child_node)
+            nodes_to_load.append(child_node)
 
     return satisfying_nodes
 
@@ -636,9 +1010,18 @@ class CopcReader:
 
         self.source.seek(self.copc_info.hierarchy_root_offset)
         root_page_bytes = self.source.read(self.copc_info.hierarchy_root_size)
-        # At first the hierary only contains the root page entries
-        # but it will get updated as the queries may need more pages
+        # At first the hierarchy only contains the root page entries,
+        # but it will get updated as queries need more pages.
         self.root_page = HierarchyPage.from_bytes(root_page_bytes)
+        # Child hierarchy pages already downloaded by this reader.
+        # Keyed by (offset, byte_size) so adjacent queries that touch the
+        # same page only fetch it once.
+        self.page_cache: Dict[Tuple[int, int], HierarchyPage] = {}
+        # Evidence accumulated over all queries of this reader. It keeps
+        # pages that are still unresolved visible even after later
+        # queries have fetched other pages.
+        self.manifest = QueryManifest()
+        self.last_manifest = QueryManifest()
 
     @classmethod
     def open(
@@ -708,6 +1091,61 @@ class CopcReader:
             decompression_selection=decompression_selection,
         )
 
+    def _normalize_level(
+        self,
+        resolution: Optional[Union[float, int]],
+        level: Optional[Union[int, range]],
+    ) -> Optional[range]:
+        if resolution is not None and level is not None:
+            raise ValueError("Cannot specify both level and resolution")
+        elif resolution is not None and level is None:
+            level_max = max(1, ceil(log2(self.copc_info.spacing / resolution)) + 1)
+            level = range(0, level_max)
+
+        if level is None:
+            return None
+        if isinstance(level, int):
+            return range(level, level + 1)
+        if isinstance(level, range):
+            return level
+        raise TypeError(f"level must be an int or a range, got {type(level)!r}")
+
+    def plan_query(
+        self,
+        bounds: Optional[Bounds] = None,
+        resolution: Optional[Union[float, int]] = None,
+        level: Optional[Union[int, range]] = None,
+    ) -> QueryManifest:
+        """Build an offline manifest for a query without fetching pages.
+
+        Only the already-cached hierarchy entries are used. Anything that
+        would require reading a child hierarchy page stays listed in
+        ``manifest.pending_pages`` instead of being assumed empty.
+        """
+        level = self._normalize_level(resolution, level)
+
+        if bounds is not None:
+            bounds = bounds.ensure_3d(self.header.mins, self.header.maxs)
+
+        manifest = QueryManifest()
+        # Everything still unknown before this planning call. The
+        # returned manifest can then say which earlier conclusions this
+        # call resolved and which remain unknown.
+        manifest.previously_pending = self.manifest.unresolved_nodes
+        load_octree_for_query(
+            self.source,
+            self.copc_info,
+            self.root_page,
+            query_bounds=bounds,
+            level_range=level,
+            manifest=manifest,
+            page_cache=self.page_cache,
+            fetch_pages=False,
+        )
+        self.manifest.merge(manifest)
+        self.last_manifest = manifest
+        return manifest
+
     def query(
         self,
         bounds: Optional[Bounds] = None,
@@ -745,28 +1183,45 @@ class CopcReader:
                - If it is a range, points for which the LOD is within the range
                  will be returned
         """
+        points, _ = self.query_with_manifest(bounds, resolution, level)
+        return points
 
-        if resolution is not None and level is not None:
-            raise ValueError("Cannot specify both level and resolution")
-        elif resolution is not None and level is None:
-            level_max = max(1, ceil(log2(self.copc_info.spacing / resolution)) + 1)
-            level = range(0, level_max)
+    def query_with_manifest(
+        self,
+        bounds: Optional[Bounds] = None,
+        resolution: Optional[Union[float, int]] = None,
+        level: Optional[Union[int, range]] = None,
+    ) -> Tuple[ScaleAwarePointRecord, QueryManifest]:
+        """Query and return the manifest describing what was resolved.
 
-        if isinstance(level, int):
-            level = range(level, level + 1)
+        The returned manifest covers this query only. It reports the
+        covered nodes and their known point counts, explicitly empty
+        nodes, and any hierarchy page that could not be fetched.
+
+        ``reader.manifest`` accumulates evidence across queries, and its
+        ``newly_resolved_nodes`` / ``still_unknown_nodes`` show how a
+        query changed conclusions reached earlier by the same reader.
+        """
+        level = self._normalize_level(resolution, level)
 
         if bounds is not None:
             bounds = bounds.ensure_3d(self.header.mins, self.header.maxs)
 
+        manifest = QueryManifest()
+        manifest.previously_pending = self.manifest.unresolved_nodes
         nodes = load_octree_for_query(
             self.source,
             self.copc_info,
             self.root_page,
             query_bounds=bounds,
             level_range=level,
+            manifest=manifest,
+            page_cache=self.page_cache,
+            fetch_pages=True,
         )
-        # print("num nodes to query:", len(nodes));
         points = self._fetch_and_decompress_points_of_nodes(nodes)
+        manifest.bounds = bounds
+        manifest.level_range = level
 
         if bounds is not None:
             MINS = np.round(
@@ -787,7 +1242,12 @@ class CopcReader:
 
             keep_mask = x_keep & y_keep & z_keep
             points.array = points.array[keep_mask].copy()
-        return points
+
+        manifest.returned_point_count = len(points)
+        manifest.points_fetched = True
+        self.manifest.merge(manifest)
+        self.last_manifest = manifest
+        return points, manifest
 
     def spatial_query(self, bounds: Bounds) -> ScaleAwarePointRecord:
         return self.query(bounds=bounds, level=None)

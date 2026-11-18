@@ -1088,3 +1088,24 @@ def dumps(obj):
     encoder = ArffEncoder()
     return encoder.encode(obj)
 # =============================================================================
+
+
+_STATISTICS_EXPORTS = frozenset([
+    'ArffBaseline',
+    'BaselineSnapshot',
+    'ColumnSnapshot',
+    'ColumnStatistics',
+    'ArffStatisticsError',
+    'SchemaMismatchError',
+    'ConflictingRevisionError',
+    'merge_baselines',
+])
+
+
+def __getattr__(name):
+    # Statistics support lives in ``arff_stats``.  Import it lazily so that
+    # either module can be imported first without a circular import.
+    if name in _STATISTICS_EXPORTS:
+        import arff_stats
+        return getattr(arff_stats, name)
+    raise AttributeError("module %r has no attribute %r" % (__name__, name))

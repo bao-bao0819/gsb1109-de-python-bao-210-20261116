@@ -490,3 +490,68 @@ loading to preallocate an array and do any data conversion on the fly::
     array([(0, 85., 85.,  True,  True), (0, 80., 90., False,  True)],
           dtype=[('outlook', '<i8'), ('temperature', '<f8'),
                  ('humidity', '<f8'), ('windy', '?'), ('play', '?')])
+
+.. _statistics:
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Streaming statistics and baselines
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``arff_stats.ArffBaseline`` accumulates per-column statistics from ARFF
+partitions as they arrive. Samples are keyed, corrections replace the previous
+value for a key, and retractions withdraw it again::
+
+    import arff_stats
+
+    baseline = arff_stats.ArffBaseline.from_arff(shard_one,
+                                                 partition='shard-1')
+    baseline.ingest(shard_two, partition='shard-2')
+
+    baseline.upsert(('shard-1', 3), [12.0, 4.0])   # correct one row
+    baseline.retract(('shard-2', 0))                # withdraw one row
+
+    snapshot = baseline.snapshot()
+    snapshot['temperature'].mean
+    snapshot['temperature'].variance
+
+Re-sending the same partition with the same ``partition`` label is idempotent:
+rows keep their ``(partition, row_index)`` key and are counted once. When the
+same logical row can appear in different documents, pass a column instead::
+
+    baseline = arff_stats.ArffBaseline.from_arff(first, source_key='id')
+    baseline.ingest(second, source_key='id')   # same id corrects the row
+
+With ``revision=`` values, older revisions are ignored, identical
+retransmissions are no-ops, and two shards disagreeing at the same revision
+raise ``ConflictingRevisionError`` instead of producing an order-dependent
+result. ``retract(key, revision=...)`` leaves a tombstone so merging an older
+shard cannot resurrect a withdrawn row.
+
+Sparse partitions follow ARFF semantics: an omitted numeric attribute is the
+valid value zero, while an explicit ``?`` is missing and is excluded from
+``count`` and all numeric statistics.
+
+Statistics use exact rational accumulation internally. Large values that
+cancel, retracting the only valid value, and corrections that arrive from
+different shards therefore all produce a deterministic result. Within normal
+floating-point tolerance, a snapshot equals a recomputation over the currently
+valid samples.
+
+Every call to :meth:`~arff_stats.ArffBaseline.snapshot` returns an immutable
+``BaselineSnapshot``. Published results should keep that object: later
+ingestion, corrections and retractions create a new snapshot and never change
+the one already published.
+
+Shards can be combined with ``baseline.merge(other)``; all shards must share
+the same attribute schema. ``ColumnStatistics`` is also available directly for
+lower-level accumulation.
+
+A frozen snapshot also normalizes values against its own basis::
+
+    z = snapshot['temperature'].normalize(72.0)
+    row = snapshot.normalize([72.0, 'sunny', 1.0])
+
+Numeric attributes become z-scores, non-numeric attributes pass through, and
+missing values stay ``None``. A constant column returns ``0.0`` for its own
+value and raises ``ValueError`` for any other value. Because the basis lives in
+the snapshot, already published normalizations are unaffected by later data.

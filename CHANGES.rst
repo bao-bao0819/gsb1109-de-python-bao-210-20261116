@@ -2,6 +2,13 @@
 What's New in LIAC-ARFF
 ~~~~~~~~~~~~~~~~~~~~~~~
 
+Unreleased
+
+* enhancement: add ``arff_stats`` with keyed, mergeable per-column
+  statistics, correction/retraction of received samples, frozen snapshots,
+  and revision-aware cross-shard merges. Sparse omitted zeros count as valid
+  observations while explicit missing values do not.
+
 LIAC-ARFF 2.5
 
 This is the last release supporting Python 2.

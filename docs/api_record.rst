@@ -42,6 +42,18 @@ vcfpy.Call
 .. autoclass:: vcfpy.Call
     :members:
 
+Re-ordering alleles
+-------------------
+
+.. automethod:: vcfpy.Record.reorder_alts
+    :noindex:
+
+.. automethod:: vcfpy.Record.split
+    :noindex:
+
+.. automethod:: vcfpy.Record.merge
+    :noindex:
+
 vcfpy.AltRecord
 ---------------
 

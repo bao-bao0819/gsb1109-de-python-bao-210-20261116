@@ -55,6 +55,16 @@ def test_record_constants():
     assert vcfpy.HOM_ALT
 
 
+def test_from_allele():
+    assert vcfpy.AlleleKey
+    assert vcfpy.SourceAllele
+    assert vcfpy.UnmatchedValue
+    assert vcfpy.AlleleMapping
+    assert vcfpy.split_multi
+    assert vcfpy.merge_multi
+    assert vcfpy.infer_mapping
+
+
 def test_from_reader():
     assert vcfpy.Reader
 

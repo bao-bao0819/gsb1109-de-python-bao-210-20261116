@@ -1,5 +1,15 @@
 # -*- coding: utf-8 -*-
 
+from vcfpy.allele import (
+    AlleleKey,
+    AlleleMapping,
+    RecordMeta,
+    SourceAllele,
+    UnmatchedValue,
+    infer_mapping,
+    merge_multi,
+    split_multi,
+)
 from vcfpy.exceptions import (
     HeaderNotFound,
     IncorrectVCFFormat,
@@ -55,6 +65,14 @@ from vcfpy.version import __version__
 from vcfpy.writer import Writer
 
 __all__ = [
+    "AlleleKey",
+    "AlleleMapping",
+    "RecordMeta",
+    "SourceAllele",
+    "UnmatchedValue",
+    "infer_mapping",
+    "split_multi",
+    "merge_multi",
     "VCFPyException",
     "IncorrectVCFFormat",
     "InvalidHeaderException",

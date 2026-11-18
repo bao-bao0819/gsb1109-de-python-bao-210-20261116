@@ -104,6 +104,14 @@ class Record:
         self.calls = calls or []
         #: A mapping from sample name to entry in self.calls.
         self.call_for_sample = {}
+        #: Optional stable identity of this row, independent of ``ID``.  Set
+        #: this before calls to :py:meth:`reorder_alts` or the allele helpers
+        #: when the VCF ``ID`` values are not unique (split rows share IDs and
+        #: merged rows combine them).
+        self.record_key: Any | None = None
+        #: Optional :py:class:`vcfpy.allele.AlleleMapping` describing where
+        #: the alleles of this record came from.
+        self.allele_mapping: Any | None = None
         self.update_calls(self.calls)
 
     def update_calls(self, calls: Sequence["Call | UnparsedCall"]):
@@ -175,6 +183,148 @@ class Record:
                     warnings.warn("UnparsedCall encountered, skipping", CannotModifyUnparsedCallWarning)
                 else:
                     call.data.setdefault(key, value)
+
+    def reorder_alts(
+        self,
+        order: Sequence[int],
+        *,
+        header: Any | None = None,
+        numbers: dict[str, str] | None = None,
+        allele_mapping: Any | None = None,
+    ) -> "Record":
+        """Reorder ``ALT`` alleles and remap all allele-indexed values.
+
+        ``order`` lists old ALT positions in their new order:
+        ``order[new_index] = old_index`` with 0-based indices into the current
+        ``ALT`` list, e.g. ``[1, 0]`` swaps the first two ALTs.
+
+        INFO and FORMAT fields declared with ``Number=A``/``R``/``G``, as well
+        as every sample's ``GT``, are rewritten according to the same
+        permutation.  Values are never re-attached by their old array index:
+        a value whose length does not match its declared ``Number`` (or a GT
+        allele outside the ALT range) is left untouched and reported in
+        ``self.allele_mapping.unmatched``.
+
+        If the record already carries an :class:`vcfpy.allele.AlleleMapping`,
+        it is permuted along with the values and stored back on the record.
+        ``allele_mapping`` may be passed explicitly instead.
+        """
+        from vcfpy import allele as allele_module
+
+        order = list(order)
+        n_alts = len(self.ALT)
+        if sorted(order) != list(range(n_alts)):
+            raise ValueError("order must be a permutation of 0..{}, got {!r}".format(max(n_alts - 1, 0), order))
+        if len(set(order)) != len(order):
+            raise ValueError("order must not contain duplicate ALT indices, got {!r}".format(order))
+        if self.FORMAT and any(isinstance(call, UnparsedCall) for call in self.calls):
+            raise ValueError("Cannot reorder alleles of a record with UnparsedCall instances")
+
+        mapping = allele_mapping if allele_mapping is not None else self.allele_mapping
+        if mapping is not None and not isinstance(mapping, allele_module.AlleleMapping):
+            raise TypeError("allele_mapping must be a vcfpy.AlleleMapping")
+        if mapping is not None and self.record_key is None:
+            raise ValueError("record_key must be set to reorder a record with an allele mapping")
+        if self.record_key is None:
+            self.record_key = allele_module.record_key_for(self)
+        has_entries = mapping is not None and any(
+            key.record_key == self.record_key for key in mapping.output_keys
+        )
+        if mapping is not None and not has_entries and len(mapping) > 0:
+            raise ValueError(
+                "allele_mapping has no entries for record key {!r}".format(self.record_key)
+            )
+        if not has_entries:
+            # Always leave a trace: without usable entries for this row, treat
+            # it as its own source so that remapped/unmatched values are still
+            # attributable independently of the (possibly duplicated) ID.
+            mapping = allele_module.AlleleMapping() if mapping is None else mapping
+            mapping.register_record_object(self, self.record_key)
+            for allele_index in range(n_alts + 1):
+                mapping.add(
+                    allele_module.AlleleKey(self.record_key, allele_index),
+                    allele_module.AlleleKey(self.record_key, allele_index),
+                    record_ids=self.ID,
+                )
+
+        def report(field: str, value: Any, reason: str, sample: str | None = None):
+            mapping.report_unmatched(
+                field,
+                value,
+                reason,
+                output_key=allele_module.AlleleKey(self.record_key, 0),
+                sample=sample,
+            )
+
+        # ALT itself is a pure permutation, so it always succeeds.
+        self.ALT = [self.ALT[idx] for idx in order]
+
+        n_alleles = n_alts + 1
+        for key, value in list(self.INFO.items()):
+            number = allele_module.resolve_field_number(
+                header, "INFO", key, value, n_alleles, numbers=numbers
+            )
+            if number not in allele_module.ALLELE_NUMBERS:
+                continue
+            remapped, reason = allele_module.remap_index_vector(value, number, order)
+            if reason is not None:
+                report("INFO/{}".format(key), value, reason)
+                continue
+            self.INFO[key] = remapped
+
+        for call in self.calls:
+            if not isinstance(call, Call):  # pragma: no cover - checked above
+                continue
+            ploidy = len(call.gt_alleles) if call.gt_alleles is not None else 2
+            for key, value in list(call.data.items()):
+                if key == "GT":
+                    remapped_gt, reason = allele_module.remap_gt(value, order)
+                    if reason is not None:
+                        report("FORMAT/GT", value, reason, sample=call.sample)
+                        continue
+                    call.data["GT"] = remapped_gt
+                    call._genotype_updated()
+                    continue
+                number = allele_module.resolve_field_number(
+                    header, "FORMAT", key, value, n_alleles, ploidy=ploidy, numbers=numbers
+                )
+                if number not in allele_module.ALLELE_NUMBERS:
+                    continue
+                remapped, reason = allele_module.remap_index_vector(value, number, order, ploidy=ploidy)
+                if reason is not None:
+                    report("FORMAT/{}".format(key), value, reason, sample=call.sample)
+                    continue
+                call.data[key] = remapped
+
+        self.allele_mapping = mapping.permute_outputs(self.record_key, order)
+        return self
+
+    def split(self, **kwargs):
+        """Split this multi-allelic record into one record per ALT allele.
+
+        See :py:func:`vcfpy.allele.split_multi` for the supported keyword
+        arguments and the returned ``(records, mapping)`` pair.
+        """
+        from vcfpy.allele import split_multi
+
+        return split_multi(self, **kwargs)
+
+    #: Alias kept for callers that use the module-level function name.
+    split_multi = split
+
+    @classmethod
+    def merge(cls, records: Sequence["Record"], **kwargs):
+        """Merge records at the same locus into one multi-allelic record.
+
+        See :py:func:`vcfpy.allele.merge_multi` for the supported keyword
+        arguments and the returned ``(record, mapping)`` pair.
+        """
+        from vcfpy.allele import merge_multi
+
+        return merge_multi(records, **kwargs)
+
+    #: Alias kept for callers that use the module-level function name.
+    merge_multi = merge
 
     def __iter__(self) -> Iterator["Call | UnparsedCall"]:
         """Return generator yielding from ``self.calls``"""

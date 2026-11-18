@@ -179,6 +179,65 @@ very end of their process.
         xport.v56.dump(library, f)
 
 
+Reconciling weighted deliveries
+===============================
+
+A delivery can repeat an import while carrying row weights, stratum codes,
+and control totals.  ``xport.reconcile`` treats the source occurrence
+identity, not the observed values, as the duplicate test: two rows that
+happen to share every value but come from different occurrences are distinct
+samples.  An occurrence contributes to totals at most once.
+
+.. code:: python
+
+    import xport
+    from xport.reconcile import Constraint, Observation, reconcile
+
+    rows = [
+        Observation('resp-1', 'north', 2.0, row='line 1'),
+        Observation('resp-1', 'north', 2.0, row='line 2'),  # repeated import
+        Observation('resp-2', 'north', 3.0, row='line 3'),
+    ]
+    result = reconcile(
+        rows,
+        [
+            Constraint(5.0, 'north', tolerance=0.5),
+            Constraint(5.0, tolerance=0.5),
+        ],
+    )
+    print(result.review_labels)   # every row that needs a human decision
+    print(result.solutions)       # every equally good selection
+
+Each constraint accepts a per-stratum or global control total and a
+symmetric numeric tolerance or an explicit ``Tolerance(lower=..., upper=...)``.
+The search maximizes the number of trusted occurrences.  If several
+selections tie, all of them are reported and ``review`` is the disputed set:
+an occurrence that any equally good explanation excludes, together with all
+its delivered copies, stays in review, so input order never decides a tie.
+``removed`` holds rows excluded by every explanation, and
+``certain_duplicates`` holds repeated imports of occurrences that are always
+kept.
+
+Deliveries can also be reconciled from the command line::
+
+    $ xport-reconcile delivery.xpt --spec spec.json --output review.json
+
+The specification names the columns and supplies the control totals:
+
+.. code:: json
+
+    {
+      "identity": "RESP_ID",
+      "stratum": "STRATUM",
+      "weight": "WEIGHT",
+      "row": "LINE_NO",
+      "constraints": [
+        {"stratum": "north", "total": 1200, "tolerance": 0.5},
+        {"total": 2000, "tolerance": 1.0}
+      ]
+    }
+
+
 Feature requests
 ================
 

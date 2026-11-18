@@ -18,6 +18,13 @@ from io import StringIO
 import pandas as pd
 
 from .__about__ import __version__  # noqa: F401 module imported but unused
+from .reconcile import (  # noqa: F401 re-exported for convenience
+    Constraint,
+    Observation,
+    Reconciliation,
+    Tolerance,
+    reconcile as reconcile_delivery,
+)
 
 LOG = logging.getLogger(__name__)
 
@@ -25,6 +32,11 @@ __all__ = [
     'Library',
     'Member',
     'NaN',
+    'Constraint',
+    'Observation',
+    'Reconciliation',
+    'Tolerance',
+    'reconcile_delivery',
 ]
 
 

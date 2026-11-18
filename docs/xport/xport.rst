@@ -6,3 +6,12 @@
     :members:
     :undoc-members:
     :show-inheritance:
+
+------------------------------------------------------------------------
+  ``reconcile`` -- Weighted-delivery reconciliation
+------------------------------------------------------------------------
+
+.. automodule:: xport.reconcile
+    :members:
+    :undoc-members:
+    :show-inheritance:

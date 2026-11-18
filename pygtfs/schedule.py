@@ -42,6 +42,36 @@ class Schedule:
         self.session.delete(feed)
         self.session.commit()
 
+    def expand_frequencies(self, trip_id=None, feed_id=None, service_date=None,
+                           end_inclusive=False, raise_on_conflict=False,
+                           strict=False):
+        """Expand the feed's frequency rows without inventing departures.
+
+        ``exact_times=1`` rows produce :class:`~pygtfs.frequencies.
+        DepartureInstance` objects.  ``exact_times=0`` (or empty) rows produce
+        :class:`~pygtfs.frequencies.ServiceWindow` objects that only carry a
+        waiting range.  Overlapping periods are returned as conflicts and are
+        never silently merged or expanded.
+        """
+        from .frequencies import expand_frequencies
+        return expand_frequencies(
+            self, trip_id=trip_id, feed_id=feed_id,
+            service_date=service_date, end_inclusive=end_inclusive,
+            raise_on_conflict=raise_on_conflict, strict=strict)
+
+    def frequency_instances(self, **kwargs):
+        """Return only exactly-known departures from ``exact_times=1`` rows."""
+        return self.expand_frequencies(**kwargs).departures
+
+    def service_windows(self, **kwargs):
+        """Return only frequency-based windows from ``exact_times=0`` rows."""
+        return self.expand_frequencies(**kwargs).windows
+
+    def frequency_conflicts(self, trip_id=None, feed_id=None):
+        """Return overlapping frequency periods for the feed's trips."""
+        from .frequencies import detect_conflicts
+        return detect_conflicts(self, trip_id=trip_id, feed_id=feed_id)
+
 
 def _meta_query_all(entity, docstring=None):
     def _query_all(instance_self):

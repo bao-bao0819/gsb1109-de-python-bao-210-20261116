@@ -80,6 +80,7 @@ Contents:
    :maxdepth: 2
 
    schedule
+   frequencies
    loader
    gtfs_entities
    gtfs2db

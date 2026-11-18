@@ -333,6 +333,24 @@ class Trip(Base):
                                                 'wheelchair_accessible')
     _validate_bikes = _validate_int_choice([None, 0, 1, 2], 'bikes_allowed')
 
+    def expand_frequencies(self, **kwargs):
+        """Expand this trip's frequency rows without inventing departures."""
+        from .frequencies import expand_frequencies
+        return expand_frequencies(self, **kwargs)
+
+    def frequency_instances(self, **kwargs):
+        """Return only exact departure instances for this trip."""
+        return self.expand_frequencies(**kwargs).departures
+
+    def service_windows(self, **kwargs):
+        """Return frequency-based waiting windows for this trip."""
+        return self.expand_frequencies(**kwargs).windows
+
+    def frequency_conflicts(self):
+        """Return overlapping frequency periods for this trip."""
+        from .frequencies import detect_conflicts
+        return detect_conflicts(self)
+
     def __repr__(self):
         return '<Trip %s>' % self.trip_id
 
@@ -462,6 +480,92 @@ class Frequency(Base):
 
     _validate_exact_times = _validate_int_choice([None, 0, 1], 'exact_times')
     _validate_deltas = _validate_time_delta('start_time', 'end_time')
+
+    @property
+    def is_exact(self):
+        """True when departures in this period are exactly scheduled."""
+        return self.exact_times == 1
+
+    @property
+    def is_frequency_based(self):
+        """True when this period only promises a maximum headway.
+
+        ``exact_times`` is optional in GTFS and defaults to 0.
+        """
+        return not self.is_exact
+
+    @property
+    def max_wait(self):
+        """Longest wait, relative to an arrival, for frequency-based service."""
+        if self.is_exact:
+            return datetime.timedelta(0)
+        return datetime.timedelta(seconds=self.headway_secs)
+
+    @property
+    def min_wait(self):
+        return datetime.timedelta(0)
+
+    @property
+    def waiting_range(self):
+        """Range of possible waits for frequency-based service."""
+        if self.is_exact:
+            return (datetime.timedelta(0), datetime.timedelta(0))
+        return (self.min_wait, self.max_wait)
+
+    @property
+    def exact_instances(self):
+        """Exactly-known departures; empty for frequency-based rows."""
+        return self.departures()
+
+    @property
+    def departure_instances(self):
+        return self.departures()
+
+    def departures(self, end_inclusive=False, **kwargs):
+        """Return exact departure instances for this row.
+
+        Returns an empty list for ``exact_times=0`` rows; use
+        :meth:`service_window` for those.
+        """
+        from .frequencies import _departures_for
+        if not self.is_exact:
+            return []
+        return _departures_for(self, end_inclusive)
+
+    def expand(self, **kwargs):
+        """Expand this row into a one-row FrequencyExpansion."""
+        from .frequencies import expand_frequencies
+        return expand_frequencies(self, **kwargs)
+
+    def service_window(self):
+        """Return the waiting-range window, or None for exact rows."""
+        from .frequencies import _window_for
+        if self.is_exact:
+            return None
+        return _window_for(self)
+
+    @property
+    def waiting_window(self):
+        return self.service_window()
+
+    def conflicts(self):
+        """Return frequency periods of this trip that overlap this one."""
+        from .frequencies import detect_conflicts
+        trip = self.trip
+        if trip is not None:
+            rows = trip.frequencies
+        else:
+            session = object_session(self)
+            rows = ([row for row in session.query(Frequency).all()
+                     if row.feed_id == self.feed_id
+                     and row.trip_id == self.trip_id]
+                    if session is not None else [self])
+        return [conflict for conflict in detect_conflicts(rows)
+                if self in (conflict.earlier, conflict.later)]
+
+    def get_departures(self, end_inclusive=False):
+        """Alias for :meth:`departures`."""
+        return self.departures(end_inclusive=end_inclusive)
 
     def __repr__(self):
         return '<Frequency %s %s-%s>' % (self.trip_id, self.start_time,

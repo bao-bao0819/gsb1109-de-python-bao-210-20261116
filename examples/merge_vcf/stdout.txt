@@ -1,0 +1,5 @@
+$ python merge_vcf.py input_a.vcf input_b.vcf merged.vcf
+compatible: no
+rename INFO AF (source B) -> AF_B: Number differs ('A' vs 1)
+rename FORMAT AD (source B) -> AD_B: Number differs ('R' vs 'A')
+wrote: merged.vcf

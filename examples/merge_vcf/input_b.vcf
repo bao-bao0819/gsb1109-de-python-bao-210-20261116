@@ -1,0 +1,6 @@
+##fileformat=VCFv4.3
+##INFO=<ID=AF,Number=1,Type=Float,Description="Allele frequency (scalar)">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+##FORMAT=<ID=AD,Number=A,Type=Integer,Description="Depth per ALT">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	SAMPLE_B
+20	17330	.	T	A	3	PASS	AF=0.3	GT:AD	0/1:7

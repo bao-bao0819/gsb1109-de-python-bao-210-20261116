@@ -11,6 +11,7 @@ Welcome to VCFPy's documentation!
     :titlesonly:
 
     api_header
+    api_merge
     api_io
     api_exceptions
     api_record
@@ -91,6 +92,7 @@ What's the aim?
     :titlesonly:
 
     api_header
+    api_merge
     api_io
     api_exceptions
     api_record

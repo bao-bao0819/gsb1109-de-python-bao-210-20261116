@@ -46,3 +46,31 @@ The program call looks as follows.
 
 .. literalinclude::  ../examples/fetch_tabix/stdout.txt
     :language: shell
+
+Merging VCF Files With Conflicting INFO/FORMAT Definitions
+==========================================================
+
+Merging two VCF files is only safe if the same field ID means the same thing
+in both files.  The following example previews the compatibility of two
+headers and then writes a merged file.  In this example ``INFO/AF`` is
+``Number=A`` in one source and ``Number=1`` in the other, while ``FORMAT/AD``
+is ``Number=R`` versus ``Number=A``.  Both conflicts are resolved by renaming
+the second source's field; values and their original ``Number`` semantics are
+preserved.
+
+.. literalinclude:: ../examples/merge_vcf/merge_vcf.py
+    :language: python
+
+The program call looks as follows.
+
+.. literalinclude::  ../examples/merge_vcf/stdout.txt
+    :language: shell
+
+The same planning step is available without writing anything, e.g. for
+a pre-flight check in a pipeline::
+
+    plan = vcfpy.plan_merge([header_a, header_b], source_names=["A", "B"])
+    if not plan.compatible:
+        print(plan.to_json())
+    for rename in plan.renames:
+        print(rename.scope, rename.old_id, "->", rename.new_id, rename.reason)

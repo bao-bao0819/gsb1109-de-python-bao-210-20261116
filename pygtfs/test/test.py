@@ -10,6 +10,8 @@ from zipfile import ZipFile
 from pygtfs import overwrite_feed
 from pygtfs import Schedule
 from pygtfs.feed import Feed, derive_feed_name
+from pygtfs.gtfs_entities import (MATCH_BASIS_RECORD_ID,
+                                  MATCH_BASIS_FIELD_VALUE)
 
 from sqlalchemy.orm import Query
 
@@ -119,6 +121,146 @@ class TestSchedule(unittest.TestCase):
         # compatile
         self.assertEqual(isinstance(self.schedule.agencies_query, Query),
                          True)
+
+class TestTranslationViews(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        feed_dir = Path(self.temp_dir.name) / "translation_feed"
+        feed_dir.mkdir()
+        self._write(feed_dir / "agency.txt", [
+            "agency_id,agency_name,agency_url,agency_timezone",
+            "A1,Central,http://example.com,America/Los_Angeles",
+        ])
+        self._write(feed_dir / "stops.txt", [
+            "stop_id,stop_name,stop_lat,stop_lon",
+            "S1,Central,36.0,-117.0",
+            "S2,Central,36.1,-117.1",
+        ])
+        self._write(feed_dir / "routes.txt", [
+            "route_id,agency_id,route_short_name,route_long_name,route_type",
+            "R1,A1,50,Central Loop,3",
+        ])
+        self._write(feed_dir / "calendar.txt", [
+            "service_id,monday,tuesday,wednesday,thursday,friday,saturday,"
+            "sunday,start_date,end_date",
+            "SVC,1,1,1,1,1,1,1,20070101,20101231",
+        ])
+        self._write(feed_dir / "trips.txt", [
+            "route_id,service_id,trip_id",
+            "R1,SVC,T1",
+        ])
+        self._write(feed_dir / "stop_times.txt", [
+            "trip_id,arrival_time,departure_time,stop_id,stop_sequence",
+            "T1,8:00:00,8:00:00,S1,1",
+        ])
+        self._write(feed_dir / "translations.txt", [
+            "trans_id,lang,translation,table_name,field_name,record_id",
+            # record-id scope: only S1 must ever receive this translation
+            "Central Station,HE,תחנה מרכזית,stops,stop_name,S1",
+            # route record-id scope on a different table/field
+            "50,HE,חמישים,routes,route_short_name,R1",
+            # field-value scope: literal "Central" fans out to every hit
+            "Central,HE,מרכז,,,",
+            "Central,EN,Central,,,",
+            "Central,FR,Centre,,,",
+        ])
+        self.schedule = Schedule(":memory:")
+        overwrite_feed(self.schedule, str(feed_dir))
+        self.feed_id = self.schedule.feeds[0].feed_id
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    @staticmethod
+    def _write(path, lines):
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def _stop(self, stop_id):
+        return self.schedule.stops_by_id(stop_id)[0]
+
+    def test_record_id_translation_is_scoped_to_its_record(self):
+        s1 = self._stop("S1")
+        s2 = self._stop("S2")
+        record_hits = [(t.trans_id, t.lang) for t in s1.translations
+                       if t.trans_id == "Central Station"]
+        self.assertEqual(record_hits, [("Central Station", "HE")])
+        # the same stop_name on S2 must not inherit S1's record-id hit
+        self.assertNotIn(("Central Station", "HE"),
+                         [(t.trans_id, t.lang) for t in s2.translations])
+        agency = self.schedule.agencies_by_id("A1")[0]
+        self.assertNotIn(("Central Station", "HE"),
+                         [(t.trans_id, t.lang) for t in agency.translations])
+
+    def test_field_value_translation_fans_out_to_every_hit(self):
+        expected = {("Central", "HE"), ("Central", "EN"), ("Central", "FR")}
+        for record in (self._stop("S1"), self._stop("S2"),
+                       self.schedule.agencies_by_id("A1")[0]):
+            self.assertEqual(
+                expected,
+                {(t.trans_id, t.lang) for t in record.translations
+                 if t.trans_id == "Central"})
+
+    def test_route_record_id_translation(self):
+        route = self.schedule.routes_by_id("R1")[0]
+        self.assertIn(("50", "HE"),
+                      [(t.trans_id, t.lang) for t in route.translations])
+        binding = (self.schedule.translation_targets_query
+                   .filter_by(target_table="routes",
+                              target_record_id="R1").one())
+        self.assertEqual(MATCH_BASIS_RECORD_ID, binding.match_basis)
+        self.assertIsNone(binding.field_value)
+
+    def test_binding_keeps_the_actual_match_basis(self):
+        bindings = self.schedule.translation_targets
+        record_binding = next(b for b in bindings
+                              if b.match_basis == MATCH_BASIS_RECORD_ID
+                              and b.target_record_id == "S1")
+        self.assertEqual(record_binding.target_table, "stops")
+        self.assertEqual(record_binding.target_field, "stop_name")
+        self.assertEqual(record_binding.trans_id, "Central Station")
+        self.assertIsNone(record_binding.field_value)
+        value_bindings = [b for b in bindings
+                          if b.match_basis == MATCH_BASIS_FIELD_VALUE]
+        self.assertTrue(value_bindings)
+        for binding in value_bindings:
+            self.assertEqual(binding.field_value, "Central")
+        scopes = {(b.target_table, b.target_field) for b in value_bindings}
+        self.assertEqual(scopes, {("stops", "stop_name"),
+                                  ("agency", "agency_name")})
+
+    def test_view_lists_candidates_when_target_not_unique(self):
+        rows = self.schedule.translation_view(
+            lang="HE", table_name="stops", record_id="S1")
+        # record-id and field-value translations both apply: both stay visible
+        self.assertEqual(
+            {MATCH_BASIS_RECORD_ID, MATCH_BASIS_FIELD_VALUE},
+            {row.match_basis for row in rows})
+        self.assertEqual(
+            {"Central Station", "Central"},
+            {row.trans_id for row in rows})
+
+    def test_view_scope_filters_do_not_leak_across_records(self):
+        rows = self.schedule.translation_view(
+            lang="HE", table_name="stops", record_id="S2")
+        self.assertTrue(rows)
+        self.assertTrue(all(row.match_basis == MATCH_BASIS_FIELD_VALUE
+                            for row in rows))
+        self.assertTrue(all(row.trans_id == "Central" for row in rows))
+
+    def test_view_filters_by_language_and_table(self):
+        fr_rows = self.schedule.translation_view(lang="FR")
+        self.assertTrue(fr_rows)
+        self.assertTrue(all(row.lang == "FR" for row in fr_rows))
+        agency_rows = self.schedule.translation_view(table_name="agency")
+        self.assertTrue(agency_rows)
+        self.assertTrue(all(row.target_table == "agency" for row in agency_rows))
+        scoped = self.schedule.translation_view(
+            lang="EN", table_name="agency", field_name="agency_name",
+            record_id="A1", feed_id=self.feed_id)
+        self.assertEqual(len(scoped), 1)
+        self.assertEqual(scoped[0].translation, "Central")
+        self.assertEqual(scoped[0].match_basis, MATCH_BASIS_FIELD_VALUE)
+
 
 class TestIgnoreFiles(unittest.TestCase):
     def setUp(self):

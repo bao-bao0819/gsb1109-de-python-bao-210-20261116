@@ -19,6 +19,52 @@ from .exceptions import PygtfsValidationError
 Base = declarative_base()
 
 
+#: Translation row locates its target through a record id.
+MATCH_BASIS_RECORD_ID = 'record_id'
+#: Translation row locates its targets through the translated field value.
+MATCH_BASIS_FIELD_VALUE = 'field_value'
+
+
+#: Entities reachable from translations.txt.
+#: Tuples of (entity class name, table name, record id column, translatable
+#: field columns). The loader iterates this registry to build translation
+#: views, and each entity reuses it for its ``translations`` relationship.
+TRANSLATION_TARGETS = (
+    ('Agency', 'agency', 'agency_id',
+     ('agency_name',)),
+    ('Stop', 'stops', 'stop_id',
+     ('stop_name', 'stop_desc')),
+    ('Route', 'routes', 'route_id',
+     ('route_short_name', 'route_long_name', 'route_desc')),
+    ('Trip', 'trips', 'trip_id',
+     ('trip_headsign', 'trip_short_name')),
+)
+
+
+def _translations_relationship(entity_name, table_name, id_field):
+    """Build the ``translations`` relationship for a translatable entity.
+
+    Targets live in :class:`TranslationTarget` and are discriminated by
+    ``target_table``, so a record-id match never spills over to another
+    entity (or another record) that happens to hold the same field value.
+    """
+    return relationship(
+        'Translation',
+        secondary='_translation_targets',
+        viewonly=True,
+        primaryjoin=(
+            "and_({entity}.feed_id == _translation_targets.c.feed_id, "
+            "{entity}.{id_field} == _translation_targets.c.target_record_id, "
+            "_translation_targets.c.target_table == '{table}')"
+        ).format(entity=entity_name, id_field=id_field, table=table_name),
+        secondaryjoin=(
+            "and_(Translation.feed_id == _translation_targets.c.translation_feed_id, "
+            "Translation.trans_id == _translation_targets.c.trans_id, "
+            "Translation.lang == _translation_targets.c.lang)"
+        ),
+    )
+
+
 def _validate_date(*field_names):
     @validates(*field_names)
     def make_date(self, key, value):
@@ -112,6 +158,8 @@ class Feed(Base):
     transfers = relationship("Transfer", backref=("feed"), cascade="all, delete-orphan")
     feedinfo = relationship("FeedInfo", backref=("feed"), cascade="all, delete-orphan")
     translations = relationship("Translation", backref=("feed"), cascade="all, delete-orphan")
+    translation_targets = relationship("TranslationTarget", backref=("feed"),
+                                       cascade="all, delete-orphan")
 
     def __repr__(self):
         return '<Feed %s: %s>' % (self.feed_id, self.feed_name)
@@ -130,6 +178,8 @@ class Agency(Base):
     agency_phone = Column(Unicode, nullable=True)
     agency_fare_url = Column(Unicode, nullable=True)
     agency_email = Column(Unicode, nullable=True)
+
+    translations = _translations_relationship('Agency', 'agency', 'agency_id')
 
     def __repr__(self):
         return '<Agency %s: %s>' % (self.agency_id, self.agency_name)
@@ -154,7 +204,7 @@ class Stop(Base):
     wheelchair_boarding = Column(Integer, nullable=True)
     platform_code = Column(Unicode, nullable=True)
 
-    translations = relationship('Translation', secondary='_stop_translations')
+    translations = _translations_relationship('Stop', 'stops', 'stop_id')
 
     __table_args__ = (Index('idx_stop_for_translations', feed_id, stop_name, stop_id),)
 
@@ -182,6 +232,8 @@ class Route(Base):
     route_url = Column(Unicode, nullable=True)
     route_color = Column(Unicode, nullable=True)
     route_text_color = Column(Unicode, nullable=True)
+
+    translations = _translations_relationship('Route', 'routes', 'route_id')
 
     __table_args__ = (
         ForeignKeyConstraint([feed_id, agency_id], [Agency.feed_id, Agency.agency_id]),
@@ -308,6 +360,8 @@ class Trip(Base):
     wheelchair_accessible = Column(Integer, nullable=True)
     bikes_allowed = Column(Integer, nullable=True)
 
+    translations = _translations_relationship('Trip', 'trips', 'trip_id')
+
     __table_args__ = (
         ForeignKeyConstraint([feed_id, route_id], [Route.feed_id, Route.route_id]),
         ForeignKeyConstraint([feed_id, service_id], [Service.feed_id, Service.service_id]),
@@ -344,12 +398,55 @@ class Translation(Base):
     trans_id = Column(Unicode, primary_key=True, index=True)
     lang = Column(Unicode, primary_key=True)
     translation = Column(Unicode)
+    # GTFS translations.txt optional columns. table_name/field_name/record_id
+    # identify the target directly; when they are absent the row is matched
+    # against field values instead.
+    table_name = Column(Unicode, nullable=True)
+    field_name = Column(Unicode, nullable=True)
+    record_id = Column(Unicode, nullable=True)
 
     __table_args__ = (Index('idx_translations_for_stops', feed_id, trans_id),)
 
     def __repr__(self):
         return '<Translation %s (to %s): %s>' % (self.trans_id, self.lang,
                                                  self.translation)
+
+
+class TranslationTarget(Base):
+    """A resolved translation-to-target binding, one row per hit.
+
+    Populated by the loader from translations.txt. A translation row may
+    resolve through a record id (``match_basis == 'record_id'``) or through
+    the value of the translated field (``match_basis == 'field_value'``);
+    the binding keeps the actual basis so a record-scoped translation never
+    reaches another record that merely shares the same field value.
+    """
+    __tablename__ = '_translation_targets'
+    _plural_name_ = 'translation_targets'
+    feed_id = Column(Integer, ForeignKey('_feed.feed_id'), primary_key=True)
+    translation_feed_id = Column(Integer, primary_key=True)
+    target_table = Column(Unicode, primary_key=True)
+    target_field = Column(Unicode, primary_key=True)
+    target_record_id = Column(Unicode, primary_key=True)
+    trans_id = Column(Unicode, primary_key=True)
+    lang = Column(Unicode, primary_key=True)
+    match_basis = Column(Unicode, nullable=False)
+    field_value = Column(Unicode, nullable=True)
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ['translation_feed_id', 'trans_id', 'lang'],
+            [Translation.feed_id, Translation.trans_id, Translation.lang]),
+        Index('idx_translation_targets_lookup',
+              feed_id, target_table, target_field, target_record_id),
+        Index('idx_translation_targets_basis',
+              feed_id, target_table, target_field, match_basis, field_value),
+    )
+
+    def __repr__(self):
+        return ('<TranslationTarget %s.%s %s [%s] -> %s/%s>'
+                % (self.target_table, self.target_field, self.target_record_id,
+                   self.match_basis, self.trans_id, self.lang))
 
 
 class StopTime(Base):
@@ -534,18 +631,6 @@ class FeedInfo(Base):
 
 # Many-to-many secondary tables. Make sure to also load them properly in
 # loader.py
-_stop_translations = Table(
-    '_stop_translations', Base.metadata,
-    Column('stop_feed_id', Integer),
-    Column('translation_feed_id', Integer),
-    Column('stop_id', Unicode),
-    Column('trans_id', Unicode),
-    Column('lang', Unicode),
-    ForeignKeyConstraint(['stop_feed_id', 'stop_id'], [Stop.feed_id, Stop.stop_id]),
-    ForeignKeyConstraint(['translation_feed_id', 'trans_id', 'lang'], [Translation.feed_id, Translation.trans_id, Translation.lang]),
-)
-
-
 _trip_shapes = Table(
     '_trip_shapes', Base.metadata,
     Column('trip_feed_id', Integer),
@@ -566,3 +651,8 @@ gtfs_calendar = {Service, ServiceException}
 gtfs_all = [Agency, Stop, Transfer, Route, Fare, FareRule, ShapePoint,
             Service, ServiceException, Trip, Frequency, StopTime, FeedInfo,
             Translation]
+
+#: Mapped tables that are derived at load time rather than read from a
+#: GTFS .txt file. Kept out of ``gtfs_all`` so the loader never looks for a
+#: corresponding input file.
+gtfs_derived = [TranslationTarget]

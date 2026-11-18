@@ -1,7 +1,18 @@
+from collections import namedtuple
+
 import sqlalchemy
 import sqlalchemy.orm
+from sqlalchemy import and_
 
-from .gtfs_entities import gtfs_all, Feed, Base
+from .gtfs_entities import (gtfs_all, gtfs_derived, Feed, Base, Translation,
+                            TranslationTarget)
+
+
+#: One flattened row of :meth:`Schedule.translation_view`.
+TranslationViewItem = namedtuple(
+    'TranslationViewItem',
+    ['feed_id', 'target_table', 'target_field', 'target_record_id',
+     'trans_id', 'lang', 'translation', 'match_basis', 'field_value'])
 
 
 class Schedule:
@@ -42,6 +53,45 @@ class Schedule:
         self.session.delete(feed)
         self.session.commit()
 
+    def translation_view(self, lang=None, table_name=None, field_name=None,
+                         record_id=None, feed_id=None):
+        """Return resolved translations as flat view rows.
+
+        Rows are filtered by target ``lang`` and, optionally, by target
+        scope (``table_name``/``field_name``/``record_id`` and ``feed_id``).
+        Each :class:`TranslationViewItem` carries the ``match_basis``
+        (``record_id`` or ``field_value``) that actually produced the hit,
+        together with the matched ``field_value`` when that basis applies.
+
+        A scope without a unique translation yields one row per candidate
+        instead of a single picked value: record-id scoped hits never expand
+        to other records that happen to share the same field value.
+        """
+        target = TranslationTarget
+        query = (self.session.query(
+                     target.feed_id, target.target_table, target.target_field,
+                     target.target_record_id, target.trans_id, target.lang,
+                     Translation.translation, target.match_basis,
+                     target.field_value)
+                 .join(Translation, and_(
+                     Translation.feed_id == target.translation_feed_id,
+                     Translation.trans_id == target.trans_id,
+                     Translation.lang == target.lang)))
+        if lang is not None:
+            query = query.filter(target.lang == lang)
+        if table_name is not None:
+            query = query.filter(target.target_table == table_name)
+        if field_name is not None:
+            query = query.filter(target.target_field == field_name)
+        if record_id is not None:
+            query = query.filter(target.target_record_id == record_id)
+        if feed_id is not None:
+            query = query.filter(target.feed_id == feed_id)
+        rows = (query.order_by(target.feed_id, target.target_table,
+                               target.target_field, target.target_record_id,
+                               target.lang, target.match_basis).all())
+        return [TranslationViewItem(*row) for row in rows]
+
 
 def _meta_query_all(entity, docstring=None):
     def _query_all(instance_self):
@@ -75,7 +125,7 @@ def _meta_query_raw(entity, docstring=None):
     return property(_query_raw)
 
 
-for entity in (gtfs_all + [Feed]):
+for entity in (gtfs_all + gtfs_derived + [Feed]):
     entity_doc = "A list of :py:class:`pygtfs.gtfs_entities.{0}` objects".format(entity.__name__)
     entity_raw_doc = ("A :py:class:`sqlalchemy.orm.Query` object to fetch "
                       ":py:class:`pygtfs.gtfs_entities.{0}` objects"

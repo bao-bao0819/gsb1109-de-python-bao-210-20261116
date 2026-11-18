@@ -5,10 +5,12 @@ import sys
 from sqlalchemy import and_
 from sqlalchemy.sql.expression import select, join
 
+from . import feed, gtfs_entities
 from .gtfs_entities import (Feed, Service, ServiceException, gtfs_required,
-                            Translation, Stop, Trip, ShapePoint, _stop_translations,
-                            _trip_shapes, gtfs_calendar, gtfs_all)
-from . import feed
+                            Translation, TranslationTarget, Trip,
+                            ShapePoint, _trip_shapes, gtfs_calendar, gtfs_all,
+                            TRANSLATION_TARGETS, MATCH_BASIS_RECORD_ID,
+                            MATCH_BASIS_FIELD_VALUE)
 
 logger = logging.getLogger(__name__)
 
@@ -131,21 +133,7 @@ def append_feed(schedule, feed_filename, strip_fields=True,
     schedule.session.commit()
     # load many to many relationships
     if Translation in gtfs_tables:
-        print('Mapping translations to stops')
-        logger.info('Mapping translations to stops')
-        q = (schedule.session.query(
-                Stop.feed_id.label('stop_feed_id'),
-                Translation.feed_id.label('translation_feed_id'),
-                Stop.stop_id.label('stop_id'),
-                Translation.trans_id.label('trans_id'),
-                Translation.lang.label('lang'))
-            .filter(Stop.feed_id==feed_id)
-            .filter(Translation.feed_id==feed_id)
-            .filter(Stop.stop_name==Translation.trans_id)
-            )
-        upd = _stop_translations.insert().from_select(
-                ['stop_feed_id', 'translation_feed_id', 'stop_id', 'trans_id', 'lang'], q)
-        schedule.session.execute(upd)
+        _map_translations(schedule, feed_id)
     if ShapePoint in gtfs_tables:
         print('Mapping shapes to trips')
         logger.info('Mapping shapes to trips')
@@ -167,3 +155,93 @@ def append_feed(schedule, feed_filename, strip_fields=True,
     print('Complete.')
     logger.info('Complete.')
     return schedule
+
+
+def _map_translations(schedule, feed_id):
+    """Resolve translations.txt rows onto concrete feed records.
+
+    A row carrying ``table_name``/``field_name``/``record_id`` is bound to
+    that exact record with basis ``record_id`` and is never expanded to
+    other records that share the same field value. Every other row is
+    matched against the translatable field values of the supported tables
+    with basis ``field_value``; each hit (table, field and record) becomes a
+    separate candidate binding. All bindings keep the basis that actually
+    fired, plus the matched field value.
+    """
+    print('Mapping translations to feed records')
+    logger.info('Mapping translations to feed records')
+    session = schedule.session
+    entity_by_table = {target[1]: target for target in TRANSLATION_TARGETS}
+    translations = (session.query(Translation)
+                    .filter(Translation.feed_id == feed_id).all())
+    bindings = []
+    for trans in translations:
+        if (trans.table_name is not None and trans.field_name is not None
+                and trans.record_id is not None):
+            bindings.extend(_record_id_bindings(session, feed_id, trans,
+                                                entity_by_table))
+        elif trans.trans_id is not None:
+            bindings.extend(_field_value_bindings(session, feed_id, trans))
+    if bindings:
+        session.execute(TranslationTarget.__table__.insert(), bindings)
+    session.commit()
+
+
+def _record_id_bindings(session, feed_id, trans, entity_by_table):
+    target = entity_by_table.get(trans.table_name)
+    if target is None:
+        logger.warning('Ignoring translation %s: unsupported table %s',
+                       trans.trans_id, trans.table_name)
+        return []
+    entity_name, table_name, id_field, fields = target
+    if trans.field_name not in fields:
+        logger.warning('Ignoring translation %s: field %s is not translatable '
+                       'on %s', trans.trans_id, trans.field_name, table_name)
+        return []
+    entity = getattr(gtfs_entities, entity_name)
+    exists = (session.query(entity)
+              .filter(entity.feed_id == feed_id)
+              .filter(getattr(entity, id_field) == trans.record_id)
+              .first())
+    if exists is None:
+        logger.warning('Ignoring translation %s: no %s record with id %s',
+                       trans.trans_id, table_name, trans.record_id)
+        return []
+    return [{
+        'feed_id': feed_id,
+        'translation_feed_id': feed_id,
+        'target_table': table_name,
+        'target_field': trans.field_name,
+        'target_record_id': trans.record_id,
+        'trans_id': trans.trans_id,
+        'lang': trans.lang,
+        'match_basis': MATCH_BASIS_RECORD_ID,
+        'field_value': None,
+    }]
+
+
+def _field_value_bindings(session, feed_id, trans):
+    bindings = []
+    for entity_name, table_name, id_field, fields in TRANSLATION_TARGETS:
+        entity = getattr(gtfs_entities, entity_name)
+        for field_name in fields:
+            records = (session.query(getattr(entity, id_field))
+                       .filter(entity.feed_id == feed_id)
+                       .filter(getattr(entity, field_name) == trans.trans_id)
+                       .all())
+            for (record_id,) in records:
+                bindings.append({
+                    'feed_id': feed_id,
+                    'translation_feed_id': feed_id,
+                    'target_table': table_name,
+                    'target_field': field_name,
+                    'target_record_id': record_id,
+                    'trans_id': trans.trans_id,
+                    'lang': trans.lang,
+                    'match_basis': MATCH_BASIS_FIELD_VALUE,
+                    'field_value': trans.trans_id,
+                })
+    if not bindings:
+        logger.warning('Translation %s (%s) matched no field value',
+                       trans.trans_id, trans.lang)
+    return bindings

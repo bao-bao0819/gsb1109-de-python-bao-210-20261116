@@ -13,6 +13,8 @@ def test_suite():
     tests.append(T)
     import test_binmodel as T
     tests.append(T)
+    import test_structured_import as T
+    tests.append(T)
     import test_recordstream as T
     tests.append(T)
     import test_filestructure as T

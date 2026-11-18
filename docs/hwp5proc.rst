@@ -183,6 +183,69 @@ Example::
     $ hwp5proc cat samples/sample-5017.hwp BodyText/Section0 > Section0.bin
     $ hwp5proc models -V 5.0.1.7 < Section0.bin
 
+import
+------
+
+Import a record stream according to its declared structure version.  Unlike
+``models``, this reports how much of each record payload the declared
+structure actually explained:
+
+- the interpreted payload range ``[0, consumed)``;
+- the unconsumed tail ``[consumed, payload_size)`` in hex;
+- the versioned candidate structures that explain the tail, together with the
+  fields they add, remove, or shift.
+
+A candidate is *not* considered correct merely because it consumes every byte.
+Exact consumption only means the structure fits the byte length; the candidate
+remains ``unconfirmed`` unless independent evidence is supplied.  If the
+declared structure consumes everything but another version also consumes
+everything while reading different fields, the record is reported as
+``ambiguous``.
+
+.. argparse::
+   :module: hwp5.hwp5proc
+   :func: main_argparser
+   :prog: hwp5proc
+   :path: import
+
+Example: Report records whose declared structure leaves a tail::
+
+    $ hwp5proc import samples/sample-5017.hwp DocInfo
+
+Example: Report a stream read from standard input with a declared version,
+exiting non-zero on any conflict::
+
+    $ hwp5proc cat samples/sample-5017.hwp DocInfo > DocInfo.rec
+    $ hwp5proc import -V 5.0.1.7 --strict < DocInfo.rec
+
+Example: Emit the full report as JSON::
+
+    $ hwp5proc import --json samples/sample-5017.hwp DocInfo | jq .summary
+
+Example: Show which members are versioned, i.e. the declaration side::
+
+    $ hwp5proc list-models Numbering ShapePicture
+
+A typical conflict report looks like this::
+
+    declared version 5.0.1.7 (from FileHeader): 73 records, 1 with tails, ...
+    #47 HWPTAG_NUMBERING (declared 5.0.1.7) payload=144
+      interpreted: [0, 100)  unconsumed: [100, 144)
+      tail: ...
+      contradiction [unconsumed_tail]: The declared structure consumed 100 of
+      144 payload bytes; 44 bytes are unexplained.
+      candidate interpretations:
+        structure 5.0.3.0 (selected by declared versions >=5.0.3.0):
+        consumed 144, remaining 0, complete, unconfirmed
+          + Numbering.unknown[0] [100, 104) UINT32 = 1
+          ...
+          note: The structure consumes the whole payload, but exact
+          consumption is not evidence that it is the intended structure.
+          This interpretation is unconfirmed.
+
+The equivalent Python API is :func:`hwp5.structured_import.import_record` and
+:func:`hwp5.structured_import.import_stream`.
+
 find
 ----
 

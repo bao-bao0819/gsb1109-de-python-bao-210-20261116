@@ -2,7 +2,7 @@
 
    $ hwp5proc --help
    usage: hwp5proc [-h] [--loglevel LOGLEVEL] [--logfile LOGFILE]
-                   {version,header,summaryinfo,ls,cat,unpack,records,models,find,xml,rawunz,diststream}
+                   {version,header,summaryinfo,ls,cat,unpack,records,models,import,list-models,find,xml,rawunz,diststream}
                    ...
    
    Do various operations on HWPv5 files.
@@ -15,7 +15,7 @@
    subcommands:
      valid subcommands
    
-     {version,header,summaryinfo,ls,cat,unpack,records,models,find,xml,rawunz,diststream}
+     {version,header,summaryinfo,ls,cat,unpack,records,models,import,list-models,find,xml,rawunz,diststream}
        version             Print the file format version of .hwp files.
        header              Print file headers of .hwp files.
        summaryinfo         Print summary informations of .hwp files.
@@ -27,6 +27,8 @@
                            streams.
        models              Print parsed binary models of .hwp file record
                            streams.
+       import              Import record streams with explicit structure extents.
+       list-models         List record models and their versioned members.
        find                Find record models with specified predicates.
        xml                 Transform .hwp files into an XML.
        rawunz              Deflate an headerless zlib-compressed stream

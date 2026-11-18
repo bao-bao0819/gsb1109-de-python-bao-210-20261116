@@ -16,6 +16,11 @@ module :mod:`hwp5.binmodel`
 .. automodule:: hwp5.binmodel
    :members:
 
+module :mod:`hwp5.structured_import`
+====================================
+.. automodule:: hwp5.structured_import
+   :members:
+
 module :mod:`hwp5.xmlmodel`
 ===========================
 .. automodule:: hwp5.xmlmodel

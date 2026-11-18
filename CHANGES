@@ -6,6 +6,11 @@ CHANGES
 
 - [CVE-2023-0286] Depends on cryptography >= 40.0.1
 - [CVE-2022-2309] Depends on lxml >= 4.9,2
+- Add structured, version-aware record import: ``hwp5proc import`` and
+  ``hwp5.structured_import``.  The import reports the interpreted payload
+  range, the unconsumed tail, and candidate structure versions with the fields
+  they affect.  A candidate that consumes every byte is not treated as
+  verified.  ``hwp5proc list-models`` lists versioned members.
 
 
 0.1b15 (2020-05-30)

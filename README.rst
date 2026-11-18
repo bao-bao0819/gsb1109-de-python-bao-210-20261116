@@ -179,6 +179,63 @@ very end of their process.
         xport.v56.dump(library, f)
 
 
+Reconciling case numbers
+========================
+
+Case numbers are often large enough that a SAS display format turns them
+into scientific notation, such as ``1.2346E+12``.  That display covers many
+distinct numbers, so two different cases can show the same text.  The
+``xport.formatting`` and ``xport.reconciliation`` modules make that loss
+explicit instead of treating the text as an identity.
+
+``xport.format_value`` renders a value with a SAS numeric format, and
+``xport.precision_interval`` recovers the interval of values a display
+could represent.
+
+.. code:: python
+
+    import xport
+
+    xport.format_value(1234567890123, 'BEST12.')      # '1.234568E+12'
+    xport.precision_interval('1.23457E+12').low       # 1234565000000
+    xport.precision_interval('1.23457E+12').high      # 1234575000000
+
+``xport.reconcile`` combines records from several sources.  A record may
+retain only the display text, or the original value together with the
+format that produced the display.  Display text is used to find
+candidates, never to merge identities.  Only a confirmed link from the
+linkage table creates one identity across sources.
+
+.. code:: python
+
+    records = [
+        {'source': 'A', 'record_id': 1, 'value': 1234567890124,
+         'format': 'BEST12.'},
+        {'source': 'B', 'record_id': 'x', 'display': '1.234568E+12'},
+    ]
+    links = [
+        {'left': ('A', 1), 'right': ('B', 'x'), 'confirmed': True},
+    ]
+    result = xport.reconcile(records, links)
+
+    result.unique      # recovered connections
+    result.possible    # overlapping candidates that remain ambiguous
+    result.conflicts   # contradictory evidence
+
+Each correspondence carries a precision interval, so a recovered match
+states what it actually established.  Supplying an original number for
+one display-only record narrows only the candidates whose interval
+contains that number:
+
+.. code:: python
+
+    narrowed = result.with_original('B', 'x', 1234567890124)
+
+The number must lie inside the display's retained precision; otherwise
+``with_original`` raises ``ValueError`` rather than inventing trailing
+digits.
+
+
 Feature requests
 ================
 

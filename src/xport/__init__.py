@@ -18,13 +18,49 @@ from io import StringIO
 import pandas as pd
 
 from .__about__ import __version__  # noqa: F401 module imported but unused
+from .formatting import (
+    FormatSpec,
+    PrecisionInterval,
+    format_value,
+    precision_interval,
+    value_interval,
+)
+from .reconciliation import (
+    CaseRecord,
+    Cluster,
+    Conflict,
+    Correspondence,
+    DisplayGroup,
+    IdentityCluster,
+    Link,
+    Reconciliation,
+    reconcile,
+    reconcile_case_numbers,
+    resolve_case_numbers,
+)
 
 LOG = logging.getLogger(__name__)
 
 __all__ = [
+    'CaseRecord',
+    'Cluster',
+    'Conflict',
+    'Correspondence',
+    'DisplayGroup',
+    'FormatSpec',
+    'IdentityCluster',
     'Library',
+    'Link',
     'Member',
     'NaN',
+    'PrecisionInterval',
+    'Reconciliation',
+    'format_value',
+    'precision_interval',
+    'reconcile',
+    'reconcile_case_numbers',
+    'resolve_case_numbers',
+    'value_interval',
 ]
 
 

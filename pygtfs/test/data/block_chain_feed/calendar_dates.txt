@@ -1,0 +1,4 @@
+service_id,date,exception_type
+S_MON,20240108,2
+S_NEVER,20240115,2
+S_ADHOC,20240120,1

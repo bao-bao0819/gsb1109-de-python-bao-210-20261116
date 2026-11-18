@@ -1,0 +1,7 @@
+stop_id,stop_name,stop_lat,stop_lon
+STN_A,Alpha,36.0,-116.0
+STN_B,Bravo,36.1,-116.1
+STN_C,Charlie,36.2,-116.2
+STN_D,Delta,36.3,-116.3
+STN_E,Echo,36.4,-116.4
+STN_F,Foxtrot,36.5,-116.5

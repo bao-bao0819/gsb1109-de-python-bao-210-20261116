@@ -1,0 +1,7 @@
+service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date
+S_MON,1,1,1,1,1,1,1,20240101,20240131
+S_WED,0,0,1,0,0,0,0,20240101,20240131
+S_FRI,0,0,0,0,1,0,0,20240101,20240131
+S_SAT,0,0,0,0,0,1,0,20240101,20240131
+S_NEVER,0,0,0,0,0,0,0,20240101,20240131
+S_ADHOC,0,0,0,0,0,0,0,20240101,20240131

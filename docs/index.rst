@@ -81,6 +81,7 @@ Contents:
 
    schedule
    loader
+   block_chains
    gtfs_entities
    gtfs2db
    internal

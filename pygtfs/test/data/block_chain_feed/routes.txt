@@ -1,0 +1,4 @@
+route_id,agency_id,route_short_name,route_long_name,route_type
+R1,DTA,R1,Route One,3
+R2,DTA,R2,Route Two,3
+R3,DTA,R3,Route Three,3

@@ -205,6 +205,37 @@ incompletely::
 
     $ hwp5proc find --tag=HWPTAG_LIST_HEADER --incomplete --dump samples/*.hwp
 
+searchview
+----------
+
+Build provenance-preserving Hangul PUA search views.
+
+Historical HWP documents store Hangul in Hanyang private-use-area (PUA)
+codepoints.  This command normalizes each paragraph through a versioned
+mapping table while keeping the original codepoints, the mapping version and
+the one-to-many source ranges.  Unmapped codepoints stay distinct instead of
+being unified into one placeholder, so every search hit traces back to the
+concrete source glyphs.  With ``--remap`` the view is rebuilt under another
+table and the changed characters and hits are reported.
+
+.. argparse::
+   :module: hwp5.hwp5proc
+   :func: main_argparser
+   :prog: hwp5proc
+   :path: searchview
+
+Example: Emit one provenance record per paragraph::
+
+    $ hwp5proc searchview samples/sample-5017.hwp
+
+Example: Search normalized text and trace hits to source PUA glyphs::
+
+    $ hwp5proc searchview --mapping pua.json --query '가' samples/sample-5017.hwp
+
+Example: Explain which hits change after swapping the mapping table::
+
+    $ hwp5proc searchview --mapping pua-v1.json --remap pua-v2.json samples/sample-5017.hwp
+
 xml
 ---
 

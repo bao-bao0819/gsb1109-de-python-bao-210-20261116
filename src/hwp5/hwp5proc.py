@@ -98,6 +98,7 @@ def main_argparser():
     from .proc.records import records_argparser
     from .proc.models import models_argparser
     from .proc.find import find_argparser
+    from .proc.searchview import searchview_argparser
     from .proc.xml import xml_argparser
     from .proc.rawunz import rawunz_argparser
     from .proc.diststream import diststream_argparser
@@ -126,6 +127,7 @@ def main_argparser():
     records_argparser(subcommands, _)
     models_argparser(subcommands, _)
     find_argparser(subcommands, _)
+    searchview_argparser(subcommands, _)
     xml_argparser(subcommands, _)
     rawunz_argparser(subcommands, _)
     diststream_argparser(subcommands, _)

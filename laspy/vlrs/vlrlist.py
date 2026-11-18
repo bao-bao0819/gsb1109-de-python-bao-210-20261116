@@ -3,7 +3,7 @@ from typing import BinaryIO, List
 
 import numpy as np
 
-from ..utils import read_string, write_as_c_string
+from ..utils import read_exact, read_string, write_as_c_string
 from .known import IKnownVLR, vlr_factory
 from .vlr import VLR
 
@@ -154,21 +154,21 @@ class VLRList(list):
         """
         vlrlist = cls()
         for _ in range(num_to_read):
-            data_stream.read(RESERVED_LEN)
-            user_id = data_stream.read(USER_ID_LEN).split(b"\0")[0].decode()
+            read_exact(data_stream, RESERVED_LEN)
+            user_id = read_exact(data_stream, USER_ID_LEN).split(b"\0")[0].decode()
             record_id = int.from_bytes(
-                data_stream.read(2), byteorder="little", signed=False
+                read_exact(data_stream, 2), byteorder="little", signed=False
             )
             if extended:
                 record_data_len = int.from_bytes(
-                    data_stream.read(8), byteorder="little", signed=False
+                    read_exact(data_stream, 8), byteorder="little", signed=False
                 )
             else:
                 record_data_len = int.from_bytes(
-                    data_stream.read(2), byteorder="little", signed=False
+                    read_exact(data_stream, 2), byteorder="little", signed=False
                 )
             description = read_string(data_stream, DESCRIPTION_LEN)
-            record_data_bytes = data_stream.read(record_data_len)
+            record_data_bytes = read_exact(data_stream, record_data_len)
 
             vlr = VLR(user_id, record_id, description, record_data_bytes)
 

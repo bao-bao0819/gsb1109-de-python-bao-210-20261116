@@ -1,6 +1,32 @@
 from typing import BinaryIO, Union
 
 
+def read_exact(stream: BinaryIO, n: int) -> bytes:
+    """Read up to ``n`` bytes, retrying when the stream returns a short read.
+
+    A short read is not an end of file: ``read`` may legitimately return less
+    than requested (sockets, decompressors, some HTTP clients). The only end
+    of file signal is an empty read.
+
+    Returns fewer than ``n`` bytes only when the stream is exhausted.
+    """
+    if n <= 0:
+        return b""
+
+    chunks = []
+    remaining = n
+    while remaining > 0:
+        chunk = stream.read(remaining)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+
+    if len(chunks) == 1:
+        return chunks[0]
+    return b"".join(chunks)
+
+
 def encode_to_null_terminated(string: str, codec: str = "utf-8") -> bytes:
     """
     >>> encode_to_null_terminated("las files are cool")
@@ -23,7 +49,7 @@ def read_string(
     If the decoding succeeds, returns the `str`. Otherwise the raw bytes
     are returned.
     """
-    raw_string = stream.read(length)
+    raw_string = read_exact(stream, length)
     first_null_byte_pos = raw_string.find(b"\0")
     if first_null_byte_pos >= 0:
         raw_string = raw_string[:first_null_byte_pos]

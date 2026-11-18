@@ -51,6 +51,38 @@ processing on large files (splitting, filtering, etc)
         for points in f.chunk_iterator(1_000_000):
             do_something_with(points)
 
+Assembling short-read streams
+-----------------------------
+
+Some transports (sockets, HTTP range responses, instrument links) return less
+than the requested number of bytes. A short read is not an end of file, and a
+point must only be published once all its bytes are available.
+
+:class:`.PointStreamAssembler` keeps a confirmed point prefix, a pending tail
+of bytes that do not yet form a whole point, and the residual of the declared
+per-return / per-flight-line control counts. Feeding the same bytes again is
+safe when the transport retransmits: the overlap is removed using the byte
+offset when available, or by matching the end of the received data.
+
+.. code-block:: python
+
+    import laspy
+
+    assembler = laspy.PointStreamAssembler(header)
+    while True:
+        data = transport.read(64 * 1024)
+        if not data:
+            break
+        assembler.feed(data, requested=64 * 1024)
+
+    if assembler.finish() is laspy.StreamState.COMPLETE:
+        las = assembler.build()
+
+``finish`` distinguishes a real end of file (``COMPLETE`` or ``TRUNCATED``)
+from an ongoing link short read (``SHORT_READ``) and from data that contradicts
+the declaration (``DECLARATION_CONFLICT``, e.g. more points than declared or
+control counts that do not add up).
+
 
 Writing
 =======

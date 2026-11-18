@@ -20,7 +20,7 @@ from .errors import LaspyException
 from .point import dims
 from .point.format import ExtraBytesParams, PointFormat
 from .point.record import PackedPointRecord
-from .utils import read_string, write_string
+from .utils import read_exact, read_string, write_string
 from .vlrs import VLR
 from .vlrs.geotiff import create_geotiff_projection_vlrs
 from .vlrs.known import (
@@ -958,7 +958,7 @@ class LasHeader:
         prefetch data in memory in case the original source
         is not buffered (like a http source could be)
         """
-        header_bytes = source.read(LAS_HEADERS_SIZE["1.1"])
+        header_bytes = read_exact(source, LAS_HEADERS_SIZE["1.1"])
 
         file_sig = header_bytes[: len(LAS_FILE_SIGNATURE)]
         if not file_sig:
@@ -972,7 +972,13 @@ class LasHeader:
             header_bytes[96 : 96 + 4], byteorder="little", signed=False
         )
 
-        rest = source.read(offset_to_data - len(header_bytes))
+        remaining = offset_to_data - len(header_bytes)
+        rest = read_exact(source, remaining)
+        if len(rest) < remaining:
+            raise LaspyException(
+                "Source ended before the end of the header and VLRs "
+                f"(expected {offset_to_data} bytes, got {len(header_bytes) + len(rest)})"
+            )
 
         return header_bytes + rest
 

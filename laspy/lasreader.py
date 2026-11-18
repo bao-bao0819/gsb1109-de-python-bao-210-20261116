@@ -14,6 +14,7 @@ from .compression import DecompressionSelection
 from .header import LasHeader
 from .lasdata import LasData
 from .point import record
+from .utils import read_exact
 from .vlrs.vlrlist import VLRList
 from .waveform import WaveformRecord
 from .waveform.descriptor import (
@@ -72,6 +73,17 @@ class LasReader:
         self._source = source
 
         self.points_read = 0
+        #: True when the source ended before the header's declared point count
+        #: could be read. A transport short read is retried by the point
+        #: source, so this only reflects a real end of stream.
+        self.stream_truncated = False
+
+        #: Bytes received after the last complete point. They are never
+        #: promoted to points.
+        self.pending_tail_bytes = 0
+
+        #: Number of confirmed points (kept in sync with ``points_read``).
+        self.confirmed_point_count = 0
         self._waveform_mode = WaveformMode(waveform_mode)
         self._waveform_source: Optional[WaveReader] = None
         self._waveform_descriptors_registry = WaveformPacketDescriptorRegistry()
@@ -118,17 +130,34 @@ class LasReader:
         else:
             n = min(n, points_left)
 
-        r = record.PackedPointRecord.from_buffer(
-            self.point_source.read_n_points(n), self.header.point_format
-        )
+        raw = self.point_source.read_n_points(n)
+        point_size = self.header.point_format.size
+        complete_bytes = (len(raw) // point_size) * point_size
+        if complete_bytes < len(raw):
+            # The source ended in the middle of a point. Those trailing bytes
+            # are a pending tail, not a point: never turn them into data.
+            self.pending_tail_bytes = len(raw) - complete_bytes
+            self.stream_truncated = True
+            logger.error(
+                f"Read {len(raw) - complete_bytes} trailing bytes that do not "
+                f"form a complete {point_size}-byte point"
+            )
+            raw = raw[:complete_bytes]
+
+        r = record.PackedPointRecord.from_buffer(raw, self.header.point_format)
         if len(r) < n:
+            self.stream_truncated = True
             logger.error(f"Could only read {len(r)} of the requested {n} points")
 
         points = record.ScaleAwarePointRecord(
             r.array, r.point_format, self.header.scales, self.header.offsets
         )
 
-        self.points_read += n
+        # Only the points that were actually read are confirmed. Advancing by
+        # the requested count would make a short read look like a success and
+        # silently hide missing points.
+        self.points_read += len(r)
+        self.confirmed_point_count = self.points_read
         return points
 
     def _ensure_waveform_source(self) -> bool:
@@ -374,6 +403,9 @@ class LasReader:
 
         self.point_source.seek(point_index)
         self.points_read = point_index
+        self.confirmed_point_count = point_index
+        self.stream_truncated = False
+        self.pending_tail_bytes = 0
         return point_index
 
     def chunk_iterator(self, points_per_iteration: int) -> "PointChunkIterator":
@@ -488,15 +520,24 @@ class UncompressedPointReader(IPointReader):
         return self._source
 
     def read_n_points(self, n: int) -> bytearray:
+        n_bytes = n * self.header.point_format.size
         try:
             readinto = self.source.readinto
         except AttributeError:
-            data = bytearray(self.source.read(n * self.header.point_format.size))
-        else:
-            data = bytearray(n * self.header.point_format.size)
-            num_read = readinto(data)
-            if num_read < len(data):
-                data = data[:num_read]
+            data = read_exact(self.source, n_bytes)
+            return bytearray(data)
+
+        data = bytearray(n_bytes)
+        view = memoryview(data)
+        total_read = 0
+        while total_read < n_bytes:
+            num_read = readinto(view[total_read:])
+            if not num_read:
+                break
+            total_read += num_read
+
+        if total_read < n_bytes:
+            data = data[:total_read]
 
         return data
 
@@ -578,7 +619,7 @@ class WaveReader(IWaveformReader):
     def read_n_waveforms(self, n: int) -> bytearray:
         self._ensure_open()
         total_size = n * self.wave_size_bytes
-        data = self._source.read(total_size)
+        data = read_exact(self._source, total_size)
         if len(data) != total_size:
             raise ValueError(
                 f"failed to fill whole waveform buffer: requested {total_size} bytes, got {len(data)}"

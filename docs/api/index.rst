@@ -41,6 +41,7 @@ Re-exported classes
  - :class:`.PackedPointRecord`
  - :class:`.ScaleAwarePointRecord`
  - :class:`.CopcReader`
+ - :class:`.PointStreamAssembler`
 
 
 Submodules
@@ -51,6 +52,7 @@ Submodules
    laspy.lib
    laspy.header
    laspy.lasreader
+   laspy.streaming
    laspy.lasdata
    laspy.copc
    laspy.vlrs.vlrlist

@@ -23,3 +23,31 @@ class LazError(LaspyException):
 
 class IncompatibleDataFormat(LaspyException):
     pass
+
+
+class StreamAssemblyError(LaspyException):
+    pass
+
+
+class StreamShortReadError(StreamAssemblyError):
+    pass
+
+
+class StreamDeclarationConflict(StreamAssemblyError):
+    pass
+
+
+class StreamOverlapConflict(StreamDeclarationConflict):
+    pass
+
+
+class StreamGapError(StreamAssemblyError):
+    pass
+
+
+class StreamTruncatedError(StreamDeclarationConflict):
+    pass
+
+
+class StreamIncompletePointError(StreamTruncatedError):
+    pass

@@ -99,9 +99,24 @@ class HttpRangeStream:
 
         r.raise_for_status()
 
-        self.range_start += n
+        # A server may return fewer bytes than requested. Advance by what was
+        # actually received so the next call asks for the missing range.
+        content = r.content
+        self.range_start += len(content)
 
-        return r.content
+        return content
+
+    def read_exact(self, n: int) -> bytes:
+        """Read ``n`` bytes, retrying short responses."""
+        chunks = []
+        remaining = n
+        while remaining > 0:
+            chunk = self.read(remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
 
     def tell(self) -> int:
         return self.range_start
@@ -451,7 +466,7 @@ class HttpFetcherThread(Thread):
                 offset, size = self.query_queue.get()
                 try:
                     http_reader.seek(offset)
-                    data = http_reader.read(size)
+                    data = http_reader.read_exact(size)
                     self.result_queue.put((data, offset))
                 except Exception as e:
                     self.result_queue.put(e)
@@ -503,7 +518,7 @@ def http_thread_executor_strategy(
 
         def fetch_data_job(source, offset, size):
             source.seek(offset)
-            return source.read(size)
+            return source.read_exact(size)
 
         jobs = []
         for offset, size in byte_queries:

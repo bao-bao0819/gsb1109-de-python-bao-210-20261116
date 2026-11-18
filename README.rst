@@ -179,6 +179,48 @@ very end of their process.
         xport.v56.dump(library, f)
 
 
+Comparing records
+=================
+
+Reordering the columns of a data set should not make every observation
+look like a new case.  ``xport.diff_datasets`` pairs records by agreed
+field identity (the variable name) rather than physical column position,
+while the :class:`xport.RecordView` keeps the original column order and
+source schema available for reporting.
+
+.. code:: python
+
+    import xport
+
+    left = xport.Dataset({'ID': [1, 2], 'AMT': [1000.0, 2000.0]})
+    right = xport.Dataset({'AMT': [1000.0, 2000.0], 'ID': [1, 2]})
+
+    result = xport.diff_datasets(left, right, key='ID')
+    result.is_identical  # True -- column order is irrelevant
+
+Renamed fields are paired explicitly with a mapping, including duplicate
+field names, which are disambiguated by occurrence instead of silently
+overwriting dictionary keys.
+
+.. code:: python
+
+    right = xport.Dataset({'ID': [1, 2], 'TOTAL': [1000.0, 2000.0]})
+    result = xport.diff_datasets(left, right, key='ID', pairs={'AMT': 'TOTAL'})
+
+Format-only changes are reported separately from changes to the
+underlying value, and SAS special missing values (``xport.NaN.A`` ...
+``.Z``, ``._``) participate in the comparison as distinct categories.
+
+.. code:: python
+
+    result = xport.diff_datasets(before, after, key='ID')
+    for record in result.changed:
+        for change in record.format_changes:  # same value, new format
+            ...
+        for change in record.value_changes:   # value or missingness changed
+            ...
+
+
 Feature requests
 ================
 

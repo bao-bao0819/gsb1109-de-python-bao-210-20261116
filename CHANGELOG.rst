@@ -43,3 +43,11 @@ v3.6.0, 2022-02-02
 
 v3.6.1, 2022-02-15
   Fix issue with v8 format when the dataset has no long labels.
+
+v3.7.0, 2026-11-18
+  Add record views and field-identity comparison in ``xport.diff``.
+  Reordered columns no longer make every row look like a new case;
+  renamed and duplicate fields are paired through an explicit
+  mapping, format-only changes are reported separately from value
+  changes, and SAS special missing categories participate in the
+  comparison.

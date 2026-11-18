@@ -22,9 +22,18 @@ from .__about__ import __version__  # noqa: F401 module imported but unused
 LOG = logging.getLogger(__name__)
 
 __all__ = [
+    'ChangeKind',
+    'DatasetDiff',
+    'FieldChange',
+    'FieldMapping',
     'Library',
     'Member',
     'NaN',
+    'Record',
+    'RecordDiff',
+    'RecordView',
+    'diff_datasets',
+    'record_view',
 ]
 
 
@@ -862,3 +871,18 @@ class DictReader(Reader):
     def __iter__(self):
         for row in super().__iter__():
             yield row._asdict()
+
+
+# Record views and field-identity comparison.  Imported last to avoid a
+# circular import: the diff module references the classes above.
+from .diff import (  # noqa: E402
+    ChangeKind,
+    DatasetDiff,
+    FieldChange,
+    FieldMapping,
+    Record,
+    RecordDiff,
+    RecordView,
+    diff_datasets,
+    record_view,
+)

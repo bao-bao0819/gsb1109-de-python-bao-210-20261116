@@ -30,6 +30,8 @@ import typing
 import zlib
 from typing import Iterable
 
+from vcfpy.exceptions import BgzfTruncatedError
+
 # For Python 2 can just use: _bgzf_magic = '\x1f\x8b\x08\x04'
 # but need to use bytes on Python 3
 _bgzf_magic = b"\x1f\x8b\x08\x04"
@@ -107,17 +109,40 @@ def split_virtual_offset(virtual_offset: int) -> tuple[int, int]:
     return start_offset, within_block
 
 
+def _read_exact(handle: typing.IO[bytes], size: int, what: str) -> bytes:
+    """Read exactly ``size`` bytes from ``handle``.
+
+    File-like objects are allowed to return fewer bytes than requested even
+    when they are not at end of file, so keep reading until the requested
+    amount is available.  A *short read* is therefore not an error.
+
+    :raises StopIteration: if no byte at all could be read (clean end of file)
+    :raises BgzfTruncatedError: if end of file is reached after a partial read
+    """
+    chunks: list[bytes] = []
+    remaining = size
+    while remaining > 0:
+        chunk = handle.read(remaining)
+        if not chunk:
+            if not chunks:
+                raise StopIteration("EOF")
+            raise BgzfTruncatedError(f"Truncated BGZF {what}: expected {size} bytes, got {size - remaining}")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
 def _load_bgzf_block(handle: typing.IO[bytes]) -> tuple[int, str]:
     """Load the next BGZF block from the file handle.
 
     Returns a tuple of (block_size, decompressed_data_as_string).
-    Raises StopIteration if EOF is reached.
+    Raises StopIteration if EOF is reached at a block boundary.  Raises
+    :py:class:`~vcfpy.exceptions.BgzfTruncatedError` if EOF is reached
+    within a block (a truncated terminal state).
     """
     # Read the complete gzip header (10 bytes)
     # ID1 ID2 CM FLG MTIME(4) XFL OS
-    header = handle.read(10)
-    if len(header) < 10:  # pragma: no cover
-        raise StopIteration("EOF")
+    header = _read_exact(handle, 10, "header")
 
     # Check magic bytes
     if header[:4] != _bgzf_magic:  # pragma: no cover
@@ -129,18 +154,14 @@ def _load_bgzf_block(handle: typing.IO[bytes]) -> tuple[int, str]:
         raise ValueError("BGZF file missing FEXTRA flag")
 
     # Read XLEN (extra field length)
-    xlen_bytes = handle.read(2)
-    if len(xlen_bytes) < 2:  # pragma: no cover
-        raise ValueError("Truncated BGZF extra field length")
+    xlen_bytes = _read_exact(handle, 2, "extra field length")
 
     xlen = struct.unpack("<H", xlen_bytes)[0]
     if xlen < 6:  # pragma: no cover
         raise ValueError("Invalid BGZF extra field length")
 
     # Read the extra field
-    extra_data = handle.read(xlen)
-    if len(extra_data) < xlen:  # pragma: no cover
-        raise ValueError("Truncated BGZF extra field")
+    extra_data = _read_exact(handle, xlen, "extra field")
 
     # Parse the BC subfield to get BSIZE
     if extra_data[:2] != _bytes_BC:  # pragma: no cover
@@ -167,14 +188,10 @@ def _load_bgzf_block(handle: typing.IO[bytes]) -> tuple[int, str]:
         raise ValueError(f"Invalid compressed data size: {cdata_size}")
 
     # Read the compressed data
-    compressed_data = handle.read(cdata_size)
-    if len(compressed_data) != cdata_size:  # pragma: no cover
-        raise ValueError(f"Truncated BGZF block data: expected {cdata_size}, got {len(compressed_data)}")
+    compressed_data = _read_exact(handle, cdata_size, "block data")
 
     # Read the trailer (CRC32 and ISIZE)
-    trailer = handle.read(8)
-    if len(trailer) != 8:  # pragma: no cover
-        raise ValueError("Truncated BGZF trailer")
+    trailer = _read_exact(handle, 8, "trailer")
 
     crc32, isize = struct.unpack("<II", trailer)
 
@@ -206,6 +223,7 @@ class BgzfWriter(typing.IO[str]):
         mode: str = "w",
         fileobj: typing.IO[bytes] | None = None,
         compresslevel: int = 6,
+        block_size: int = 65536,
     ):
         if fileobj:
             assert filename is None
@@ -219,10 +237,14 @@ class BgzfWriter(typing.IO[str]):
                 handle = open(filename, "ab")
             else:
                 handle = open(filename, "wb")
+        if not 1 <= block_size <= 65536:
+            raise ValueError("Require 1 <= block_size <= 2**16, got %i" % block_size)
         self._text: bool = "b" not in mode.lower()
         self._handle: typing.IO[bytes] = handle
         self._buffer: bytes = b""
         self.compresslevel: int = compresslevel
+        #: maximum number of uncompressed bytes placed in one BGZF block
+        self.block_size: int = block_size
         self._filename = filename
         self._mode = mode
         self._closed = False
@@ -272,24 +294,25 @@ class BgzfWriter(typing.IO[str]):
         # Convert string to bytes using latin-1 encoding
         data_bytes = codecs.latin_1_encode(data)[0]
 
-        # block_size = 2**16 = 65536
+        block_size = self.block_size
         data_len = len(data_bytes)
-        if len(self._buffer) + data_len < 65536:
+        if len(self._buffer) + data_len < block_size:
             # print("Cached %r" % data)
             self._buffer += data_bytes
         else:  # pragma: no cover
             # print("Got %r, writing out some data..." % data)
             self._buffer += data_bytes
-            while len(self._buffer) >= 65536:
-                self._write_block(self._buffer[:65536])
-                self._buffer = self._buffer[65536:]
+            while len(self._buffer) >= block_size:
+                self._write_block(self._buffer[:block_size])
+                self._buffer = self._buffer[block_size:]
 
         return original_len
 
     def flush(self):
-        while len(self._buffer) >= 65536:  # pragma: no cover
-            self._write_block(self._buffer[:65535])
-            self._buffer = self._buffer[65535:]
+        block_size = self.block_size
+        while len(self._buffer) >= block_size:  # pragma: no cover
+            self._write_block(self._buffer[:block_size])
+            self._buffer = self._buffer[block_size:]
         self._write_block(self._buffer)
         self._buffer = b""
         self._handle.flush()
@@ -485,8 +508,16 @@ class BgzfReader(typing.IO[str]):
         # Finally save the block in our cache,
         self._buffers[self._block_start_offset] = self._buffer, block_size
 
-    def tell(self):  # pragma: no cover
-        """Return a 64-bit unsigned BGZF virtual offset."""
+    def tell(self):
+        """Return a 64-bit unsigned BGZF virtual offset.
+
+        The offset denotes the position of the next byte that will be
+        returned.  When the reader is exactly at the end of a (non-empty)
+        block, the offset of the next block with a within-block offset of
+        zero is returned instead of a position past the end of the current
+        block.  This makes the returned value suitable for storing as a
+        resume position and passing to :py:meth:`seek`.
+        """
         if 0 < self._within_block_offset and self._within_block_offset == len(self._buffer):
             # Special case where we're right at the end of a (non empty) block.
             # For non-maximal blocks could give two possible virtual offsets,
@@ -500,8 +531,29 @@ class BgzfReader(typing.IO[str]):
             # TODO - Include bounds checking as in make_virtual_offset?
             return (self._block_start_offset << 16) | self._within_block_offset
 
+    #: Alias for :py:meth:`tell`, highlighting that the value is a virtual offset.
+    @property
+    def virtual_offset(self) -> int:
+        """The current position as a BGZF virtual offset (see :py:meth:`tell`)."""
+        return self.tell()
+
+    @property
+    def block_start_offset(self) -> int:
+        """Raw file offset of the block currently held by the reader."""
+        return self._block_start_offset
+
+    @property
+    def within_block_offset(self) -> int:
+        """Offset within the current decompressed block."""
+        return self._within_block_offset
+
     def seek(self, virtual_offset: int, whence: int = 0) -> int:
-        """Seek to a 64-bit unsigned BGZF virtual offset."""
+        """Seek to a 64-bit unsigned BGZF virtual offset.
+
+        The offset must have been obtained from :py:meth:`tell` at a record
+        boundary; a virtual offset is not a plain byte position and must not
+        be computed by adding byte counts to another virtual offset.
+        """
         # Do this inline to avoid a function call,
         # start_offset, within_block = split_virtual_offset(virtual_offset)
         start_offset = virtual_offset >> 16
@@ -522,6 +574,11 @@ class BgzfReader(typing.IO[str]):
         #       self.tell(), self._block_start_offset,
         #       self._within_block_offset)
         return virtual_offset
+
+    #: Alias for :py:meth:`seek`, highlighting that the argument is a virtual offset.
+    def seek_virtual(self, virtual_offset: int, whence: int = 0) -> int:
+        """Seek to a BGZF virtual offset (see :py:meth:`seek`)."""
+        return self.seek(virtual_offset, whence)
 
     def read(self, size: int = -1) -> str:
         """Read method for the BGZF module."""

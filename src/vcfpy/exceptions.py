@@ -8,6 +8,25 @@ class VCFPyException(RuntimeError):
     """Base class for module's exception"""
 
 
+class BgzfException(VCFPyException):
+    """Base class for BGZF related errors"""
+
+
+class BgzfTruncatedError(BgzfException, EOFError, ValueError):
+    """Raised when a BGZF block ends before it is complete
+
+    A short read (a ``read()`` that returns fewer bytes than requested while
+    more data is still available) is not an error; the reader keeps reading
+    until the requested amount is available.  This exception is only raised
+    once end of file is reached in the middle of a block, i.e. for a
+    truncated terminal state.
+    """
+
+
+#: Backwards/forwards compatible alias for :py:class:`BgzfTruncatedError`
+TruncatedBgzfError = BgzfTruncatedError
+
+
 class InvalidHeaderException(VCFPyException):
     """Raised in the case of invalid header formatting"""
 

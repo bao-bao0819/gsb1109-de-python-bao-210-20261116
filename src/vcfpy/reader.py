@@ -8,9 +8,17 @@ import typing
 from io import TextIOWrapper
 
 from vcfpy import parser
+from vcfpy.bgzf import BgzfReader
 from vcfpy.tabix import TabixFile
 
 __author__ = "Manuel Holtgrewe <manuel.holtgrewe@bihealth.de>"
+
+
+def _is_bgzf(path: str) -> bool:
+    """Return whether ``path`` looks like a BGZF file (``BC`` extra field)."""
+    with open(path, "rb") as handle:
+        header = handle.read(18)
+    return header[:4] == b"\x1f\x8b\x08\x04" and header[12:14] == b"BC"
 
 
 class Reader:
@@ -95,8 +103,14 @@ class Reader:
         """
         record_checks = record_checks or []
         path = str(path)
+        f: typing.IO[str]
         if path.endswith(".gz") or path.endswith(".bgz"):
-            f = gzip.open(path, "rt")
+            if _is_bgzf(path):
+                # Use the BGZF reader so that tell() returns virtual offsets
+                # and seek() can resume at record boundaries.
+                f = BgzfReader(path)
+            else:
+                f = gzip.open(path, "rt")
             if not tabix_path:
                 tabix_path = path + ".tbi"
                 if not os.path.exists(tabix_path):
@@ -181,6 +195,30 @@ class Reader:
 
     def __iter__(self):
         return self
+
+    def tell(self) -> int | None:
+        """Return the resumption position at the next record boundary.
+
+        For BGZF streams this is a 64-bit BGZF virtual offset (block start
+        offset in the high 48 bits, offset within the decompressed block in
+        the low 16 bits).  It is *not* a linear byte position; records may
+        span block boundaries, so virtual offsets must never be added to
+        byte counts.  For plain-text streams the underlying ``tell()``
+        cookie is returned.
+
+        The value is meaningful only between complete records.  The natural
+        place to record it is after a record has been returned completely
+        (or before iterating the first record).
+        """
+        return self.parser.record_offset()
+
+    def seek(self, offset: int) -> None:
+        """Continue iteration at a recorded record boundary.
+
+        The header is not read again; pass an offset obtained from
+        :py:meth:`tell` on a reader that parsed the same header.
+        """
+        self.parser.seek_record_offset(offset)
 
     def __next__(self):
         """Return next object from file

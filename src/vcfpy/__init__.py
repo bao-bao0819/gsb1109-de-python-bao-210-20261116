@@ -1,10 +1,13 @@
 # -*- coding: utf-8 -*-
 
 from vcfpy.exceptions import (
+    BgzfException,
+    BgzfTruncatedError,
     HeaderNotFound,
     IncorrectVCFFormat,
     InvalidHeaderException,
     InvalidRecordException,
+    TruncatedBgzfError,
     VCFPyException,
 )
 from vcfpy.header import (
@@ -56,6 +59,9 @@ from vcfpy.writer import Writer
 
 __all__ = [
     "VCFPyException",
+    "BgzfException",
+    "BgzfTruncatedError",
+    "TruncatedBgzfError",
     "IncorrectVCFFormat",
     "InvalidHeaderException",
     "InvalidRecordException",

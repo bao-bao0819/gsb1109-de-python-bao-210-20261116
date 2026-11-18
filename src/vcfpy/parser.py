@@ -726,6 +726,8 @@ class Parser:
         #: header, once it has been read
         self.header = None
         # the currently read line
+        start = self._stream_tell()
+        virtual_offset = self._stream_virtual_tell()
         self._line = stream.readline()  # trailing '\n'
         #: :py:class:`vcfpy.header.SamplesInfos` with sample information;
         #: set on parsing the header
@@ -734,12 +736,141 @@ class Parser:
         self._record_parser = None
         # helper for checking the header
         self._header_checker = HeaderChecker()
+        # Stream position at which the line currently held in ``self._line``
+        # starts.  ``None`` if the stream cannot tell/seek, or if the
+        # position of the current line is not known.
+        self._line_start: int | None = start
+        # Virtual offset of ``self._line`` when the stream is a BGZF reader.
+        self._line_virtual_offset: int | None = virtual_offset
+
+    def _stream_tell(self) -> int | None:
+        """Return the raw stream position or ``None`` if not supported.
+
+        BGZF readers return virtual offsets from ``tell()``; those are handled
+        by :py:meth:`_stream_virtual_tell` and must not be mixed with plain
+        stream cookies.
+        """
+        if hasattr(self.stream, "block_start_offset"):
+            return None
+        tell = getattr(self.stream, "tell", None)
+        if tell is None:
+            return None
+        try:
+            return tell()
+        except (OSError, ValueError):  # pragma: no cover
+            return None
+
+    def _stream_virtual_tell(self) -> int | None:
+        """Return the BGZF virtual offset of the stream or ``None``."""
+        tell = getattr(self.stream, "tell", None)
+        if tell is None:
+            return None
+        if not hasattr(self.stream, "block_start_offset"):
+            # A plain text stream.  Only the BgzfReader exposes block
+            # start offsets; its tell() value is a virtual offset.
+            return None
+        try:
+            return tell()
+        except (OSError, ValueError):  # pragma: no cover
+            return None
+
+    def _stream_seek(self, offset: int) -> bool:
+        """Seek a plain stream; return ``False`` if not possible."""
+        seek = getattr(self.stream, "seek", None)
+        if seek is None:
+            return False
+        try:
+            seek(offset)
+            return True
+        except (OSError, ValueError):  # pragma: no cover
+            return False
+
+    def _stream_seek_virtual(self, offset: int) -> bool:
+        """Seek a BGZF stream by virtual offset; return ``False`` if not possible."""
+        if not hasattr(self.stream, "block_start_offset"):
+            return False
+        seek = getattr(self.stream, "seek", None)
+        if seek is None:  # pragma: no cover
+            return False
+        try:
+            seek(offset)
+            return True
+        except (OSError, ValueError):  # pragma: no cover
+            return False
 
     def _read_next_line(self):
         """Read next line store in self._line and return old one"""
         prev_line = self._line
+        prev_start = self._line_start
+        # The current stream position is the start of the next line; capture
+        # it before reading so that the new lookahead line carries its own
+        # record start position (not the end of the line just read).
+        start = self._stream_tell()
+        virtual_offset = self._stream_virtual_tell()
         self._line = self.stream.readline()
+        if self._line:
+            self._line_start = start
+            self._line_virtual_offset = virtual_offset
+        else:
+            # At EOF, keep the position at which the (empty) line starts so
+            # that callers can still record a resume point.
+            self._line_start = start if start is not None else prev_start
+            self._line_virtual_offset = virtual_offset if virtual_offset is not None else self._line_virtual_offset
         return prev_line
+
+    def record_offset(self) -> int | None:
+        """Return the position of the next record as an opaque checkpoint.
+
+        For BGZF streams this is the 64-bit BGZF virtual offset of the first
+        byte of the next record.  A record can span two BGZF blocks, so such
+        an offset identifies a record boundary via ``block_start << 16 |
+        within_block`` and must not be treated as a linear byte position.
+
+        For plain text streams the value is the stream's own ``tell()``
+        cookie.  ``None`` is returned if the stream cannot report a position.
+
+        The value is only meaningful at a record boundary, i.e. between two
+        calls to :py:meth:`parse_next_record` (or after one returned a
+        complete record).
+        """
+        if self._line_virtual_offset is not None:
+            return self._line_virtual_offset
+        return self._line_start
+
+    def seek_record_offset(self, offset: int) -> None:
+        """Continue reading at a previously recorded record boundary.
+
+        Passing a BGZF virtual offset (as returned by :py:meth:`record_offset`
+        for a BGZF stream) repositions the underlying BGZF reader.  The VCF
+        header is *not* re-read; this method is meant for resuming parsing of
+        records after a checkpoint obtained from the same stream/header.
+
+        The line at ``offset`` becomes the lookahead line, so the next call
+        to :py:meth:`parse_next_record` returns the record starting there.
+        The previous lookahead line is discarded; it is never re-parsed as a
+        new record.
+
+        :raises ValueError: if the offset does not denote a record boundary
+            or cannot be used with the underlying stream.
+        """
+        if self._stream_seek_virtual(offset):
+            self._line_virtual_offset = offset
+            self._line_start = None
+        elif self._stream_seek(offset):
+            self._line_virtual_offset = None
+            self._line_start = offset
+        else:
+            raise ValueError("Cannot seek to record offset %r" % (offset,))
+        # Load the line that starts at the checkpoint.  Its own start
+        # position is known (``offset``); any following line records its own
+        # position in :py:meth:`_read_next_line`.
+        self._line = self.stream.readline()
+        if not self._line:
+            # Resuming at the (clean) end of the file; keep the checkpoint.
+            if self._line_virtual_offset is not None:
+                self._line_virtual_offset = offset
+            else:
+                self._line_start = offset
 
     def parse_header(self, parsed_samples: list[str] | None = None):
         """Read and parse :py:class:`vcfpy.header.Header` from file, set
@@ -765,7 +896,7 @@ class Parser:
         self._header_checker.run(self.header)
         # construct record parser
         self._record_parser = RecordParser(self.header, self.samples, self.record_checks)
-        # read next line, must not be header
+        # read next line (the first record), must not be header
         self._read_next_line()
         if self._line and self._line.startswith("#"):  # pragma: no cover
             raise exceptions.IncorrectVCFFormat('Expecting non-header line or EOF after "#CHROM" line')
@@ -823,6 +954,14 @@ class Parser:
             problems reading the record
         """
         return self.parse_line(self._read_next_line())
+
+    def tell(self) -> int | None:
+        """Return the position of the next record (see :py:meth:`record_offset`)."""
+        return self.record_offset()
+
+    def seek(self, offset: int) -> None:
+        """Continue at a record boundary (see :py:meth:`seek_record_offset`)."""
+        self.seek_record_offset(offset)
 
     def print_warn_summary(self):
         """If there were any warnings, print summary with warnings"""

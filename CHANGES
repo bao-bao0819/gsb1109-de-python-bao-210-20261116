@@ -6,6 +6,15 @@ CHANGES
 
 - [CVE-2023-0286] Depends on cryptography >= 40.0.1
 - [CVE-2022-2309] Depends on lxml >= 4.9,2
+- Summary information now exports a lossless ``.json`` explanation for the
+  ``HwpSummaryInformation`` stream. Each property keeps its original variant
+  type and code, enclosing property set, declared code page and exact byte
+  range. Repeated property identifiers are retained as separate records,
+  conflicting time sources (FILETIME values and the HWP date string) are never
+  merged or masked by a newer value, text with an unknown code page or invalid
+  bytes keeps its raw bytes while the remaining readable properties are still
+  exported, and unknown variant types degrade to an unreadable marker instead
+  of aborting the whole export.
 
 
 0.1b15 (2020-05-30)

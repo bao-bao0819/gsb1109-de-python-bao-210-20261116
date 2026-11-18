@@ -416,7 +416,10 @@ class HwpFileHeader(object):
 class HwpSummaryInfo(VersionSensitiveItem):
 
     def other_formats(self):
-        return {'.txt': self.open_text}
+        return {
+            '.txt': self.open_text,
+            '.json': self.open_explanation_json,
+        }
 
     def getPropertySetStream(self):
         from .msoleprops import PropertySetFormat
@@ -508,6 +511,158 @@ class HwpSummaryInfo(VersionSensitiveItem):
     def numberOfParagraphs(self):
         from .summaryinfo import HWPPIDSI_PARACOUNT
         return self.propertySet[HWPPIDSI_PARACOUNT]
+
+    def createdTimes(self):
+        ''' Every creation time stored in the set, including duplicates. '''
+        from .msoleprops import PIDSI_CREATE_DTM
+        return self._properties(PIDSI_CREATE_DTM)
+
+    def lastSavedTimes(self):
+        ''' Every last-saved time stored in the set, including duplicates. '''
+        from .msoleprops import PIDSI_LASTSAVE_DTM
+        return self._properties(PIDSI_LASTSAVE_DTM)
+
+    def lastPrintedTimes(self):
+        ''' Every last-printed time in the set, including duplicates. '''
+        from .msoleprops import PIDSI_LASTPRINTED
+        return self._properties(PIDSI_LASTPRINTED)
+
+    def dateStrings(self):
+        ''' Every HWP date string stored in the set, including duplicates. '''
+        from .summaryinfo import HWPPIDSI_DATE_STR
+        return self._properties(HWPPIDSI_DATE_STR)
+
+    def time_sources(self):
+        ''' All time-bearing properties as separate, unmerged records.
+
+            FILETIME values and the HWP date string are independent sources;
+            none is dropped or overwritten by a newer counterpart, so a
+            contradiction between them stays visible.
+        '''
+        from .msoleprops import PIDSI_CREATE_DTM
+        from .msoleprops import PIDSI_LASTSAVE_DTM
+        from .msoleprops import PIDSI_LASTPRINTED
+        from .summaryinfo import HWPPIDSI_DATE_STR
+
+        sources = [
+            ('create_filetime', PIDSI_CREATE_DTM),
+            ('lastsave_filetime', PIDSI_LASTSAVE_DTM),
+            ('lastprinted_filetime', PIDSI_LASTPRINTED),
+            ('hwp_date_string', HWPPIDSI_DATE_STR),
+        ]
+        result = []
+        for source_name, identifier in sources:
+            for property in self._properties(identifier):
+                explanation = self.explain_property(property)
+                explanation['source'] = source_name
+                result.append(explanation)
+        return result
+
+    def _properties(self, identifier):
+        return [
+            property
+            for property in self.propertySet.properties
+            if property.id == identifier.id
+        ]
+
+    def explain_property(self, property):
+        ''' Build a JSON-safe explanation of one raw property.
+
+            The record keeps the original variant type, the enclosing property
+            set, the declared code page and the exact byte range, so repeated
+            field names and undecodable text are never collapsed or lost.
+        '''
+        from .msoleprops import Dictionary
+        from .msoleprops import FILETIME
+        from .msoleprops import RawTextValue
+        from .msoleprops import UnreadableValue
+
+        start = end = None
+        if property.byteRange is not None:
+            start, end = property.byteRange
+
+        record = {
+            'id': property.id,
+            'id_label': property.idLabel,
+            'display_name': property.displayName,
+            'type': property.typeLabel,
+            'type_code': (
+                '0x{:04x}'.format(property.type.code)
+                if property.type is not None else None
+            ),
+            'codepage': property.codepage,
+            'property_set': str(self.propertySet.fmtid),
+            'byte_range': {
+                'start': start,
+                'end': end,
+            },
+        }
+
+        value = property.value
+        if isinstance(value, FILETIME):
+            record['value'] = value.value
+            record['datetime'] = value.datetime.isoformat(' ')
+        elif isinstance(value, RawTextValue):
+            record['value'] = None
+            record['raw_text'] = {
+                'codepage': value.codepage,
+                'encoding': value.encoding,
+                'reason': value.reason,
+                'raw_hex': value.raw_hex,
+            }
+        elif isinstance(value, UnreadableValue):
+            record['value'] = None
+            record['unreadable'] = {
+                'error': value.error,
+                'raw_hex': value.raw_hex,
+            }
+        elif isinstance(value, Dictionary):
+            record['value'] = {
+                'entries': [
+                    {'id': entry.id, 'name': entry.name}
+                    for entry in value.entries
+                ],
+            }
+        else:
+            record['value'] = value
+        return record
+
+    def explanation(self):
+        ''' Explain every property set and property without lossy merging. '''
+        stream = self.propertySetStream
+        return {
+            'clsid': str(stream.clsid),
+            'byte_order': '0x{:04x}'.format(stream.byteOrder),
+            'version': stream.version,
+            'system_identifier': '0x{:08x}'.format(
+                stream.systemIdentifier,
+            ),
+            'property_sets': [
+                {
+                    'fmtid': str(propertyset.fmtid),
+                    'offset': propertyset.desc.offset,
+                    'properties': [
+                        self.explain_property(property)
+                        for property in propertyset.properties
+                    ],
+                }
+                for propertyset in stream.propertysets
+            ],
+            'time_sources': self.time_sources(),
+        }
+
+    def open_explanation_json(self):
+        import json
+        out = BytesIO()
+        payload = json.dumps(
+            self.explanation(),
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+        out.write(payload.encode('utf-8'))
+        out.seek(0)
+        return out
 
     @property
     def plaintext_lines(self):

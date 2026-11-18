@@ -315,6 +315,72 @@ class TestSections(TestBase):
         )
 
 
+class TestSummaryInfo(TestBase):
+
+    @property
+    def summaryinfo(self):
+        return self.hwp5file.summaryinfo
+
+    def test_other_formats_include_text_and_json(self):
+        formats = self.summaryinfo.other_formats()
+        self.assertEqual(set(['.txt', '.json']), set(formats.keys()))
+
+    def test_json_explanation_is_complete(self):
+        import json
+        payload = self.summaryinfo.open_explanation_json().read()
+        explanation = json.loads(payload.decode('utf-8'))
+
+        self.assertEqual(
+            '9fa2b660-1061-11d4-b4c6-006097c09d8c', explanation['clsid'],
+        )
+        property_set = explanation['property_sets'][0]
+        self.assertEqual(
+            '9fa2b660-1061-11d4-b4c6-006097c09d8c',
+            property_set['fmtid'],
+        )
+
+        records = property_set['properties']
+        self.assertTrue(len(records) >= 14)
+        for record in records:
+            self.assertIn('type', record)
+            self.assertIn('type_code', record)
+            self.assertIn('property_set', record)
+            self.assertIn('codepage', record)
+            self.assertIsInstance(record['byte_range']['start'], int)
+            self.assertIsInstance(record['byte_range']['end'], int)
+            self.assertGreaterEqual(
+                record['byte_range']['end'],
+                record['byte_range']['start'],
+            )
+
+        # FILETIME values and the HWP date string are independent sources
+        sources = explanation['time_sources']
+        source_names = sorted(set(source['source'] for source in sources))
+        self.assertEqual(
+            [
+                'create_filetime',
+                'hwp_date_string',
+                'lastprinted_filetime',
+                'lastsave_filetime',
+            ],
+            source_names,
+        )
+        for source in sources:
+            self.assertIsInstance(source['byte_range']['start'], int)
+
+    def test_text_output_keeps_primary_labels(self):
+        lines = list(self.summaryinfo.plaintext_lines)
+        self.assertTrue(any(line.startswith('- ByteOrder:') for line in lines))
+        self.assertTrue(
+            any('PIDSI_TITLE' in line for line in lines),
+        )
+        for line in lines:
+            self.assertTrue(
+                isinstance(line, str),
+                'plain text lines must be unicode, got %r' % type(line),
+            )
+
+
 class TestGeneratorReader(TestCase):
     def test_generator_reader(self):
         def data():

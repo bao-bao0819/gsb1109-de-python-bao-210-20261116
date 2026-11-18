@@ -24,6 +24,10 @@ from uuid import UUID
 from .msoleprops import PropertyIdentifier
 from .msoleprops import RESERVED_PROPERTIES
 from .msoleprops import SUMMARY_INFORMATION_PROPERTIES
+from .msoleprops import FILETIME
+from .msoleprops import RawTextValue
+from .msoleprops import UnreadableValue
+from .msoleprops import render_property_value
 
 
 CLSID_HWP_SUMMARY_INFORMATION = UUID(
@@ -51,18 +55,92 @@ HWP_PROPERTIES = RESERVED_PROPERTIES + SUMMARY_INFORMATION_PROPERTIES + (
 class HwpSummaryInfoTextFormatter(object):
 
     def formatTextLines(self, hwpsummaryinfo):
-        yield 'Title: {}'.format(hwpsummaryinfo.title)
-        yield 'Subject: {}'.format(hwpsummaryinfo.subject)
-        yield 'Author: {}'.format(hwpsummaryinfo.author)
-        yield 'Keywords: {}'.format(hwpsummaryinfo.keywords)
-        yield 'Comments: {}'.format(hwpsummaryinfo.comments)
-        yield 'Last saved by: {}'.format(hwpsummaryinfo.lastSavedBy)
-        yield 'Revision Number: {}'.format(hwpsummaryinfo.revisionNumber)
-        yield 'Last Printed at: {}'.format(hwpsummaryinfo.lastPrintedTime)
-        yield 'Created at: {}'.format(hwpsummaryinfo.createdTime)
-        yield 'Last saved at: {}'.format(hwpsummaryinfo.lastSavedTime)
-        yield 'Number of pages: {}'.format(hwpsummaryinfo.numberOfPages)
-        yield 'Date: {}'.format(hwpsummaryinfo.dateString)
-        yield 'Number of paragraphs: {}'.format(
-            hwpsummaryinfo.numberOfParagraphs
+        yield 'Title: {}'.format(
+            self._text(self._get(hwpsummaryinfo, 'title'))
         )
+        yield 'Subject: {}'.format(
+            self._text(self._get(hwpsummaryinfo, 'subject'))
+        )
+        yield 'Author: {}'.format(
+            self._text(self._get(hwpsummaryinfo, 'author'))
+        )
+        yield 'Keywords: {}'.format(
+            self._text(self._get(hwpsummaryinfo, 'keywords'))
+        )
+        yield 'Comments: {}'.format(
+            self._text(self._get(hwpsummaryinfo, 'comments'))
+        )
+        yield 'Last saved by: {}'.format(
+            self._text(self._get(hwpsummaryinfo, 'lastSavedBy'))
+        )
+        yield 'Revision Number: {}'.format(
+            self._text(self._get(hwpsummaryinfo, 'revisionNumber'))
+        )
+        for line in self._value_lines(
+            'Last Printed at', hwpsummaryinfo.lastPrintedTimes()
+        ):
+            yield line
+        for line in self._value_lines(
+            'Created at', hwpsummaryinfo.createdTimes()
+        ):
+            yield line
+        for line in self._value_lines(
+            'Last saved at', hwpsummaryinfo.lastSavedTimes()
+        ):
+            yield line
+        yield 'Number of pages: {}'.format(
+            self._text(self._get(hwpsummaryinfo, 'numberOfPages'))
+        )
+        for line in self._value_lines(
+            'Date', hwpsummaryinfo.dateStrings()
+        ):
+            yield line
+        yield 'Number of paragraphs: {}'.format(
+            self._text(self._get(hwpsummaryinfo, 'numberOfParagraphs'))
+        )
+
+        yield ''
+        yield 'Time sources (kept separate; none overrides another):'
+        for record in hwpsummaryinfo.time_sources():
+            value = record.get('datetime')
+            if value is None:
+                value = record.get('value')
+            if value is None and 'raw_text' in record:
+                value = 'raw-bytes({})=0x{}'.format(
+                    record['raw_text']['reason'],
+                    record['raw_text']['raw_hex'],
+                )
+            if value is None and 'unreadable' in record:
+                value = 'unreadable({})'.format(
+                    record['unreadable']['error'],
+                )
+            yield '- {} ({}): {} [bytes {}-{}]'.format(
+                record['source'],
+                record['type'],
+                value,
+                record['byte_range']['start'],
+                record['byte_range']['end'],
+            )
+
+    def _value_lines(self, label, properties):
+        multiple = len(properties) > 1
+        for index, property in enumerate(properties):
+            suffix = ' [{}]'.format(index) if multiple else ''
+            yield '{}: {}'.format(
+                label + suffix, self._text(property.value),
+            )
+
+    def _get(self, hwpsummaryinfo, attr):
+        try:
+            return getattr(hwpsummaryinfo, attr)
+        except KeyError:
+            return None
+
+    def _text(self, value):
+        if isinstance(value, (RawTextValue, UnreadableValue)):
+            return render_property_value(value)
+        if isinstance(value, FILETIME):
+            return str(value.datetime)
+        if value is None:
+            return ''
+        return render_property_value(value)

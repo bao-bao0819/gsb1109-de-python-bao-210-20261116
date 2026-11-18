@@ -24,6 +24,8 @@ from collections import namedtuple
 from datetime import datetime
 from datetime import timedelta
 from uuid import UUID
+import binascii
+import codecs
 import logging
 import struct
 
@@ -39,6 +41,105 @@ from hwp5.bintype import read_type
 
 
 logger = logging.getLogger(__name__)
+
+
+# Windows code page identifiers that do not map to a ``cp<NNN>`` codec.
+CODEPAGE_ENCODINGS = {
+    1200: 'utf-16-le',
+    1201: 'utf-16-be',
+    65000: 'utf-7',
+    65001: 'utf-8',
+}
+
+
+def codepage_encoding(codepage):
+    ''' Return a Python codec name for an OLE property-set code page.
+
+        Returns ``None`` when the code page is not recognized, so callers can
+        keep the original bytes instead of guessing an encoding.
+    '''
+    if codepage is None:
+        return None
+    encoding = CODEPAGE_ENCODINGS.get(codepage)
+    if encoding is None:
+        candidate = 'cp{}'.format(codepage)
+        try:
+            codecs.lookup(candidate)
+        except LookupError:
+            return None
+        encoding = candidate
+    return encoding
+
+
+def _hex(data):
+    return binascii.hexlify(data).decode('ascii')
+
+
+class RawTextValue(object):
+    ''' A text value whose raw bytes could not be decoded.
+
+        The original bytes are retained together with the declared code page,
+        so unknown code pages or invalid byte sequences never lead to data
+        loss. Readable properties of other types remain available alongside
+        these values.
+    '''
+
+    __slots__ = ('raw', 'codepage', 'encoding', 'reason')
+
+    def __init__(self, raw, codepage=None, encoding=None,
+                 reason='undecodable'):
+        self.raw = raw
+        self.codepage = codepage
+        self.encoding = encoding
+        self.reason = reason
+
+    @property
+    def raw_hex(self):
+        return _hex(self.raw)
+
+    def __str__(self):
+        return self.raw_hex
+
+    def __repr__(self):
+        return (
+            'RawTextValue(0x{}, codepage={}, encoding={}, reason={})'.format(
+                self.raw_hex, self.codepage, self.encoding, self.reason,
+            )
+        )
+
+
+class UnreadableValue(object):
+    ''' A property whose value could not be parsed at all.
+
+        The failure is recorded instead of being raised, so the remaining
+        readable properties of the set are still exported.
+    '''
+
+    __slots__ = ('error', 'raw')
+
+    def __init__(self, error, raw=b''):
+        self.error = error
+        self.raw = raw
+
+    @property
+    def raw_hex(self):
+        return _hex(self.raw)
+
+    def __str__(self):
+        return 'unreadable({})=0x{}'.format(self.error, self.raw_hex)
+
+
+def decode_codepage_text(raw, codepage):
+    ''' Decode code-page-backed text, preserving raw bytes on failure. '''
+    encoding = codepage_encoding(codepage)
+    if encoding is None:
+        return RawTextValue(raw, codepage=codepage, encoding=None,
+                            reason='unknown-codepage')
+    try:
+        return raw.decode(encoding)
+    except UnicodeDecodeError:
+        return RawTextValue(raw, codepage=codepage, encoding=encoding,
+                            reason='undecodable')
 
 
 vt_types = dict()
@@ -62,6 +163,25 @@ class VT_I4(object):
         return read_type(INT32, context, f)
 
 
+@PropertyType(code=0x001E)
+class VT_LPSTR(object):
+    ''' A code-page-encoded, null-terminated single-byte string.
+
+        The applicable code page is the PID_CODEPAGE of the enclosing
+        property set, which is passed through the read context. When the code
+        page is unknown or the bytes are not decodable, a
+        :class:`RawTextValue` holding the original bytes is returned.
+    '''
+
+    @classmethod
+    def read_value(cls, context, f):
+        bytecount = read_type(UINT32, context, f)
+        raw = f.read(bytecount)
+        if raw.endswith(b'\x00'):
+            raw = raw[:-1]
+        return decode_codepage_text(raw, context.get('codepage'))
+
+
 @PropertyType(code=0x001F)
 class VT_LPWSTR(object):
 
@@ -69,7 +189,10 @@ class VT_LPWSTR(object):
     def read_value(cls, context, f):
         length = read_type(UINT32, context, f)
         data = f.read(length * 2)
-        return data.decode('utf-16le')[:-1]  # remove null character
+        text = data.decode('utf-16le')
+        if text.endswith('\x00'):  # remove null character
+            text = text[:-1]
+        return text
 
 
 @PropertyType(code=0x0040)
@@ -82,6 +205,32 @@ class VT_FILETIME(object):
         value = hword << 32 | lword
         value = FILETIME(value)
         return value
+
+
+# Human-readable names of the [MS-OLEPS] variant type tags we understand.
+VT_TYPE_LABELS = {
+    0x0000: 'VT_EMPTY',
+    0x0001: 'VT_NULL',
+    0x0002: 'VT_I2',
+    0x0003: 'VT_I4',
+    0x0006: 'VT_CY',
+    0x0007: 'VT_DATE',
+    0x000B: 'VT_BOOL',
+    0x0010: 'VT_I1',
+    0x0011: 'VT_UI1',
+    0x0012: 'VT_UI2',
+    0x0013: 'VT_UI4',
+    0x0014: 'VT_I8',
+    0x0015: 'VT_UI8',
+    0x001E: 'VT_LPSTR',
+    0x001F: 'VT_LPWSTR',
+    0x0040: 'VT_FILETIME',
+    0x0047: 'VT_CLSID',
+}
+
+
+def vt_type_label(code):
+    return VT_TYPE_LABELS.get(code, 'VT_UNKNOWN_0x{:04x}'.format(code))
 
 
 class FILETIME(object):
@@ -229,15 +378,39 @@ SUMMARY_INFORMATION_PROPERTIES = (
 
 class Property(object):
 
-    def __init__(self, desc, idLabel, type, value):
+    def __init__(self, desc, idLabel, type, value, propsetDesc=None,
+                 codepage=None, byteRange=None, displayName=None):
         self.desc = desc
         self.idLabel = idLabel
         self.type = type
         self.value = value
+        self.propsetDesc = propsetDesc
+        self.codepage = codepage
+        self.byteRange = byteRange
+        self.displayName = displayName
 
     @property
     def id(self):
         return self.desc.id
+
+    @property
+    def typeLabel(self):
+        if self.type is None:
+            return None
+        return vt_type_label(self.type.code)
+
+    @property
+    def typeCode(self):
+        if self.type is None:
+            return None
+        return '0x{:04x}'.format(self.type.code)
+
+    @property
+    def streamOffset(self):
+        ''' Absolute byte offset of the value inside the property stream. '''
+        if self.propsetDesc is None or self.desc is None:
+            return None
+        return self.propsetDesc.offset + self.desc.offset
 
 
 class PropertyDesc(Struct):
@@ -267,19 +440,45 @@ class PropertyReader(object):
         self.displayName = displayName
 
     def read(self, f):
-        f.seek(self.propsetDesc.offset + self.propDesc.offset)
+        start = self.propsetDesc.offset + self.propDesc.offset
+        f.seek(start)
 
-        context = {}
+        context = {'codepage': self.codepage}
         propType = read_type(TypedPropertyValue, context, f)
         propType = TypedPropertyValue.fromDict(propType)
-        vt_type = vt_types[propType.code]
-        propValue = vt_type.read_value(context, f)
+        try:
+            vt_type = vt_types[propType.code]
+        except KeyError:
+            logger.warning(
+                'unknown OLE property type 0x%04x at offset %d; '
+                'keeping the property unreadable instead of failing',
+                propType.code, start,
+            )
+            propValue = UnreadableValue(
+                'unknown type 0x{:04x}'.format(propType.code),
+            )
+        else:
+            try:
+                propValue = vt_type.read_value(context, f)
+            except Exception as e:
+                logger.warning(
+                    'failed to read OLE property 0x%08x at offset %d: %s',
+                    self.propDesc.id, start, e,
+                )
+                propValue = UnreadableValue(
+                    '{}: {}'.format(type(e).__name__, e),
+                )
+        end = f.tell()
 
         return Property(
             desc=self.propDesc,
             idLabel=self.idLabel,
             type=propType,
             value=propValue,
+            propsetDesc=self.propsetDesc,
+            codepage=self.codepage,
+            byteRange=(start, end),
+            displayName=self.displayName,
         )
 
 
@@ -375,16 +574,21 @@ class DictionaryReader(object):
         propDesc = self.propDesc
         idLabel = self.idLabel
 
-        f.seek(propsetDesc.offset + propDesc.offset)
+        start = propsetDesc.offset + propDesc.offset
+        f.seek(start)
         context = {}
         propType = None
         propValue = read_type(Dictionary, context, f)
         propValue = Dictionary.fromDict(propValue)
+        end = f.tell()
         return Property(
             desc=propDesc,
             idLabel=idLabel,
             type=propType,
             value=propValue,
+            propsetDesc=propsetDesc,
+            codepage=self.codepage,
+            byteRange=(start, end),
         )
 
 
@@ -396,11 +600,25 @@ class PropertySet(object):
     def __init__(self, desc, header, properties):
         self.desc = desc
         self.header = header
+        # A plain list on purpose: property identifiers or display names may
+        # legitimately repeat, and every occurrence has to be retained.
         self.properties = properties
 
     @property
     def fmtid(self):
         return self.desc.fmtid
+
+    def findall(self, propertyIdentifier):
+        ''' Return every property value matching the identifier.
+
+            Unlike :meth:`__getitem__` this does not collapse repeated
+            identifiers, so conflicting duplicate fields are all exposed.
+        '''
+        return [
+            property.value
+            for property in self.properties
+            if property.id == propertyIdentifier.id
+        ]
 
     def __getitem__(self, propertyIdentifier):
         for property in self.properties:
@@ -553,57 +771,53 @@ class PropertySetStreamReader(object):
             else:
                 idLabels = propsetFormat.idLabels
 
+            propDescs = list(propsetHeader.propDescList)
+            consumed = set()
             properties = []
-            propDescMap = {
-                propDesc.id: propDesc
-                for propDesc in propsetHeader.propDescList
-            }
 
-            propDesc = propDescMap.pop(PID_CODEPAGE.id, None)
-            if propDesc is not None:
-                idLabel = idLabels.get(propDesc.id)
-                propReader = PropertyReader(
-                    propsetDesc=propsetDesc,
-                    propDesc=propDesc,
-                    idLabel=idLabel,
+            # PID_CODEPAGE has to be known before any code-page text is read.
+            codepage = None
+            codepageDesc = self._find_first_desc(propDescs, PID_CODEPAGE.id)
+            if codepageDesc is not None:
+                prop = self._read_property(
+                    f, propsetDesc, codepageDesc, idLabels,
                     codepage=None,
-                    displayName=None,
                 )
-                prop = propReader.read(f)
                 properties.append(prop)
-
+                consumed.add(codepageDesc)
                 codepage = prop.value
-            else:
-                codepage = None
 
-            propDesc = propDescMap.pop(PID_DICTIONARY.id, None)
-            if propDesc is not None:
-                idLabel = idLabels.get(propDesc.id)
-                propReader = DictionaryReader(
-                    propsetDesc,
-                    propDesc,
-                    idLabel,
-                    codepage,
+            # PID_DICTIONARY maps property identifiers to display names.
+            dictionary = None
+            dictDesc = self._find_first_desc(propDescs, PID_DICTIONARY.id)
+            if dictDesc is not None:
+                prop = self._read_dictionary(
+                    f, propsetDesc, dictDesc, idLabels, codepage,
                 )
-                prop = propReader.read(f)
                 properties.append(prop)
-
+                consumed.add(dictDesc)
                 dictionary = prop.value
-            else:
-                dictionary = None
 
-            for propDesc in propDescMap.values():
-                idLabel = idLabels.get(propDesc.id)
-                displayName = dictionary.get(propDesc.id, None)
-                propReader = PropertyReader(
-                    propsetDesc=propsetDesc,
-                    propDesc=propDesc,
-                    idLabel=idLabel,
+            # Every remaining descriptor is read independently; repeated
+            # identifiers are kept as separate properties instead of being
+            # collapsed into one.
+            for propDesc in propDescs:
+                if propDesc in consumed:
+                    continue
+                displayName = None
+                if dictionary is not None:
+                    displayName = dictionary.get(propDesc.id, None)
+                prop = self._read_property(
+                    f, propsetDesc, propDesc, idLabels,
                     codepage=codepage,
                     displayName=displayName,
                 )
-                prop = propReader.read(f)
                 properties.append(prop)
+
+            properties = sorted(
+                properties,
+                key=lambda property: property.desc.offset,
+            )
 
             propertyset = PropertySet(
                 desc=propsetDesc,
@@ -616,6 +830,54 @@ class PropertySetStreamReader(object):
             header=streamHeader,
             propertysets=propertysetList,
         )
+
+    @staticmethod
+    def _find_first_desc(propDescs, identifier):
+        for propDesc in propDescs:
+            if propDesc.id == identifier:
+                return propDesc
+        return None
+
+    def _read_property(self, f, propsetDesc, propDesc, idLabels,
+                       codepage, displayName=None):
+        idLabel = idLabels.get(propDesc.id)
+        propReader = PropertyReader(
+            propsetDesc=propsetDesc,
+            propDesc=propDesc,
+            idLabel=idLabel,
+            codepage=codepage,
+            displayName=displayName,
+        )
+        return propReader.read(f)
+
+    def _read_dictionary(self, f, propsetDesc, propDesc, idLabels, codepage):
+        idLabel = idLabels.get(propDesc.id)
+        propReader = DictionaryReader(
+            propsetDesc,
+            propDesc,
+            idLabel,
+            codepage,
+        )
+        return propReader.read(f)
+
+
+def render_property_value(value):
+    ''' Render a property value as text without raising on raw bytes. '''
+    if isinstance(value, RawTextValue):
+        return 'raw-bytes(codepage={}, {})=0x{}'.format(
+            value.codepage, value.reason, value.raw_hex,
+        )
+    if isinstance(value, UnreadableValue):
+        return str(value)
+    if isinstance(value, FILETIME):
+        return str(value.datetime)
+    if isinstance(value, Dictionary):
+        entries = ', '.join(
+            '0x{:08x}: {!r}'.format(entry.id, entry.name)
+            for entry in value.entries
+        )
+        return '{' + entries + '}'
+    return str(value)
 
 
 class PropertySetStreamTextFormatter(object):
@@ -644,12 +906,20 @@ class PropertySetStreamTextFormatter(object):
                 key=lambda property: property.desc.offset,
             )
             for property in properties:
+                start, end = property.byteRange or (None, None)
+                label = property.idLabel if property.idLabel is not None \
+                    else ''
+                type_label = property.typeLabel or ''
+                type_segment = type_label + ' ' if type_label else ''
+                codepage = property.codepage
+                codepage_text = str(codepage) if codepage is not None else '-'
                 if property.id == PID_DICTIONARY.id:
-                    yield '- {:08x}: {}(=0x{:08x}):'.format(
-                        propertyset.desc.offset + property.desc.offset,
-                        property.idLabel if property.idLabel is not None
-                        else '',
-                        property.id,
+                    yield (
+                        '- {:08x}-{:08x}: {}(=0x{:08x}) {}{}:'
+                    ).format(
+                        start, end, label, property.id,
+                        type_segment,
+                        'codepage={}'.format(codepage_text),
                     )
                     for entry in property.value.entries:
                         yield '            - {}: {}'.format(
@@ -657,12 +927,13 @@ class PropertySetStreamTextFormatter(object):
                             entry.name,
                         )
                 else:
-                    yield '- {:08x}: {}(=0x{:08x}): {}'.format(
-                        propertyset.desc.offset + property.desc.offset,
-                        property.idLabel if property.idLabel is not None
-                        else '',
-                        property.id,
-                        property.value
+                    yield (
+                        '- {:08x}-{:08x}: {}(=0x{:08x}) {}{}: {}'
+                    ).format(
+                        start, end, label, property.id,
+                        type_segment,
+                        'codepage={}'.format(codepage_text),
+                        render_property_value(property.value),
                     )
 
 

@@ -696,6 +696,9 @@ class PropertySetStreamModelEventsGenerator(object):
     def getPropertyEvents(self, property):
         from .msoleprops import PID_DICTIONARY
         from .msoleprops import Property
+        from .msoleprops import RawTextValue
+        from .msoleprops import UnreadableValue
+        from .msoleprops import vt_type_label
         content = dict(
             id=property.desc.id,
             offset=property.desc.offset,
@@ -703,13 +706,26 @@ class PropertySetStreamModelEventsGenerator(object):
         if property.idLabel is not None:
             content['id_label'] = property.idLabel
         if property.type is not None:
-            content['type'] = str(property.type.vt_type.__name__)
+            if property.type.vt_type is not None:
+                content['type'] = str(property.type.vt_type.__name__)
+            else:
+                content['type'] = vt_type_label(property.type.code)
             content['type_code'] = '0x{:04x}'.format(property.type.code)
         if property.id == PID_DICTIONARY.id:
             events = self.getDictionaryEvents(property.value)
         else:
             events = ()
-            content['value'] = property.value
+            value = property.value
+            if isinstance(value, RawTextValue):
+                content['raw_hex'] = value.raw_hex
+                content['raw_reason'] = value.reason
+                if value.codepage is not None:
+                    content['codepage'] = value.codepage
+            elif isinstance(value, UnreadableValue):
+                content['raw_hex'] = value.raw_hex
+                content['unreadable'] = value.error
+            else:
+                content['value'] = value
         element = Property, content, self.context
         return wrap_modelevents(element, events)
 

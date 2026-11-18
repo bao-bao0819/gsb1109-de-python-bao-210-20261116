@@ -1,6 +1,11 @@
 Release History
 ===============
 
+Unreleased
+----------
+
+* Add ``gspread.snapshot``: a ``SnapshotReadBatch`` that records the requested and answered ranges plus worksheet version evidence for multi-request reads, finalizes them as ``CONSISTENT``, ``INCONSISTENT`` or ``UNKNOWN``, and exposes ``reconcile_ranges`` to circle the row regions where concurrent row inserts or deletes may have caused missed or duplicated rows.
+
 6.2.1 (2025-05-14)
 ------------------
 

@@ -22,6 +22,13 @@ from .exceptions import (
     WorksheetNotFound,
 )
 from .http_client import BackOffHTTPClient, HTTPClient
+from .snapshot import (
+    ReadSnapshotReport,
+    ReadSnapshotStatus,
+    SnapshotReadBatch,
+    reconcile_ranges,
+    suspect_ranges_to_a1,
+)
 from .spreadsheet import Spreadsheet
 from .worksheet import ValueRange, Worksheet
 
@@ -49,6 +56,13 @@ __all__ = [
 
     # from .spreadsheet
     "Spreadsheet",
+
+    # from .snapshot
+    "ReadSnapshotReport",
+    "ReadSnapshotStatus",
+    "SnapshotReadBatch",
+    "reconcile_ranges",
+    "suspect_ranges_to_a1",
 
     # from .worksheet
     "Worksheet",

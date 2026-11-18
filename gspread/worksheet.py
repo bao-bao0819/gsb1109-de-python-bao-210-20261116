@@ -66,6 +66,7 @@ from .utils import (
 
 if TYPE_CHECKING is True:
     from .spreadsheet import Spreadsheet
+    from .snapshot import SnapshotReadBatch
 
 CellFormat = TypedDict(
     "CellFormat",
@@ -1104,6 +1105,46 @@ class Worksheet:
         )
 
         return [ValueRange.from_json(x) for x in response["valueRanges"]]
+
+    def snapshot_read_batch(
+        self, verify_before_each_read: bool = True
+    ) -> "SnapshotReadBatch":
+        """Start a read batch that records verifiable snapshot evidence.
+
+        Use this when a worksheet is read in several requests (for
+        example row by row) and another editor may insert or delete rows
+        in between. The returned
+        :class:`~gspread.snapshot.SnapshotReadBatch` records the requested
+        and answered ranges plus worksheet version evidence for every
+        read; its ``finalize()`` method decides whether the reads form a
+        consistent snapshot or must be re-read inside the reported
+        suspect row regions.
+
+        The Sheets API gives no snapshot guarantee across requests, so a
+        batch is never assumed complete: without positive evidence it is
+        finalized as ``UNKNOWN`` rather than silently accepted.
+
+        :param bool verify_before_each_read: when ``True`` (default)
+            metadata is sampled before and after every read. Set to
+            ``False`` only when extra metadata requests are not
+            acceptable; the batch can then never be proven consistent.
+
+        Example::
+
+            batch = worksheet.snapshot_read_batch()
+            first = batch.read("A1:C100")
+            second = batch.read("A101:C200")
+            report = batch.finalize()
+            if not report.is_consistent:
+                reread = [worksheet.get(r) for r in suspect_ranges_to_a1(
+                    report.suspect_regions
+                )]
+        """
+        from .snapshot import SnapshotReadBatch
+
+        return SnapshotReadBatch(
+            self, verify_before_each_read=verify_before_each_read
+        )
 
     def update(
         self,

@@ -63,6 +63,34 @@ GTFS entities which cross-reference each other can also be obtained straightforw
     >>> sched.trips_by_id('01SFO10').service  # the service associated with trip 01SFO10
     <Service WKDY (MTWThFSSu)>
 
+Fare planning
+-------------
+
+Given a timed journey split into legs, :func:`pygtfs.plan_fares` finds the
+legal ticket combinations that respect zone/route restrictions, transfer
+limits and validity windows. The same fare covering several legs is charged
+only once, and prices in different currencies are reported separately::
+
+    import datetime
+    from pygtfs import JourneyLeg, plan_fares
+
+    legs = [
+        JourneyLeg(trip_id="AB1", route_id="AB",
+                   from_stop_id="BEATTY_AIRPORT", to_stop_id="BULLFROG",
+                   from_zone=None, to_zone=None,
+                   departure=datetime.timedelta(hours=8),
+                   arrival=datetime.timedelta(hours=8, minutes=10)),
+        JourneyLeg(trip_id="BFC1", route_id="BFC",
+                   from_stop_id="BULLFROG", to_stop_id="FUR_CREEK_RES",
+                   from_zone=None, to_zone=None,
+                   departure=datetime.timedelta(hours=8, minutes=20),
+                   arrival=datetime.timedelta(hours=9, minutes=20)),
+    ]
+    for solution in plan_fares(sched, legs):
+        print(solution.segment_coverage, solution.costs)
+
+See :py:mod:`pygtfs.fare` for the full reference.
+
 gtfs2db
 -------
 
@@ -82,6 +110,7 @@ Contents:
    schedule
    loader
    gtfs_entities
+   fare
    gtfs2db
    internal
 

@@ -402,6 +402,56 @@ a value the encoder cannot handle and returns a JSON-serializable substitute.
    matches how you want the cell interpreted.
 
 
+Updating Cells Safely While Others Edit the Sheet
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``writeback_cells()`` writes individual fields back only when the cell still
+holds the value the caller read. Each update names a single cell, the field to
+change and the original value. Updates whose original value no longer matches
+are returned in ``conflicts`` and are never written.
+
+.. code:: python
+
+   result = worksheet.writeback_cells(
+       [
+           {
+               "cell": "B2",
+               "field": "price",
+               "expected": "19.99",
+               "value": 21.50,
+           },
+           {
+               "cell": "C2",
+               "field": "note",
+               "expected": "collected",
+               "value": "checked 2026-11-19",
+           },
+       ]
+   )
+
+   for conflict in result["conflicts"]:
+       print(conflict["cell"], conflict["current"])
+
+Pass ``dry_run=True`` to check every cell and return the planned requests
+without writing anything:
+
+.. code:: python
+
+   preview = worksheet.writeback_cells(updates, dry_run=True)
+   preview["updates"]     # would be written
+   preview["conflicts"]   # original value changed; needs attention
+   preview["requests"]    # exact batchUpdate payload
+
+The whole row of old values is never written back. Every request contains a
+field mask for the selected field only, so updating a price leaves the note
+and the cell format untouched, while updating a note leaves the price and its
+format alone. Merged cells are checked and written at the top-left cell that
+actually stores the value (reported as ``stored_cell``). Formula cells are
+compared by their stored formula rather than the calculated result. Text
+values are compared exactly; a number matches the equivalent numeric string,
+so a price read as ``"19.99"`` still matches the stored number ``19.99``.
+
+
 Adding Data Validation
 ~~~~~~~~~~~~~~~~~~~~~~
 

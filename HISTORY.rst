@@ -1,6 +1,15 @@
 Release History
 ===============
 
+Unreleased
+----------
+
+* Add ``Worksheet.writeback_cells()`` for conditional per-field write-back.
+  Each cell is written only if its stored value still matches the original;
+  conflicts are returned separately, ``dry_run`` previews the requests, merged
+  cells resolve to their storing cell, formula cells compare by formula, and
+  field masks keep notes, values and formatting that were not selected.
+
 6.2.1 (2025-05-14)
 ------------------
 

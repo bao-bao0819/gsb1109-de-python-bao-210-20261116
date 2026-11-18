@@ -6,9 +6,11 @@ This module contains common worksheets' models.
 
 """
 
+import math
 import re
 import warnings
 from collections import Counter
+from decimal import Decimal
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -80,6 +82,156 @@ BatchData = TypedDict("BatchData", {"range": str, "values": List[List[Any]]})
 
 JSONResponse = MutableMapping[str, Any]
 ValueRangeType = TypeVar("ValueRangeType", bound="ValueRange")
+
+WRITEBACK_FIELDS = {"value", "note"}
+WRITEBACK_FIELD_ALIASES = {"price": "value", "comment": "note"}
+_WRITEBACK_SINGLE_CELL_RE = re.compile(r"^\$?([A-Za-z]+)\$?([1-9]\d*)$")
+
+
+def _is_writeback_scalar(value: Any) -> bool:
+    """Return True for values that can be compared with a stored cell value."""
+    return value is None or isinstance(value, (str, int, float, bool, Decimal))
+
+
+def _to_user_entered_value(value: Any) -> Dict[str, Any]:
+    """Build a ``userEnteredValue`` object from a Python value.
+
+    An empty dict clears the stored value. Strings starting with ``=`` are
+    stored as formulas so that a formula read from the sheet can be written
+    back unchanged.
+    """
+    if value is None or value == "":
+        return {}
+
+    if isinstance(value, bool):
+        return {"boolValue": value}
+
+    if isinstance(value, Decimal):
+        value = float(value)
+
+    if isinstance(value, (int, float)):
+        if not math.isfinite(value):
+            raise ValueError("writeback numbers must be finite")
+        return {"numberValue": value}
+
+    if isinstance(value, str):
+        if value.startswith("="):
+            return {"formulaValue": value}
+        return {"stringValue": value}
+
+    raise TypeError(
+        "writeback value must be a string, number, boolean or None, got {!r}".format(
+            type(value).__name__
+        )
+    )
+
+
+def _writeback_same_value(cell_data: Mapping[str, Any], field: str, value: Any) -> bool:
+    """Return True when writing ``value`` would not change the stored cell.
+
+    This compares the exact stored representation, so writing the number
+    ``20`` over the text ``"20"`` is still a change even though the displayed
+    value looks the same.
+    """
+    if field == "note":
+        current_note = cell_data.get("note") or ""
+        new_note = "" if value is None else value
+        return current_note == new_note
+
+    current_value = cell_data.get("userEnteredValue") or {}
+    new_value = _to_user_entered_value(value)
+    if not current_value or not new_value:
+        return not current_value and not new_value
+
+    return current_value == new_value
+
+
+def _extract_user_entered_value(cell_data: Mapping[str, Any]) -> Any:
+    """Return the value stored in a grid cell, without applying its format."""
+    user_entered = cell_data.get("userEnteredValue") or {}
+
+    for key, value in (
+        ("formulaValue", user_entered.get("formulaValue")),
+        ("numberValue", user_entered.get("numberValue")),
+        ("boolValue", user_entered.get("boolValue")),
+        ("stringValue", user_entered.get("stringValue")),
+        ("errorValue", user_entered.get("errorValue")),
+    ):
+        if key in user_entered:
+            return value
+
+    return None
+
+
+def _as_decimal(value: Any) -> Optional[Decimal]:
+    """Convert a numeric value or a numeric string to Decimal."""
+    if isinstance(value, bool):
+        return None
+
+    if isinstance(value, (int, float, Decimal)):
+        try:
+            return Decimal(str(value))
+        except (ValueError, ArithmeticError):
+            return None
+
+    if isinstance(value, str):
+        cleaned = value.strip().replace(",", "")
+        if not cleaned:
+            return None
+        try:
+            return Decimal(cleaned)
+        except (ValueError, ArithmeticError):
+            return None
+
+    return None
+
+
+def _writeback_values_equal(current: Any, expected: Any, field: str) -> bool:
+    """Compare an expected original value with a stored cell value.
+
+    Blank values (``None`` and the empty string) are equivalent. For a note,
+    both sides must be text and are compared exactly. For a cell value:
+
+    * a stored number matches a number or the equivalent numeric string, so a
+      price stored by the Sheets API as a number still matches ``"19.99"``;
+    * a stored string is compared as text (a number is formatted with
+      ``str()`` first), so text ``"001"`` is not the same cell as text ``"1"``;
+    * formulas compare by their stored formula text (``"=SUM(A1:A2)"``), never
+      by the calculated result.
+    """
+    current_is_blank = current is None or current == ""
+    expected_is_blank = expected is None or expected == ""
+    if current_is_blank or expected_is_blank:
+        return current_is_blank and expected_is_blank
+
+    if field == "note":
+        return isinstance(expected, str) and current == expected
+
+    if isinstance(current, str):
+        if isinstance(expected, str):
+            return current == expected
+        if isinstance(expected, (int, float, Decimal)) and not isinstance(
+            expected, bool
+        ):
+            return current == str(expected)
+        return False
+
+    if isinstance(current, bool) or isinstance(expected, bool):
+        return (
+            isinstance(current, bool)
+            and isinstance(expected, bool)
+            and current is expected
+        )
+
+    if isinstance(current, (int, float, Decimal)) or isinstance(
+        expected, (int, float, Decimal)
+    ):
+        current_number = _as_decimal(current)
+        expected_number = _as_decimal(expected)
+        if current_number is not None and expected_number is not None:
+            return current_number == expected_number
+
+    return current == expected
 
 
 class ValueRange(list):
@@ -1387,6 +1539,542 @@ class Worksheet:
         )
 
         return response
+
+    def writeback_cells(
+        self,
+        updates: Iterable[Mapping[str, Any]],
+        dry_run: bool = False,
+    ) -> Dict[str, Any]:
+        """Write selected fields back to cells if their stored values still match.
+
+        This method is meant for write-back jobs that run while people continue
+        editing the same sheet. Each update names one cell, one field and the
+        original value that the caller read. The cell is only changed when its
+        *stored* value still matches ``expected``. Cells whose value changed in
+        the meantime are returned in ``conflicts`` and are not written. The
+        remaining updates are written (or, with ``dry_run=True``, only
+        previewed) in a single ``batchUpdate`` call.
+
+        Every request uses a field mask for the selected field only. Writing a
+        price therefore leaves a note untouched, and writing a note leaves the
+        price and the cell format untouched. Existing cell formats are never
+        part of the request.
+
+        Merged cells are checked and written at the cell that actually stores
+        the value: the top-left cell of the merged range. For example, an
+        update for ``B2`` inside a merged ``A2:B2`` range is checked against
+        and written to ``A2``; the result reports this as ``stored_cell``.
+        Formula cells are compared by their stored formula (``=SUM(A1:A2)``),
+        not by the calculated value.
+
+        The cells are read first and then written in one ``batchUpdate``
+        call. If the sheet changes between the read and the write, a cell can
+        still be overwritten; this method narrows that window but cannot close
+        it atomically.
+
+        :param updates: An iterable of mappings with the following keys:
+
+            * ``cell``: a single cell in A1 notation, e.g. ``"B2"``.
+            * ``field``: ``"value"`` (alias ``"price"``) or ``"note"``
+              (alias ``"comment"``).
+            * ``expected``: the original stored value the caller read. Use
+              ``None`` or ``""`` for a blank cell. This key is required.
+            * ``value``: the new value. Use ``None`` (or ``""`` for a note) to
+              clear the field. A string beginning with ``=`` is stored as a
+              formula.
+
+        :param bool dry_run: If ``True``, perform the reads and return the
+            planned requests and conflicts without writing anything.
+
+        :returns: A dictionary with:
+
+            * ``dry_run``: whether this was a preview.
+            * ``updates``: updates that were applied (or planned), including
+              ``cell``, ``stored_cell``, ``field``, ``expected``, ``current``,
+              ``value`` and ``status`` (``"applied"`` or ``"planned"``).
+            * ``conflicts``: cells that were not written, with ``reason``
+              either ``"original_value_mismatch"`` or ``"same_stored_cell"``.
+            * ``unchanged``: updates whose stored value already equals the
+              requested value; no request was needed.
+            * ``requests``: the exact ``batchUpdate`` requests (empty when
+              nothing needs to be written).
+
+        :raises ValueError: if an update is malformed, mentions another
+            sheet or a range, repeats the same cell and field, uses an unknown
+            field, or contains a non-finite number.
+        :raises TypeError: if a value is not a supported scalar or a note is
+            not a string.
+
+        Example::
+
+            result = worksheet.writeback_cells(
+                [
+                    {
+                        "cell": "B2",
+                        "field": "price",
+                        "expected": "19.99",
+                        "value": 21.50,
+                    },
+                    {
+                        "cell": "C2",
+                        "field": "note",
+                        "expected": "collected",
+                        "value": "checked 2026-11-19",
+                    },
+                ],
+                dry_run=True,
+            )
+
+            for conflict in result["conflicts"]:
+                print(conflict["cell"], conflict["current"])
+        """
+        records = self._normalize_writeback_updates(updates)
+        if not records:
+            return {
+                "dry_run": dry_run,
+                "updates": [],
+                "conflicts": [],
+                "unchanged": [],
+                "requests": [],
+            }
+
+        self._resolve_writeback_anchors(records)
+        current_cells = self._get_writeback_cell_data(
+            {(record["stored_row"], record["stored_col"]) for record in records}
+        )
+
+        conflicts, candidates = self._check_writeback_records(records, current_cells)
+        updates, unchanged, to_write = self._plan_writeback_updates(
+            candidates, conflicts
+        )
+
+        requests = self._build_writeback_requests(to_write)
+
+        if not dry_run and requests:
+            self.client.batch_update(self.spreadsheet_id, {"requests": requests})
+
+        status = "planned" if dry_run else "applied"
+        for entry in updates:
+            entry["status"] = status
+
+        return {
+            "dry_run": dry_run,
+            "updates": [self._public_writeback_entry(entry) for entry in updates],
+            "conflicts": [
+                self._public_writeback_entry(entry)
+                for entry in sorted(conflicts, key=lambda item: item["_index"])
+            ],
+            "unchanged": [self._public_writeback_entry(entry) for entry in unchanged],
+            "requests": requests,
+        }
+
+    def _resolve_writeback_anchors(self, records: List[Dict[str, Any]]) -> None:
+        """Point every record at the cell that actually stores its value."""
+        merges = self._get_writeback_merges()
+        for record in records:
+            anchor_row, anchor_col, merge = self._writeback_stored_position(
+                record["row"], record["col"], merges
+            )
+            record["stored_row"] = anchor_row
+            record["stored_col"] = anchor_col
+            record["stored_cell"] = rowcol_to_a1(anchor_row + 1, anchor_col + 1)
+            record["merged"] = merge is not None
+
+    def _check_writeback_records(
+        self,
+        records: Iterable[Dict[str, Any]],
+        current_cells: Mapping[Tuple[int, int], Mapping[str, Any]],
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Split records into original-value conflicts and candidates."""
+        conflicts: List[Dict[str, Any]] = []
+        candidates: List[Dict[str, Any]] = []
+
+        for record in records:
+            cell_data = current_cells.get(
+                (record["stored_row"], record["stored_col"]), {}
+            )
+            current = self._writeback_current_value(cell_data, record["field"])
+            record["current"] = current
+            record["current_cell_data"] = cell_data
+
+            if _writeback_values_equal(current, record["expected"], record["field"]):
+                candidates.append(record)
+            else:
+                conflicts.append(
+                    self._writeback_result_entry(
+                        record, reason="original_value_mismatch"
+                    )
+                )
+
+        return conflicts, candidates
+
+    def _plan_writeback_updates(
+        self,
+        candidates: Iterable[Dict[str, Any]],
+        conflicts: List[Dict[str, Any]],
+    ) -> Tuple[
+        List[Dict[str, Any]],
+        List[Dict[str, Any]],
+        Dict[Tuple[int, int], Dict[str, Dict[str, Any]]],
+    ]:
+        """Decide what to write, what is already correct and what to skip."""
+        updates: List[Dict[str, Any]] = []
+        unchanged: List[Dict[str, Any]] = []
+        pending: List[Dict[str, Any]] = []
+
+        for record in candidates:
+            if _writeback_same_value(
+                record["current_cell_data"], record["field"], record["value"]
+            ):
+                unchanged.append(self._writeback_result_entry(record))
+            else:
+                pending.append(record)
+
+        # Two source cells can resolve to the same stored cell when a merged
+        # range is involved. Writing both would make the result depend on
+        # request order, so none of them is written.
+        grouped: Dict[Tuple[int, int, str], List[Dict[str, Any]]] = {}
+        for pending_record in pending:
+            group_key = (
+                pending_record["stored_row"],
+                pending_record["stored_col"],
+                pending_record["field"],
+            )
+            grouped.setdefault(group_key, []).append(pending_record)
+
+        to_write: Dict[Tuple[int, int], Dict[str, Dict[str, Any]]] = {}
+        for group in grouped.values():
+            if len(group) > 1:
+                other_cells = [entry["cell"] for entry in group]
+                for record in group:
+                    conflicts.append(
+                        self._writeback_result_entry(
+                            record,
+                            reason="same_stored_cell",
+                            other_cells=other_cells,
+                        )
+                    )
+                continue
+
+            record = group[0]
+            updates.append(self._writeback_result_entry(record))
+            write_key = (record["stored_row"], record["stored_col"])
+            to_write.setdefault(write_key, {})[record["field"]] = record
+
+        return updates, unchanged, to_write
+
+    @staticmethod
+    def _public_writeback_entry(entry: Mapping[str, Any]) -> Dict[str, Any]:
+        return {key: value for key, value in entry.items() if key != "_index"}
+
+    def _normalize_writeback_updates(
+        self, updates: Iterable[Mapping[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        records: List[Dict[str, Any]] = []
+        seen: set = set()
+
+        for index, update in enumerate(updates):
+            record = self._normalize_writeback_update(index, update)
+            duplicate_key = (record["row"], record["col"], record["field"])
+            if duplicate_key in seen:
+                raise ValueError(
+                    "writeback update {} repeats cell {} field {}".format(
+                        index, record["cell"], record["field"]
+                    )
+                )
+            seen.add(duplicate_key)
+            records.append(record)
+
+        return records
+
+    def _normalize_writeback_update(
+        self, index: int, update: Mapping[str, Any]
+    ) -> Dict[str, Any]:
+        if not isinstance(update, Mapping):
+            raise TypeError("each writeback update must be a mapping")
+
+        missing = [
+            key for key in ("cell", "field", "expected", "value") if key not in update
+        ]
+        if missing:
+            raise ValueError(
+                "writeback update {} is missing required key(s): {}".format(
+                    index, ", ".join(missing)
+                )
+            )
+
+        cell, row, col = self._normalize_writeback_cell(index, update["cell"])
+        field = self._normalize_writeback_field(index, update["field"])
+        expected = update["expected"]
+        value = update["value"]
+
+        self._validate_writeback_change(index, field, expected, value)
+
+        return {
+            "cell": cell,
+            "row": row - 1,
+            "col": col - 1,
+            "field": field,
+            "expected": expected,
+            "value": value,
+            "_index": index,
+        }
+
+    def _normalize_writeback_cell(
+        self, index: int, reference: Any
+    ) -> Tuple[str, int, int]:
+        if not isinstance(reference, str) or not reference.strip():
+            raise ValueError("writeback update {} has an invalid cell".format(index))
+
+        cell = reference.strip()
+        if "!" in cell:
+            title, cell = cell.rsplit("!", 1)
+            title = title.strip().strip("'").replace("''", "'")
+            if title != self.title:
+                raise ValueError(
+                    "writeback update {} targets another sheet: {!r}".format(
+                        index, reference
+                    )
+                )
+
+        cell = cell.strip()
+        if not _WRITEBACK_SINGLE_CELL_RE.match(cell):
+            raise ValueError(
+                "writeback update {} must target a single cell: {!r}".format(
+                    index, reference
+                )
+            )
+
+        try:
+            row, col = a1_to_rowcol(cell.replace("$", ""))
+        except Exception as exc:
+            raise ValueError(
+                "writeback update {} has an invalid cell: {!r}".format(index, reference)
+            ) from exc
+
+        return cell, row, col
+
+    @staticmethod
+    def _validate_writeback_change(
+        index: int, field: str, expected: Any, value: Any
+    ) -> None:
+        if not _is_writeback_scalar(expected):
+            raise TypeError(
+                "writeback update {} has a non-scalar expected value".format(index)
+            )
+
+        if field == "note":
+            if value is not None and not isinstance(value, str):
+                raise TypeError(
+                    "writeback update {}: only strings are allowed for notes".format(
+                        index
+                    )
+                )
+            return
+
+        # Fail before reading anything if the new value cannot be represented
+        # as a stored cell value.
+        _to_user_entered_value(value)
+
+    @staticmethod
+    def _normalize_writeback_field(index: int, field: Any) -> str:
+        if not isinstance(field, str):
+            raise ValueError(
+                "writeback update {} has an invalid field: {!r}".format(index, field)
+            )
+
+        field = field.strip().lower()
+        field = WRITEBACK_FIELD_ALIASES.get(field, field)
+        if field not in WRITEBACK_FIELDS:
+            raise ValueError(
+                "writeback update {} has an unknown field: {!r}".format(index, field)
+            )
+
+        return field
+
+    def _get_writeback_merges(self) -> List[Mapping[str, Any]]:
+        params: ParamsType = {
+            "includeGridData": "false",
+            "fields": "sheets(properties(sheetId),merges)",
+        }
+        response = self.client.spreadsheets_get(self.spreadsheet_id, params)
+        sheets = self._find_writeback_sheets(response, self.id)
+        return list(sheets[0].get("merges", []))
+
+    @staticmethod
+    def _find_writeback_sheets(
+        response: Mapping[str, Any], sheet_id: int
+    ) -> List[Mapping[str, Any]]:
+        sheets = [
+            sheet
+            for sheet in response.get("sheets", [])
+            if sheet.get("properties", {}).get("sheetId") == sheet_id
+        ]
+        if not sheets:
+            raise ValueError(
+                "worksheet id {} was not found in the spreadsheet metadata".format(
+                    sheet_id
+                )
+            )
+        return sheets
+
+    @staticmethod
+    def _writeback_stored_position(
+        row: int,
+        col: int,
+        merges: Iterable[Mapping[str, Any]],
+    ) -> Tuple[int, int, Optional[Mapping[str, Any]]]:
+        for merge in merges:
+            if (
+                merge["startRowIndex"] <= row < merge["endRowIndex"]
+                and merge["startColumnIndex"] <= col < merge["endColumnIndex"]
+            ):
+                return (
+                    merge["startRowIndex"],
+                    merge["startColumnIndex"],
+                    merge,
+                )
+        return row, col, None
+
+    @staticmethod
+    def _writeback_read_ranges(
+        stored_cells: Iterable[Tuple[int, int]],
+    ) -> List[Tuple[int, int, int, int]]:
+        """Group stored cells into row runs to keep request URLs bounded."""
+        rows: Dict[int, List[int]] = {}
+        for row, col in sorted(set(stored_cells)):
+            rows.setdefault(row, []).append(col)
+
+        runs: List[Tuple[int, int, int, int]] = []
+        for row, cols in rows.items():
+            start = previous = cols[0]
+            for col in cols[1:]:
+                if col == previous + 1:
+                    previous = col
+                    continue
+                runs.append((row, start, row, previous))
+                start = previous = col
+            runs.append((row, start, row, previous))
+        return runs
+
+    def _get_writeback_cell_data(
+        self,
+        stored_cells: Iterable[Tuple[int, int]],
+    ) -> Dict[Tuple[int, int], Mapping[str, Any]]:
+        runs = self._writeback_read_ranges(stored_cells)
+        # Keep the number of ranges (and therefore the URL length) bounded
+        # even for large batches.
+        chunks = [runs[index : index + 100] for index in range(0, len(runs), 100)]
+
+        cells: Dict[Tuple[int, int], Mapping[str, Any]] = {}
+        for chunk in chunks:
+            ranges = [
+                absolute_range_name(
+                    self.title,
+                    "{}:{}".format(
+                        rowcol_to_a1(start_row + 1, start_col + 1),
+                        rowcol_to_a1(end_row + 1, end_col + 1),
+                    ),
+                )
+                for start_row, start_col, end_row, end_col in chunk
+            ]
+            params: ParamsType = {
+                "includeGridData": "true",
+                "ranges": ranges,
+                "fields": (
+                    "sheets(properties(sheetId),merges,"
+                    "data(startRow,startColumn,"
+                    "rowData(values(userEnteredValue,note))))"
+                ),
+            }
+            response = self.client.spreadsheets_get(self.spreadsheet_id, params)
+            sheets = self._find_writeback_sheets(response, self.id)
+
+            # The API may return one entry per requested range, so merge all
+            # data blocks belonging to this sheet before looking up the cells.
+            for sheet in sheets:
+                for data in sheet.get("data", []):
+                    start_row = data.get("startRow", 0)
+                    start_col = data.get("startColumn", 0)
+                    for row_offset, row_data in enumerate(data.get("rowData", [])):
+                        for col_offset, cell_data in enumerate(
+                            row_data.get("values", [])
+                        ):
+                            cells[(start_row + row_offset, start_col + col_offset)] = (
+                                cell_data
+                            )
+
+        return cells
+
+    @staticmethod
+    def _writeback_current_value(cell_data: Mapping[str, Any], field: str) -> Any:
+        if field == "note":
+            note = cell_data.get("note", "")
+            return "" if note is None else note
+
+        return _extract_user_entered_value(cell_data)
+
+    @staticmethod
+    def _writeback_result_entry(
+        record: Mapping[str, Any],
+        reason: Optional[str] = None,
+        other_cells: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        entry: Dict[str, Any] = {
+            "cell": record["cell"],
+            "stored_cell": record["stored_cell"],
+            "field": record["field"],
+            "expected": record["expected"],
+            "current": record["current"],
+            "value": record["value"],
+            "_index": record["_index"],
+        }
+        if reason is not None:
+            entry["reason"] = reason
+        if other_cells is not None:
+            entry["other_cells"] = other_cells
+        return entry
+
+    def _build_writeback_requests(
+        self,
+        to_write: Mapping[Tuple[int, int], Mapping[str, Mapping[str, Any]]],
+    ) -> List[Dict[str, Any]]:
+        requests: List[Dict[str, Any]] = []
+        for row, col in sorted(to_write):
+            fields = to_write[(row, col)]
+            cell: Dict[str, Any] = {}
+            field_mask: List[str] = []
+
+            if "value" in fields:
+                cell["userEnteredValue"] = _to_user_entered_value(
+                    fields["value"]["value"]
+                )
+                field_mask.append("userEnteredValue")
+
+            if "note" in fields:
+                note = fields["note"]["value"]
+                cell["note"] = "" if note is None else note
+                field_mask.append("note")
+
+            requests.append(
+                {
+                    "updateCells": {
+                        "range": {
+                            "sheetId": self.id,
+                            "startRowIndex": row,
+                            "endRowIndex": row + 1,
+                            "startColumnIndex": col,
+                            "endColumnIndex": col + 1,
+                        },
+                        "rows": [{"values": [cell]}],
+                        # The mask keeps unselected properties (format, note
+                        # or value) exactly as the user left them.
+                        "fields": ",".join(field_mask),
+                    }
+                }
+            )
+
+        return requests
 
     def batch_format(self, formats: List[CellFormat]) -> JSONResponse:
         """Formats cells in batch.

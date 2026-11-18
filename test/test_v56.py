@@ -3,8 +3,11 @@ Tests for XPT format from SAS versions 5 and 6.
 """
 
 # Standard Library
+import io
 import math
+import re
 import string
+import warnings
 from datetime import datetime
 
 # Community Packages
@@ -554,3 +557,142 @@ class TestEncodeLabels:
         assert library['TEST'].label == ''
         assert example['a'].label is None
         assert library['TEST']['a'].label == ''
+
+
+@pytest.fixture(scope='module')
+def three_member_blob():
+    """
+    Build a three-member library and return its bytes and member offsets.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        members = [
+            xport.Dataset(
+                {'x': list(range(n)), 'c': [f'r{i}' for i in range(n)]},
+                name=name,
+            )
+            for name, n in (('AA', 2), ('BB', 3), ('CC', 4))
+        ]
+        blob = xport.v56.dumps(xport.Library(members))
+    offsets = [m.start() for m in re.finditer(rb'HEADER RECORD\*{7}MEMBER', blob)]
+    return blob, offsets
+
+
+class TestTruncatedDocument:
+    """
+    Verify member-boundary handling for documents cut off mid-import.
+    """
+
+    def test_complete_document_has_receipts(self, three_member_blob):
+        """A clean document is complete and every member gets a receipt."""
+        blob, offsets = three_member_blob
+        partial = xport.v56.load_partial(blob)
+        assert partial.complete
+        assert partial.tail == b''
+        assert list(partial.library) == ['AA', 'BB', 'CC']
+        assert set(partial.receipts) == {'AA', 'BB', 'CC'}
+        receipt = partial.receipts['AA']
+        assert receipt.start_offset == offsets[0]
+        assert receipt.end_offset == offsets[1]
+        assert receipt.n_observations == 2
+        assert partial.library.is_confirmed('AA')
+
+    def test_header_truncation_keeps_only_complete_members(self, three_member_blob):
+        """A member cut in its header is not admitted; earlier members stay."""
+        blob, offsets = three_member_blob
+        cut = offsets[2] + 40
+        partial = xport.v56.load_partial(blob[:cut])
+        assert not partial.complete
+        assert list(partial.library) == ['AA', 'BB']
+        assert set(partial.receipts) == {'AA', 'BB'}
+        assert partial.resume_offset == offsets[2]
+        assert partial.tail == blob[offsets[2]:cut]
+        assert 'CC' not in partial.library
+
+    def test_loads_raises_instead_of_silent_success(self, three_member_blob):
+        """The strict loader must not mark a truncated library successful."""
+        blob, offsets = three_member_blob
+        with pytest.raises(xport.v56.TruncatedDocumentError) as excinfo:
+            xport.v56.loads(blob[:offsets[2] + 40])
+        error = excinfo.value
+        assert list(error.receipts) == ['AA', 'BB']
+        assert error.resume_offset == offsets[2]
+
+    def test_observation_truncation_is_not_padding(self, three_member_blob):
+        """A partial observation stays in the tail, never becomes rows."""
+        blob, offsets = three_member_blob
+        obs_start = blob.index(b'HEADER RECORD*******OBS', offsets[2]) + 80
+        partial = xport.v56.load_partial(blob[:obs_start + 7])
+        assert not partial.complete
+        assert list(partial.library) == ['AA', 'BB']
+        assert partial.confirmed_observations == 0
+        assert partial.tail == blob[obs_start:obs_start + 7]
+        assert partial.resume_offset == obs_start
+
+    def test_partial_observations_are_counted_but_not_confirmed(self, three_member_blob):
+        """Full rows before the cut are counted; the member stays provisional."""
+        blob, offsets = three_member_blob
+        obs_start = blob.index(b'HEADER RECORD*******OBS', offsets[1]) + 80
+        stride = 10
+        partial = xport.v56.load_partial(blob[:obs_start + 2 * stride + 3])
+        assert list(partial.library) == ['AA']
+        assert partial.confirmed_observations == 2
+        assert partial.incomplete_member is not None
+        assert partial.incomplete_member.name == 'BB'
+        assert len(partial.tail) == 3
+
+    def test_resume_from_header_cut(self, three_member_blob):
+        """Resuming continues at the proven offset without re-registering members."""
+        blob, offsets = three_member_blob
+        partial = xport.v56.load_partial(blob[:offsets[2] + 40])
+        resumed = xport.v56.resume(partial, blob)
+        assert resumed.complete
+        assert list(resumed.library) == ['AA', 'BB', 'CC']
+        assert len(resumed.library) == 3
+        assert len(resumed.library['CC']) == 4
+        assert set(resumed.receipts) == {'AA', 'BB', 'CC'}
+
+    def test_resume_from_observation_cut(self, three_member_blob):
+        """Resuming after an observation cut rebuilds the full final member."""
+        blob, offsets = three_member_blob
+        obs_start = blob.index(b'HEADER RECORD*******OBS', offsets[2]) + 80
+        partial = xport.v56.load_partial(blob[:obs_start + 7])
+        resumed = xport.v56.resume(partial, blob)
+        assert resumed.complete
+        assert len(resumed.library['CC']) == 4
+        assert len(resumed.library) == 3
+
+    def test_incremental_resume_never_treats_padding_as_observation(self, three_member_blob):
+        """Several appends converge on the same rows, with no padding rows."""
+        blob, offsets = three_member_blob
+        obs_start = blob.index(b'HEADER RECORD*******OBS', offsets[1]) + 80
+        stride = 10
+        partial = xport.v56.load_partial(blob[:obs_start + 2 * stride + 3])
+        midpoint = xport.v56.resume(partial, blob[:obs_start + 4 * stride])
+        assert not midpoint.complete
+        assert list(midpoint.library) == ['AA']
+        final = xport.v56.resume(midpoint, blob)
+        assert final.complete
+        assert [len(final.library[name]) for name in ('AA', 'BB', 'CC')] == [2, 3, 4]
+
+    def test_load_partial_accepts_file_object(self, three_member_blob):
+        """The partial loader works on bytes-mode file objects, like load()."""
+        blob, _ = three_member_blob
+        partial = xport.v56.load_partial(io.BytesIO(blob))
+        assert partial.complete
+        assert list(partial.library) == ['AA', 'BB', 'CC']
+
+    def test_marker_bytes_in_data_do_not_split_member(self):
+        """Observation text that looks like a header must not create a boundary."""
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            weird = xport.Dataset(
+                {'note': [xport.v56.MemberHeader.start_marker.decode('ascii'), 'x']},
+                name='W',
+            )
+            other = xport.Dataset({'v': [1, 2]}, name='Z')
+            blob = xport.v56.dumps(xport.Library([weird, other]))
+        partial = xport.v56.load_partial(blob)
+        assert partial.complete
+        assert list(partial.library) == ['W', 'Z']
+

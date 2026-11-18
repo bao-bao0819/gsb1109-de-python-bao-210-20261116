@@ -3,6 +3,7 @@ Read and write SAS XPORT/XPT-format files.
 """
 
 # Standard Library
+import dataclasses
 import enum
 import logging
 import re
@@ -24,8 +25,32 @@ LOG = logging.getLogger(__name__)
 __all__ = [
     'Library',
     'Member',
+    'MemberReceipt',
     'NaN',
 ]
+
+
+@dataclasses.dataclass(frozen=True)
+class MemberReceipt:
+    """
+    Proof that a library member was received completely.
+
+    A receipt is issued only when the whole member boundary was observed,
+    including every variable descriptor (namestr) and an integer number of
+    observations with no undetermined trailing bytes.  ``end_offset`` is the
+    byte position immediately after the member's confirmed data, which is
+    also the position where parsing the following member must begin.
+    """
+
+    name: str
+    start_offset: int
+    end_offset: int
+    n_observations: int
+    n_variables: int
+
+    def __contains__(self, offset):
+        """Whether a byte offset lies within this member's confirmed span."""
+        return self.start_offset <= offset < self.end_offset
 
 
 class SpecialMissingValue(float):
@@ -636,8 +661,10 @@ class Library(MutableMapping):
             members = {getattr(members, 'name', None): members}
 
         self._members = {}
+        self.receipts = {}
         if isinstance(members, Library):
             self._members = members._members
+            self.receipts = dict(getattr(members, 'receipts', {}))
             self.created = members.created
             self.modified = members.modified
             self.sas_os = members.sas_os
@@ -650,6 +677,18 @@ class Library(MutableMapping):
                 if dataset.name in self:
                     warnings.warn(f'More than one dataset named {dataset.name!r}')
                 self[dataset.name] = dataset
+
+    def confirm(self, receipt):
+        """
+        Record a :class:`MemberReceipt` for a fully received member.
+        """
+        self.receipts[receipt.name] = receipt
+
+    def is_confirmed(self, name):
+        """
+        Whether a member was received with a complete member boundary.
+        """
+        return name in self.receipts
 
     def __repr__(self):
         """

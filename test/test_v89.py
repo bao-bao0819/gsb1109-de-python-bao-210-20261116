@@ -4,6 +4,8 @@ Tests for XPT format from SAS versions 8 and 9.
 
 # Standard Library
 import datetime
+import re
+import warnings
 
 # Community Packages
 import pytest
@@ -295,3 +297,53 @@ class TestEncodeLabels:
         example = xport.Dataset({'a': xport.Variable()}, name='TEST')
         bytestring = xport.v89.dumps(example)
         assert b'*******LABELV8 HEADER RECORD!!!!!!!' not in bytestring
+
+
+@pytest.fixture(scope='module')
+def two_member_v89_blob():
+    """
+    Build a two-member v8 library and return its bytes and member offsets.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        members = [
+            xport.Dataset({'v': list(range(n))}, name=name)
+            for name, n in (('ONE', 2), ('TWO', 3))
+        ]
+        blob = xport.v89.dumps(xport.Library(members))
+    offsets = [m.start() for m in re.finditer(rb'HEADER RECORD\*{7}MEMBV8', blob)]
+    return blob, offsets
+
+
+class TestTruncatedDocument:
+    """
+    Verify member-boundary handling for truncated v8/9 documents.
+    """
+
+    def test_header_truncation_and_resume(self, two_member_v89_blob):
+        """A cut in the second member header keeps only the first member."""
+        blob, offsets = two_member_v89_blob
+        cut = offsets[1] + 30
+        partial = xport.v89.load_partial(blob[:cut])
+        assert not partial.complete
+        assert list(partial.library) == ['ONE']
+        assert list(partial.receipts) == ['ONE']
+        assert partial.resume_offset == offsets[1]
+        assert partial.tail == blob[offsets[1]:cut]
+
+        with pytest.raises(xport.v56.TruncatedDocumentError):
+            xport.v89.loads(blob[:cut])
+
+        resumed = xport.v89.resume(partial, blob)
+        assert resumed.complete
+        assert list(resumed.library) == ['ONE', 'TWO']
+        assert len(resumed.library['TWO']) == 3
+        assert len(resumed.library) == 2
+
+    def test_clean_document_is_complete(self, two_member_v89_blob):
+        """A full v8 document parses completely with receipts."""
+        blob, offsets = two_member_v89_blob
+        partial = xport.v89.load_partial(blob)
+        assert partial.complete
+        assert list(partial.library) == ['ONE', 'TWO']
+        assert set(partial.receipts) == {'ONE', 'TWO'}

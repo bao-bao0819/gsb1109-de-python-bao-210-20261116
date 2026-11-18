@@ -24,6 +24,8 @@ from xport.v56 import _encoding, strftime, text_encode
 __all__ = [
     'load',
     'loads',
+    'load_partial',
+    'resume',
     'dump',
     'dumps',
     '_encoding',
@@ -43,6 +45,9 @@ class Library(xport.v56.Library):
         re.DOTALL,
     )
 
+    member_header_class = None  # Set after MemberHeader is defined below.
+    member_class = None  # Set after Member is defined below.
+
     @classmethod
     def from_bytes(cls, bytestring):
         """
@@ -58,6 +63,12 @@ class MemberHeader(xport.v56.MemberHeader):
     """
     Dataset metadata from a SAS Version 8 or 9 Transport (XPORT) file.
     """
+
+    start_marker = b'HEADER RECORD*******MEMBV8  HEADER RECORD'
+
+    first_record_pattern = re.compile(
+        rb'HEADER RECORD\*{7}MEMBV8  HEADER RECORD\!{7}0{17}160{8}140  '
+    )
 
     pattern = re.compile(
         rb'HEADER RECORD\*{7}MEMBV8  HEADER RECORD\!{7}0{17}160{8}(?P<descriptor_size>140)  '
@@ -188,6 +199,10 @@ class Member(xport.v56.Member):
         return super()._bytes(MemberHeader=MemberHeader)
 
 
+Library.member_header_class = MemberHeader
+Library.member_class = Member
+
+
 class Namestr(xport.v56.Namestr):
     """
     Variable metadata from a SAS Version 8 or 9 Transport (XPORT) file.
@@ -301,6 +316,43 @@ def loads(bytestring):
         >>> library = loads(bytestring)
     """
     return Library.from_bytes(bytestring)
+
+
+def load_partial(source):
+    """
+    Read a possibly truncated v8/9 document without marking it all successful.
+
+    See :func:`xport.v56.load_partial` for the meaning of the returned
+    :class:`xport.v56.PartialLoad`, its member receipts, and its tail.
+    """
+    if hasattr(source, 'read'):
+        try:
+            bytestring = source.read()
+        except UnicodeDecodeError:
+            raise TypeError(
+                f'Expected a BufferedReader in bytes-mode, got {type(source).__name__}'
+            )
+    else:
+        bytestring = source
+    return Library.parse_partial(bytestring)
+
+
+def resume(partial, document):
+    """
+    Continue parsing after more bytes were appended to a truncated document.
+
+    Mirrors :func:`xport.v56.resume`: parsing restarts at the proven
+    boundary so confirmed members are not registered again and padding is not
+    read as a new observation.
+    """
+    start = partial.incomplete_member_start
+    if start is None:
+        start = partial.resume_offset
+    return Library.parse_partial(
+        document,
+        library=partial.library,
+        start=start,
+    )
 
 
 def dump(library, fp):

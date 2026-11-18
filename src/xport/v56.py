@@ -30,6 +30,10 @@ __all__ = [
     'loads',
     'dump',
     'dumps',
+    'load_partial',
+    'resume',
+    'PartialLoad',
+    'TruncatedDocumentError',
     '_encoding',
 ]
 
@@ -65,6 +69,103 @@ class Overflow(ArithmeticError):
 
 class Underflow(ArithmeticError):
     """Number too small to express, rounds to zero."""
+
+
+class PartialLoad:
+    """
+    Outcome of reading a document that may end in a truncated member.
+
+    ``library`` holds only the members whose full boundary was confirmed;
+    each one has a matching :class:`xport.MemberReceipt` in ``receipts``.
+    The undetermined ``tail`` is never folded into a member or mistaken for
+    observations.  ``resume_offset`` is the byte position of the first
+    unconfirmed byte, and ``prefix`` is every confirmed byte up to that
+    position, allowing a later :func:`resume` to continue from proof.
+    """
+
+    def __init__(
+        self,
+        library,
+        receipts,
+        tail,
+        resume_offset,
+        prefix,
+        incomplete_member=None,
+        incomplete_header=None,
+        incomplete_member_start=None,
+        confirmed_observations=0,
+        reason='',
+        is_complete=None,
+    ):
+        """
+        Bundle the confirmed library with its undetermined tail.
+
+        ``is_complete`` defaults to "complete only when there is no tail",
+        but the parser passes an explicit value because a cut can land on an
+        observation or record boundary without any stray trailing bytes.
+        """
+        self.library = library
+        self.receipts = receipts
+        self.tail = tail
+        self.resume_offset = resume_offset
+        self.prefix = prefix
+        self.incomplete_member = incomplete_member
+        self.incomplete_header = incomplete_header
+        self.incomplete_member_start = incomplete_member_start
+        self.confirmed_observations = confirmed_observations
+        self.reason = reason
+        self._is_complete = not tail if is_complete is None else is_complete
+
+    @property
+    def complete(self):
+        """
+        Whether the document ended cleanly, with no undetermined bytes.
+        """
+        return self._is_complete
+
+    def __repr__(self):
+        """
+        REPL-format string.
+        """
+        status = 'complete' if self.complete else f'truncated at byte {self.resume_offset}'
+        return f'<PartialLoad {status}, members={list(self.receipts)}>'
+
+
+class TruncatedDocumentError(ValueError):
+    """
+    An XPORT document ends in the middle of a member.
+
+    The document cannot be marked as a complete, successful read because
+    at least one member is missing bytes.  Everything that was confirmed --
+    the received members, their receipts, and the undetermined tail -- is
+    available on the wrapped :class:`PartialLoad` as :attr:`partial`.
+    """
+
+    def __init__(self, partial):
+        """
+        Wrap a :class:`PartialLoad` marked as incomplete.
+        """
+        self.partial = partial
+        name = getattr(partial.incomplete_header, 'name', None) or 'a member'
+        super().__init__(
+            f'Truncated while reading {name!r} at byte {partial.resume_offset}: '
+            f'{len(partial.tail)} undetermined byte(s); {partial.reason}'
+        )
+
+    @property
+    def tail(self):
+        """The undetermined trailing bytes."""
+        return self.partial.tail
+
+    @property
+    def resume_offset(self):
+        """Byte position of the first unconfirmed byte."""
+        return self.partial.resume_offset
+
+    @property
+    def receipts(self):
+        """Receipts for the fully received members."""
+        return self.partial.receipts
 
 
 class Namestr:
@@ -291,6 +392,77 @@ class MemberHeader(Mapping):
     #       HEADER RECORD*******OBS HEADER RECORD!!!!!!!
     #       000000000000000000000000 000000
 
+    # Literal opening of a member's first 80-byte header record.  Member
+    # headers always begin on an 80-byte boundary, so this marker -- unlike
+    # the full ``pattern`` -- can locate the next member even when the
+    # current document cuts off inside that member's header.
+    start_marker = b'HEADER RECORD*******MEMBER  HEADER RECORD'
+
+    # The member header's first record is exactly one 80-byte record.  A
+    # complete copy of this record proves a member boundary even when later
+    # records of the same member (namestrs, OBS) are truncated.  Requiring
+    # the full record -- including its numeric suffix -- makes accidental
+    # matches inside observation data effectively impossible.
+    first_record_pattern = re.compile(
+        rb'HEADER RECORD\*{7}MEMBER  HEADER RECORD\!{7}0{17}160{8}(?:140|136)  '
+    )
+
+    # A truncated final record must share at least this much of the marker.
+    # The prefix includes ``MEMBER`` so it cannot match the other record
+    # types (NAMESTR, OBS, DSCRPTR, LIBRARY), which share only the shorter
+    # ``HEADER RECORD*******`` opening.
+    minimum_marker_prefix = len(b'HEADER RECORD*******MEMBER')
+
+    @classmethod
+    def next_member_start(cls, mview, search_from, end=None):
+        """
+        Find the 80-byte-aligned start of the next member header.
+
+        Returns the offset, or ``None`` when no later member begins within
+        the view.  Two cases are recognized.  A member header truncated by
+        EOF can only begin in the final, incomplete 80-byte record, which is
+        checked with the distinctive ``MEMBER`` marker prefix.  Every other
+        boundary must be a complete first header record on an 80-byte
+        boundary, so the marker appearing inside observation data is ignored.
+        """
+        if end is None:
+            end = len(mview)
+        marker = cls.start_marker
+
+        # Case 1: the document ended inside the next member's header.  That
+        # header can only start on the final, short 80-byte record.
+        fragment_boundary = None
+        if end % 80:
+            aligned = (end // 80) * 80
+            if aligned >= search_from:
+                fragment = bytes(mview[aligned:end])
+                shared = 0
+                for a, b in zip(fragment, marker):
+                    if a != b:
+                        break
+                    shared += 1
+                if shared >= cls.minimum_marker_prefix:
+                    fragment_boundary = aligned
+
+        # Case 2: a complete member header.  Require a full first record on
+        # an 80-byte boundary; observation text cannot reproduce that record.
+        complete_boundary = None
+        marker_pattern = re.compile(re.escape(marker))
+        candidate = search_from
+        while True:
+            match = marker_pattern.search(mview, candidate, end)
+            if match is None:
+                break
+            start = match.start()
+            if start % 80 == 0 and start + 80 <= end:
+                if cls.first_record_pattern.match(mview[start:start + 80]):
+                    complete_boundary = start
+                    break
+            candidate = start + 1
+
+        candidates = [b for b in (complete_boundary, fragment_boundary) if b is not None]
+        return min(candidates) if candidates else None
+
     pattern = re.compile(
         # Header line 1
         rb'HEADER RECORD\*{7}MEMBER  HEADER RECORD\!{7}0{17}'
@@ -461,6 +633,36 @@ HEADER RECORD{'*' * 7}OBS     HEADER RECORD{'!' * 7}{'0' * 30}  \
         }
 
 
+class ParseStats:
+    """
+    Bookkeeping for one member's observation block.
+
+    ``confirmed_end_offset`` is the byte offset, relative to the start of
+    the observation block, of the first byte not consumed by a confirmed
+    full observation.  ``trailing_bytes`` counts the undetermined bytes at
+    the end of the block; zero means the block ended cleanly on padding or
+    at a member boundary.
+    """
+
+    def __init__(self, n_observations=0, confirmed_end_offset=0, trailing_bytes=0):
+        """
+        Initialize empty parse statistics.
+        """
+        self.n_observations = n_observations
+        self.confirmed_end_offset = confirmed_end_offset
+        self.trailing_bytes = trailing_bytes
+
+    def __repr__(self):
+        """
+        REPL-format string.
+        """
+        return (
+            f'ParseStats(n_observations={self.n_observations}, '
+            f'confirmed_end_offset={self.confirmed_end_offset}, '
+            f'trailing_bytes={self.trailing_bytes})'
+        )
+
+
 class Observations(Iterator):
     """
     Data from a SAS Version 5 or 6 Transport (XPORT) file.
@@ -473,12 +675,13 @@ class Observations(Iterator):
     #    There is ASCII blank padding at the end of the last record if
     #    necessary. There is no special trailing record.
 
-    def __init__(self, observations, header=None):
+    def __init__(self, observations, header=None, stats=None):
         """
         Initialize from an iterable of observations.
         """
         self.it = iter(observations)
         self.header = header
+        self.stats = stats if stats is not None else ParseStats()
 
     def __next__(self):
         """
@@ -518,6 +721,9 @@ class Observations(Iterator):
             fmt = ''.join(f'{x}s' for x in sizes)
             stride = sum(sizes)
             if stride == 0:
+                stats.n_observations = 0
+                stats.confirmed_end_offset = 0
+                stats.trailing_bytes = 0
                 return
             # TODO: The SAS Transport v5 specification says the sentinel
             #       character is b' ', but people report b'\x00' is used
@@ -525,17 +731,32 @@ class Observations(Iterator):
             #       with all zeros indistiguishable from the sentinel.
             sentinel = b' ' * stride
             mview = memoryview(bytestring)
-            for i in range(0, len(mview), stride):
-                chunk = mview[i:i + stride]
-                if len(chunk) != stride or chunk == sentinel:
-                    return
+            n_observations = 0
+            offset = 0
+            while offset < len(mview):
+                chunk = mview[offset:offset + stride]
+                if len(chunk) != stride:
+                    break  # Partial observation: handled after the loop.
+                if chunk == sentinel:
+                    break  # Blank padding marks the end of observations.
                 # TODO: If only characters and the last row is all empty
                 #       or spaces, it's indistinguishable from padding.
                 #       https://github.com/selik/xport/issues/46
                 tokens = struct.unpack(fmt, chunk)
                 yield tuple(f(v) for f, v in zip(converters, tokens))
+                n_observations += 1
+                offset += stride
+            # Everything after the last full observation must be blank
+            # ASCII padding that fills the final 80-byte record.  Any
+            # non-blank byte is an undetermined, potentially truncated tail.
+            remainder = bytes(mview[offset:])
+            if remainder.strip(b' '):
+                stats.trailing_bytes = len(remainder)
+            stats.n_observations = n_observations
+            stats.confirmed_end_offset = offset
 
-        return cls(iterator(), header)
+        stats = ParseStats()
+        return cls(iterator(), header, stats=stats)
 
     def to_bytes(self):
         """
@@ -607,32 +828,34 @@ class Member(xport.Dataset):
     def from_bytes(cls, bytestring, MemberHeader=MemberHeader, Observations=Observations):
         """
         Decode the first ``Member`` from an XPORT-format byte string.
+
+        The member's :class:`ParseStats` are attached as the private
+        ``_parse_stats`` attribute so the library parser can tell a complete
+        member boundary from an undetermined truncated tail.
         """
         LOG.debug(f'Decode {type(cls).__name__}')
         mview = memoryview(bytestring)
-        matches = MemberHeader.pattern.finditer(mview)
-
-        try:
-            mo = next(matches)
-        except StopIteration:
+        header_match = MemberHeader.pattern.match(mview)
+        if header_match is None:
             raise ValueError('No member header found')
-        i = mo.end(0)
+        i = header_match.end(0)
 
-        try:
-            mo = next(matches)
-        except StopIteration:
-            j = None
-        else:
-            j = mo.start(0)
+        # When decoding a standalone document, bound this member's
+        # observations at the 80-byte-aligned start of the following member.
+        # The library parser already passes an exact single-member region.
+        boundary = MemberHeader.next_member_start(mview, i)
 
         header = MemberHeader.from_bytes(mview[:i])
-        observations = Observations.from_bytes(mview[i:j], header)
+        observations = Observations.from_bytes(mview[i:boundary], header)
 
         # This awkwardness works around Pandas subclasses misbehaving.
         # ``DataFrame.append`` discards subclass attributes.  Lame.
         head = cls.from_header(header)
         data = Member(pd.DataFrame.from_records(observations, columns=list(header)))
         data.copy_metadata(head)
+        # ``from_records`` exhausts the iterator, which fills in the stats.
+        object.__setattr__(data, '_parse_stats', observations.stats)
+        object.__setattr__(data, '_member_header', header)
         LOG.info(f'Decoded XPORT dataset {data.name!r}')
         LOG.debug('%s', data)
         return data
@@ -716,31 +939,153 @@ class Library(xport.Library):
         re.DOTALL,
     )
 
+    member_header_class = MemberHeader
+    member_class = Member
+
     @classmethod
-    def from_bytes(cls, bytestring, MemberHeader=MemberHeader, Member=Member):
+    def parse_partial(
+        cls,
+        bytestring,
+        MemberHeader=None,
+        Member=None,
+        library=None,
+        start=None,
+    ):
         """
-        Parse a SAS XPORT document from a byte string.
+        Confirm member boundaries one at a time.
+
+        Members are admitted to the returned :class:`PartialLoad` only when
+        their whole header, every namestr, and an integer number of
+        observations parse cleanly.  A member whose header is incomplete or
+        whose observation block has an undetermined trailing fragment is
+        kept out of the confirmed library and reported via the result's
+        ``tail`` instead of marking the whole document a success.
+
+        When resuming, pass the already-confirmed ``library`` and a ``start``
+        offset at the first unconfirmed member so confirmed members are not
+        registered a second time.
         """
+        if MemberHeader is None:
+            MemberHeader = cls.member_header_class
+        if Member is None:
+            Member = cls.member_class
         LOG.debug(f'Decoding {cls.__name__} from {len(bytestring)} bytes')
         mview = memoryview(bytestring)
         mo = cls.pattern.match(mview)
         if mo is None:
             lines = [mview[i * 80:(i + 1) * 80].tobytes() for i in range(8)]
             LOG.error('Document begins with' + '\n%s' * len(lines), *lines)
-            raise ValueError('Document does not match SAS Version 5 or 6 Transport (XPORT) format')
+            raise ValueError(
+                'Document does not match SAS Version 5 or 6 Transport (XPORT) format'
+            )
 
-        matches = MemberHeader.pattern.finditer(mview)
-        indices = [m.start(0) for m in matches] + [None]
-        chunks = (mview[i:j] for i, j in zip(indices, indices[1:]))
-        self = cls(
-            members=map(Member.from_bytes, chunks),
-            created=strptime(mo['created']),
-            modified=strptime(mo['modified']),
-            sas_os=mo['os'].strip(b'\x00').decode(TEXT_METADATA_ENCODING).strip(),
-            sas_version=mo['version'].strip(b'\x00').decode(TEXT_METADATA_ENCODING).strip(),
+        if library is None:
+            library = cls(
+                members=(),
+                created=strptime(mo['created']),
+                modified=strptime(mo['modified']),
+                sas_os=mo['os'].strip(b'\x00').decode(TEXT_METADATA_ENCODING).strip(),
+                sas_version=mo['version'].strip(b'\x00').decode(TEXT_METADATA_ENCODING).strip(),
+            )
+        receipts = dict(getattr(library, 'receipts', {}))
+
+        pos = mo.start('members') if start is None else start
+        end = len(mview)
+        while pos < end:
+            header_match = MemberHeader.pattern.match(mview, pos, end)
+            if header_match is None:
+                tail = bytes(mview[pos:])
+                # Blank 80-byte record padding after the last member is not
+                # a new observation or member; only accept it as clean end.
+                if tail and not tail.strip(b' '):
+                    pos = end
+                    break
+                return PartialLoad(
+                    library=library,
+                    receipts=receipts,
+                    tail=tail,
+                    resume_offset=pos,
+                    prefix=bytes(mview[:pos]),
+                    incomplete_member_start=pos,
+                    reason='incomplete member header',
+                )
+
+            member_start = pos
+            obs_start = header_match.end(0)
+            # Locate the next member by its 80-byte-aligned start marker,
+            # not by the full header pattern, so a truncated later header
+            # still bounds this member's observations correctly.
+            next_start = MemberHeader.next_member_start(mview, obs_start, end)
+            is_last_member = next_start is None
+            boundary = next_start if next_start is not None else end
+
+            member = Member.from_bytes(mview[member_start:boundary])
+            stats = object.__getattribute__(member, '_parse_stats')
+            # A valid member's observation block (observations plus blank
+            # record padding) always fills whole 80-byte records.  A final
+            # member whose block is not 80-aligned was cut mid-record, even
+            # if the cut happens to leave no non-blank trailing byte.
+            misaligned = (boundary - obs_start) % 80 != 0
+            if stats.trailing_bytes or (is_last_member and misaligned):
+                confirmed_end = obs_start + stats.confirmed_end_offset
+                return PartialLoad(
+                    library=library,
+                    receipts=receipts,
+                    tail=bytes(mview[confirmed_end:]),
+                    resume_offset=confirmed_end,
+                    prefix=bytes(mview[:confirmed_end]),
+                    incomplete_member=member,
+                    incomplete_header=object.__getattribute__(member, '_member_header'),
+                    incomplete_member_start=member_start,
+                    confirmed_observations=stats.n_observations,
+                    is_complete=False,
+                    reason=(
+                        f'{stats.trailing_bytes} trailing byte(s) do not form '
+                        f'a complete observation'
+                        if stats.trailing_bytes
+                        else 'observation block ends before an 80-byte record boundary'
+                    ),
+                )
+
+            receipt = xport.MemberReceipt(
+                name=member.name,
+                start_offset=member_start,
+                end_offset=boundary,
+                n_observations=stats.n_observations,
+                n_variables=len(object.__getattribute__(member, '_member_header')),
+            )
+            if member.name not in library:
+                library[member.name] = member
+            library.confirm(receipt)
+            receipts[member.name] = receipt
+            pos = boundary
+
+        return PartialLoad(
+            library=library,
+            receipts=receipts,
+            tail=b'',
+            resume_offset=pos,
+            prefix=bytes(mview[:pos]),
         )
-        LOG.info(f'Decoded {self}')
-        return self
+
+    @classmethod
+    def from_bytes(cls, bytestring, MemberHeader=None, Member=None):
+        """
+        Parse a complete SAS XPORT document from a byte string.
+
+        Raises :class:`TruncatedDocumentError` when the document ends inside
+        a member, rather than silently dropping the incomplete member.  Use
+        :func:`load_partial` to receive the confirmed members and tail.
+        """
+        partial = cls.parse_partial(
+            bytestring,
+            MemberHeader=MemberHeader,
+            Member=Member,
+        )
+        if not partial.complete:
+            raise TruncatedDocumentError(partial)
+        LOG.info(f'Decoded {partial.library}')
+        return partial.library
 
     template = f'''\
 HEADER RECORD{'*' * 7}LIBRARY HEADER RECORD{'!' * 7}{'0' * 30}  \
@@ -966,6 +1311,49 @@ def loads(bytestring):
         >>> library = loads(bytestring)
     """
     return Library.from_bytes(bytestring)
+
+
+def load_partial(source):
+    """
+    Read a possibly truncated document without marking it all successful.
+
+    ``source`` is either a bytes string or a bytes-mode file-like object.
+    Always returns a :class:`PartialLoad`: fully received members appear in
+    ``partial.library`` with receipts, while the undetermined trailing bytes
+    stay in ``partial.tail`` and are never turned into observations.  Feed a
+    grown document to :func:`resume` to continue from the proven position.
+    """
+    if hasattr(source, 'read'):
+        try:
+            bytestring = source.read()
+        except UnicodeDecodeError:
+            raise TypeError(
+                f'Expected a BufferedReader in bytes-mode, got {type(source).__name__}'
+            )
+    else:
+        bytestring = source
+    return Library.parse_partial(bytestring)
+
+
+def resume(partial, document):
+    """
+    Continue parsing after more bytes were appended to a truncated document.
+
+    ``document`` is the full, grown byte buffer (the previously confirmed
+    prefix plus the newly received bytes).  Parsing restarts at the proven
+    boundary of the first unconfirmed member, so already-received members
+    are not registered again and blank padding is not read as a new
+    observation.  Returns a fresh :class:`PartialLoad`.
+    """
+    start = partial.incomplete_member_start
+    if start is None:
+        start = partial.resume_offset
+    library_cls = type(partial.library)
+    return library_cls.parse_partial(
+        document,
+        library=partial.library,
+        start=start,
+    )
 
 
 def dump(library, fp):

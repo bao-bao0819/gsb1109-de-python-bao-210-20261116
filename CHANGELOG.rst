@@ -1,6 +1,15 @@
 Change Log
 ==========
 
+v3.7.0, unreleased
+  Add partial loading for truncated Transport files.  ``load_partial``
+  returns the fully received members with per-member receipts and keeps the
+  undetermined trailing bytes separate instead of marking the whole library
+  successful; ``resume`` continues from the proven member boundary when more
+  bytes arrive, without re-registering members or reading padding as
+  observations.  The strict ``load``/``loads`` now raise
+  ``TruncatedDocumentError`` on a document cut off inside a member.
+
 v0.1.0, 2012-05-02
   Initial release.
 

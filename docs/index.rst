@@ -17,6 +17,7 @@ Welcome to VCFPy's documentation!
     api_parser
     api_bgzf
     api_tabix
+    api_utils
 
 VCFPy is a Python 3 library with good support for both reading and writing VCF files.
 The documentation is split into three parts (accessible through the navigation on the left):
@@ -94,6 +95,7 @@ What's the aim?
     api_io
     api_exceptions
     api_record
+    api_utils
 
 .. toctree::
     :caption: Project Info

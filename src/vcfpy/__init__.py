@@ -51,6 +51,7 @@ from vcfpy.record import (
     SymbolicAllele,
     UnparsedCall,
 )
+from vcfpy.utils import recompute_ac_an
 from vcfpy.version import __version__
 from vcfpy.writer import Writer
 
@@ -75,6 +76,7 @@ __all__ = [
     "SamplesInfos",
     "header_without_lines",
     "Reader",
+    "recompute_ac_an",
     "HeaderLine",
     "Writer",
     "Record",

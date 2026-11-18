@@ -4,6 +4,12 @@ CHANGES
 0.1b16 (unreleased)
 -------------------
 
+- Preserve incomplete record hierarchies on a level jump instead of
+  failing or fabricating a parent. Missing ancestors are represented by
+  explicit ``MissingAncestor`` placeholders (rendered as
+  ``MissingAncestorRecord`` with ``missing="true"``), affected records are
+  flagged with ``parent_missing``, and proven parent/sister edges plus the
+  original record provenance are left untouched.
 - [CVE-2023-0286] Depends on cryptography >= 40.0.1
 - [CVE-2022-2309] Depends on lxml >= 4.9,2
 

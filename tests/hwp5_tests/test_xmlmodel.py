@@ -20,6 +20,7 @@ from hwp5.binmodel import ParaText
 from hwp5.binmodel import SectionDef
 from hwp5.tagids import HWPTAG_PARA_LINE_SEG
 from hwp5.treeop import STARTEVENT, ENDEVENT
+from hwp5.recordstream import Record
 from hwp5.utils import cached_property
 from hwp5.xmlmodel import DocInfo
 from hwp5.xmlmodel import Hwp5File
@@ -328,3 +329,52 @@ class TestEmbedBinData(TestBase):
                   (ENDEVENT, (BinData, bindata, dict()))]
         events = list(embed_bindata(events, self.hwp5file_bin['BinData']))
         self.assertTrue('<text>' in bindata['bindata'])
+
+
+class TestLevelJumpExport(TestCase):
+
+    def make_models(self, levels):
+        records = [Record(tagid=900 + seqno, level=level, payload=b'',
+                          seqno=seqno)
+                   for seqno, level in enumerate(levels)]
+        return binmodel.parse_models(dict(version=(5, 0, 0, 0)), records)
+
+    def render(self, models):
+        from hwp5.xmlformat import xmlevents_to_textchunks
+        modelevents = xmlmodel.prefix_binmodels_with_event(dict(), models)
+        xmlevents = xmlmodel.modelevents_to_xmlevents(modelevents)
+        return ''.join(xmlevents_to_textchunks(xmlevents))
+
+    def test_missing_ancestor_is_marked_and_sibling_stays_separate(self):
+        from xml.etree import ElementTree
+        models = list(self.make_models([1, 3, 1, 2]))
+        text = self.render(models)
+
+        self.assertIn('<MissingAncestorRecord missing="true" level="2">',
+                      text)
+
+        root = ElementTree.fromstring('<root>' + text + '</root>')
+        top = list(root)
+
+        # two top-level records: a1 (with the gap inside) and b1 (sibling)
+        self.assertEqual(2, len(top))
+        first, second = top
+        self.assertEqual('UnknownTagModel', first.tag)
+        self.assertEqual('UnknownTagModel', second.tag)
+
+        placeholder = list(first)
+        self.assertEqual(1, len(placeholder))
+        self.assertEqual('MissingAncestorRecord', placeholder[0].tag)
+        self.assertEqual('true', placeholder[0].get('missing'))
+        self.assertEqual('2', placeholder[0].get('level'))
+
+        # the orphan lives under the placeholder, the later sibling does
+        # not get captured into the incomplete branch
+        self.assertEqual(1, len(list(placeholder[0])))
+        self.assertEqual(0, len(second.findall('MissingAncestorRecord')))
+
+    def test_wellformed_stream_renders_no_placeholder(self):
+        models = list(self.make_models([0, 1, 2]))
+        text = self.render(models)
+        self.assertNotIn('MissingAncestorRecord', text)
+        self.assertNotIn('missing="true"', text)

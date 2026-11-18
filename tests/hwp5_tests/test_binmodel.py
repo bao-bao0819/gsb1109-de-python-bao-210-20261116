@@ -37,10 +37,12 @@ from hwp5.binmodel import model_to_json
 from hwp5.binmodel import parse_model
 from hwp5.binmodel import parse_models
 from hwp5.binmodel import parse_models_intern
+from hwp5.binmodel import resolve_models
 from hwp5.dataio import Enum
 from hwp5.dataio import Flags
 from hwp5.dataio import UINT32
 from hwp5.dataio import WORD
+from hwp5.bintype import resolve_values_from_stream
 from hwp5.recordstream import Record
 from hwp5.recordstream import read_records
 from hwp5.tagids import HWPTAG_BEGIN
@@ -1002,3 +1004,49 @@ class TestModelStream(TestBase):
             self.assertEqual(67, len(json.load(f)))
         finally:
             f.close()
+
+
+class TestLevelJumpParentEdge(TestCase):
+
+    def make_records(self, levels):
+        return [Record(tagid=900 + seqno, level=level, payload=b'',
+                       seqno=seqno)
+                for seqno, level in enumerate(levels)]
+
+    def test_parse_models_marks_only_the_orphan(self):
+        context = TestContext()
+        records = self.make_records([1, 3, 1, 2])
+        models = list(parse_models(context, records))
+
+        self.assertEqual([1, 3, 1, 2], [m['level'] for m in models])
+        self.assertEqual([0, 1, 2, 3], [m['seqno'] for m in models])
+        self.assertEqual([False, True, False, False],
+                         [m.get('parent_missing', False) for m in models])
+
+    def test_resolve_models_does_not_fabricate_parent(self):
+        # The synthetic records have empty payloads, so a single shared
+        # empty-stream value resolver is enough to drive resolve_models,
+        # whose contexts normally get a per-record stream from
+        # ModelStream.parse_model_events.
+        context = TestContext()
+        context['resolve_values'] = resolve_values_from_stream(BytesIO(b''))
+        records = self.make_records([1, 3, 1])
+
+        starts = [item for event, item in resolve_models(context, records)
+                  if event is STARTEVENT and item.get('type') is RecordModel]
+
+        orphan = starts[1]
+        self.assertTrue(orphan['parent_missing'])
+        self.assertNotIn('parent', orphan)
+
+        # the later level-1 record keeps a proven ancestry and is not
+        # adopted by the placeholder
+        sibling = starts[2]
+        self.assertNotIn('parent_missing', sibling)
+        self.assertIn('parent', sibling)
+
+    def test_missing_ancestor_model_is_not_a_registered_tag(self):
+        from hwp5.binmodel import MissingAncestorRecord
+        from hwp5.binmodel._shared import tag_models
+        self.assertTrue(issubclass(MissingAncestorRecord, RecordModel))
+        self.assertNotIn(MissingAncestorRecord, tag_models.values())

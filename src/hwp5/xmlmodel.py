@@ -52,6 +52,7 @@ from .dataio import Struct
 from .filestructure import VERSION
 from .treeop import STARTEVENT, ENDEVENT
 from .treeop import prefix_event
+from .treeop import is_missing_ancestor
 from .treeop import build_subtree
 from .treeop import tree_events
 from .treeop import tree_events_multi
@@ -549,7 +550,24 @@ def prefix_binmodels_with_event(context, models):
     level_prefixed = ((model['level'],
                        (model['type'], model['content'], context))
                       for model in models)
-    return prefix_event(level_prefixed)
+    events = prefix_event(level_prefixed)
+    return prefix_missing_ancestor_events(events)
+
+
+def prefix_missing_ancestor_events(event_prefixed_mac):
+    ''' Turn MissingAncestor placeholders into explicit model events.
+
+    A level jump makes treeop emit MissingAncestor placeholders.  They are
+    represented here with MissingAncestorRecord so the gap survives the
+    export pipeline as a marked node instead of being dropped or mistaken
+    for a proven parent.
+    '''
+    for event, item in event_prefixed_mac:
+        if is_missing_ancestor(item):
+            attributes = dict(missing='true',
+                              level=str(item.get('level', '')))
+            item = (binmodel.MissingAncestorRecord, attributes, dict(item))
+        yield event, item
 
 
 def wrap_modelevents(wrapper_model, modelevents):

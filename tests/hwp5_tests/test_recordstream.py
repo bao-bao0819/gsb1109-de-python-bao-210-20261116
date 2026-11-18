@@ -4,10 +4,13 @@ from __future__ import print_function
 from __future__ import unicode_literals
 from io import BytesIO
 import json
+from unittest import TestCase
 
 from hwp5 import recordstream as RS
+from hwp5.recordstream import Record
 from hwp5.recordstream import RecordStream
 from hwp5.recordstream import dump_record
+from hwp5.recordstream import link_records
 from hwp5.recordstream import read_record
 from hwp5.recordstream import record_to_json
 from hwp5.storage import ExtraItemStorage
@@ -17,6 +20,78 @@ from hwp5.tagids import HWPTAG_PARA_HEADER
 from hwp5.utils import cached_property
 
 from . import test_filestructure
+
+
+def make_records(levels):
+    records = [Record(tagid=HWPTAG_PARA_HEADER + seqno, level=level,
+                      payload=b'', seqno=seqno)
+               for seqno, level in enumerate(levels)]
+    for record, level in zip(records, levels):
+        record['label'] = 'r%d@%d' % (record['seqno'], level)
+    return records
+
+
+def edge_of(record):
+    return (
+        record['label'],
+        (record.get('parent') or {}).get('label'),
+        (record.get('sister') or {}).get('label'),
+        record.get('parent_missing', False),
+    )
+
+
+class TestLinkRecords(TestCase):
+
+    def test_wellformed_links_keep_proven_edges(self):
+        records = make_records([0, 0, 1, 2, 1, 2, 0])
+        result = [edge_of(r) for r in link_records(iter(records))]
+        self.assertEqual(result, [
+            ('r0@0', None, None, False),
+            ('r1@0', None, 'r0@0', False),
+            ('r2@1', 'r1@0', None, False),
+            ('r3@2', 'r2@1', None, False),
+            ('r4@1', 'r1@0', None, False),
+            ('r5@2', 'r4@1', None, False),
+            ('r6@0', None, None, False),
+        ])
+
+    def test_level_jump_marks_missing_parent_instead_of_guessing(self):
+        records = make_records([1, 3, 1, 2])
+        result = [edge_of(r) for r in link_records(iter(records))]
+        self.assertEqual(result, [
+            ('r0@1', None, None, False),
+            ('r1@3', None, None, True),   # no fabricated parent
+            ('r2@1', None, None, False),  # sibling stays at top, not adopted
+            ('r3@2', 'r2@1', None, False),
+        ])
+
+    def test_orphan_siblings_share_missing_parent_not_each_other(self):
+        records = make_records([0, 2, 2, 1])
+        result = [edge_of(r) for r in link_records(iter(records))]
+        self.assertEqual(result, [
+            ('r0@0', None, None, False),
+            ('r1@2', None, None, True),
+            ('r2@2', None, 'r1@2', True),
+            ('r3@1', 'r0@0', None, False),
+        ])
+
+    def test_nonzero_baselevel_without_gap_is_unchanged(self):
+        records = make_records([7, 8, 9, 7])
+        result = [edge_of(r) for r in link_records(iter(records))]
+        self.assertEqual(result, [
+            ('r0@7', None, None, False),
+            ('r1@8', 'r0@7', None, False),
+            ('r2@9', 'r1@8', None, False),
+            ('r3@7', None, None, False),
+        ])
+
+    def test_empty_and_below_baselevel_do_not_crash(self):
+        self.assertEqual([], list(link_records(iter([]))))
+
+        records = make_records([1, 0])
+        result = [edge_of(r) for r in link_records(iter(records))]
+        self.assertEqual(2, len(result))
+        self.assertFalse(any(row[3] for row in result))
 
 
 class TestBase(test_filestructure.TestBase):

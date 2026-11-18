@@ -29,8 +29,30 @@ class ENDEVENT:
     pass
 
 
+class MissingAncestor(dict):
+    ''' A placeholder for an ancestor record absent from the stream.
+
+    A level jump (for example from level 1 directly to level 3) means
+    the records connecting the item to its nearest known ancestor are
+    not present.  A MissingAncestor makes the gap explicit, instead of
+    guessing a parent among the records that do exist.  It only fills a
+    slot in the tree; the original records and their provenance are left
+    untouched.
+    '''
+
+    __missing_ancestor__ = True
+
+
+def is_missing_ancestor(item):
+    return getattr(item, '__missing_ancestor__', False) is True
+
+
 def prefix_event(level_prefixed_items, root_item=None):
     ''' convert iterable of (level, item) into iterable of (event, item)
+
+        A level jump inserts MissingAncestor placeholders for the
+        ancestor levels that have no record, so an incomplete hierarchy
+        is preserved rather than rejected.
     '''
     baselevel = None
     stack = [root_item]
@@ -44,8 +66,9 @@ def prefix_event(level_prefixed_items, root_item=None):
         while level + 1 < len(stack):
             yield ENDEVENT, stack.pop()
         while len(stack) < level + 1:
-            raise Exception('invalid level: %d, %d, %s' %
-                            (level, len(stack) - 1, item))
+            missing = MissingAncestor(level=baselevel + len(stack) - 1)
+            stack.append(missing)
+            yield STARTEVENT, missing
         assert(len(stack) == level + 1)
 
         stack.append(item)
@@ -72,6 +95,11 @@ def prefix_ancestors_from_level(level_prefixed_items, root_item=None):
 
         @param level_prefixed items: iterable of tuple(level, item)
         @return iterable of tuple(ancestors, item)
+
+        A level jump inserts MissingAncestor placeholders for the
+        ancestor levels that have no record, so a record whose ancestors
+        are incomplete is still yielded with the gap visible in the
+        ancestors chain, rather than raising an exception.
     '''
     baselevel = None
     stack = [root_item]
@@ -85,8 +113,8 @@ def prefix_ancestors_from_level(level_prefixed_items, root_item=None):
         while level + 1 < len(stack):
             stack.pop()
         while len(stack) < level + 1:
-            raise Exception('invalid level: %d, %d, %s' %
-                            (level, len(stack) - 1, item))
+            missing = MissingAncestor(level=baselevel + len(stack) - 1)
+            stack.append(missing)
         assert(len(stack) == level + 1)
 
         yield stack, item

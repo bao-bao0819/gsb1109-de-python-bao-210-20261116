@@ -100,14 +100,37 @@ def read_records(f):
 
 
 def link_records(records):
+    ''' link records with proven parent/sister edges.
+
+    A level jump does not promote a surviving record to act as the
+    missing parent.  A record whose direct parent level has no record
+    gets ``parent_missing`` set instead of a guessed ``parent``; records
+    that do have a proven ancestor on the stack keep their real
+    ``parent`` edge.
+    '''
+    baselevel = None
+    stack = []
     prev = None
     for rec in records:
-        if prev is not None:
-            if rec['level'] == prev['level']:
-                rec['sister'] = prev
-                rec['parent'] = prev.get('parent')
-            elif rec['level'] == prev['level'] + 1:
-                rec['parent'] = prev
+        level = rec['level']
+        if baselevel is None:
+            baselevel = level
+        rel = level - baselevel
+
+        while len(stack) > rel and len(stack) > 0:
+            stack.pop()
+        while len(stack) < rel:
+            stack.append(None)
+
+        if prev is not None and prev['level'] == level:
+            rec['sister'] = prev
+
+        if rel > 0 and stack[rel - 1] is None:
+            rec['parent_missing'] = True
+        elif rel > 0:
+            rec['parent'] = stack[rel - 1]
+
+        stack.append(rec)
         yield rec
         prev = rec
 

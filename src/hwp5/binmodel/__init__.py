@@ -36,6 +36,7 @@ from ..tagids import tagnames
 from ..treeop import STARTEVENT
 from ..treeop import ENDEVENT
 from ..treeop import prefix_ancestors_from_level
+from ..treeop import is_missing_ancestor
 from ..utils import JsonObjects
 
 from ._shared import tag_models
@@ -244,6 +245,15 @@ class UnknownTagModel(RecordModel):
     pass
 
 
+class MissingAncestorRecord(RecordModel):
+    ''' A model standing in for a record missing due to a level jump.
+
+    No tagid is declared, so this model is never registered in tag_models
+    and never produced from a real record.  It only marks a gap in the
+    hierarchy; the surrounding records keep their original provenance.
+    '''
+
+
 class Text(object):
     pass
 
@@ -295,7 +305,14 @@ def parse_models_with_parent(context_models):
     root_item = (dict(), dict())
     ancestors_prefixed = prefix_ancestors_from_level(level_prefixed, root_item)
     for ancestors, (context, model) in ancestors_prefixed:
-        context['parent'] = ancestors[-1]
+        parent = ancestors[-1]
+        if is_missing_ancestor(parent):
+            # The direct parent record is absent; record the gap instead
+            # of pretending a surviving record is the parent.
+            context['parent_missing'] = True
+            model['parent_missing'] = True
+        else:
+            context['parent'] = parent
         parse_model(context, model)
         yield context, model
 
@@ -332,7 +349,12 @@ def raise_on_errorevent(context, events):
 
 
 def resolve_models(context, records):
-    model_contexts = (dict(context, record=record, model=dict(record))
+    # Keep the base context under a stable name: the per-record loop
+    # below rebinds ``context`` and the generator would otherwise build
+    # each new context on top of the previous record's context, leaking
+    # parent edges between unrelated records.
+    base_context = context
+    model_contexts = (dict(base_context, record=record, model=dict(record))
                       for record in records)
 
     level_prefixed = ((context['model']['level'], context)
@@ -341,7 +363,13 @@ def resolve_models(context, records):
     ancestors_prefixed = prefix_ancestors_from_level(level_prefixed, root_item)
     for ancestors, context in ancestors_prefixed:
         parent = ancestors[-1]
-        context['parent'] = parent, parent.get('model', {})
+        if is_missing_ancestor(parent):
+            # The direct parent record is absent; record the gap instead
+            # of presenting the placeholder as a proven parent edge.
+            context['parent_missing'] = True
+            context['model']['parent_missing'] = True
+        else:
+            context['parent'] = parent, parent.get('model', {})
 
         record_frame = context['record']
         context['type'] = RecordModel

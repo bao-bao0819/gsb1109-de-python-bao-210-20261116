@@ -259,6 +259,11 @@ class FillGradation(Fill):
 
 def ref_parent_member(member_name):
     def f(context, values):
+        if 'parent' not in context:
+            # The parent record is missing, so the parent-provided array
+            # length cannot be proven. Leave the payload unparsed rather
+            # than guessing a length.
+            return 0
         context, model = context['parent']
         return model['content'][member_name]
     f.__doc__ = 'PARENTREC.' + member_name

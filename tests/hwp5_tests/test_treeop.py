@@ -5,9 +5,12 @@ from __future__ import unicode_literals
 from unittest import TestCase
 
 from hwp5.treeop import STARTEVENT, ENDEVENT
+from hwp5.treeop import MissingAncestor
 from hwp5.treeop import build_subtree
+from hwp5.treeop import is_missing_ancestor
 from hwp5.treeop import iter_subevents
 from hwp5.treeop import prefix_ancestors_from_level
+from hwp5.treeop import prefix_event
 from hwp5.treeop import tree_events
 
 
@@ -79,18 +82,91 @@ class Test_ancestors_from_level(TestCase):
         except:
             pass
 
-    def test_ancestors_from_level_assert_fails_at_invalid_level_jump(self):
+    def test_ancestors_from_level_marks_missing_ancestor_on_jump(self):
+        level_prefixed = [
+            (1, 'a1'),
+            (3, 'a1-c3'),  # the level-2 ancestor is missing
+            (1, 'b1'),  # later sibling must not be captured by the gap
+        ]
+        result = list((list(ancestors), item)
+                      for ancestors, item
+                      in prefix_ancestors_from_level(level_prefixed))
 
+        ancestors_a1, item = result[0]
+        self.assertEqual('a1', item)
+        self.assertEqual([None], ancestors_a1)
+
+        ancestors_c3, item = result[1]
+        self.assertEqual('a1-c3', item)
+        self.assertEqual('a1', ancestors_c3[1])
+        self.assertTrue(is_missing_ancestor(ancestors_c3[2]))
+        self.assertEqual(2, ancestors_c3[2]['level'])
+
+        # the later level-1 record keeps the same ancestors as a1:
+        # it is not adopted by the placeholder
+        ancestors_b1, item = result[2]
+        self.assertEqual('b1', item)
+        self.assertEqual([None], ancestors_b1)
+
+    def test_prefix_event_inserts_missing_ancestor_for_each_gap(self):
         level_prefixed = [
             (0, 'a0'),
-            (2, 'a0-a1-a2'),  # invalid level jump
+            (3, 'a0-d3'),  # two missing levels: 1 and 2
         ]
-        ancestors_prefixed = prefix_ancestors_from_level(level_prefixed)
-        try:
-            list(ancestors_prefixed)
-            self.fail('assert fails expected')
-        except:
-            pass
+        events = list(prefix_event(level_prefixed))
+
+        placeholders = [item for event, item in events
+                        if event is STARTEVENT and is_missing_ancestor(item)]
+        self.assertEqual([1, 2], [p['level'] for p in placeholders])
+        self.assertTrue(all(isinstance(p, MissingAncestor)
+                            for p in placeholders))
+
+        # the emitted events stay balanced
+        depth = 0
+        for event, item in events:
+            if event is STARTEVENT:
+                depth += 1
+            elif event is ENDEVENT:
+                depth -= 1
+            self.assertGreaterEqual(depth, 0)
+        self.assertEqual(0, depth)
+
+    def test_prefix_event_keeps_later_sibling_out_of_placeholder(self):
+        level_prefixed = [
+            (1, 'a1'),
+            (3, 'a1-c3'),
+            (1, 'b1'),
+            (2, 'b1-d2'),
+        ]
+        events = list(prefix_event(level_prefixed))
+        sequence = [('S' if event is STARTEVENT else 'E',
+                     ('MISS@%d' % item['level'])
+                     if is_missing_ancestor(item) else item)
+                    for event, item in events]
+
+        self.assertEqual(sequence, [
+            ('S', 'a1'),
+            ('S', 'MISS@2'),
+            ('S', 'a1-c3'),
+            ('E', 'a1-c3'),
+            ('E', 'MISS@2'),
+            ('E', 'a1'),
+            ('S', 'b1'),
+            ('S', 'b1-d2'),
+            ('E', 'b1-d2'),
+            ('E', 'b1'),
+        ])
+
+    def test_prefix_event_emits_no_placeholder_for_wellformed_stream(self):
+        level_prefixed = [
+            (0, 'a0'),
+            (0, 'b0'),
+            (1, 'b0-a1'),
+            (2, 'b0-a1-a2'),
+        ]
+        events = list(prefix_event(level_prefixed))
+        self.assertFalse(any(is_missing_ancestor(item)
+                             for event, item in events))
 
 
 class TestTreeEvents(TestCase):

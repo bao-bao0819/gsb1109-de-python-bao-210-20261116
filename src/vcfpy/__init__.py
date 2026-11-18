@@ -1,5 +1,16 @@
 # -*- coding: utf-8 -*-
 
+from vcfpy.crossbatch import (
+    CrossBatchMetrics,
+    FieldConvention,
+    IncompatibleConvention,
+    Observation,
+    ObsStatus,
+    Partition,
+    Stats,
+    VariantKey,
+    collect_reader,
+)
 from vcfpy.exceptions import (
     HeaderNotFound,
     IncorrectVCFFormat,
@@ -101,5 +112,14 @@ __all__ = [
     "REVERSE",
     "FIVE_PRIME",
     "THREE_PRIME",
+    "IncompatibleConvention",
+    "ObsStatus",
+    "VariantKey",
+    "FieldConvention",
+    "Observation",
+    "Stats",
+    "Partition",
+    "CrossBatchMetrics",
+    "collect_reader",
     "__version__",
 ]

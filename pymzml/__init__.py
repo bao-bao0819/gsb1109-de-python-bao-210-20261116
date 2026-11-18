@@ -25,7 +25,16 @@ Copyright (C) 2010-2019 M. Kösters, C. Fufezan
     SOFTWARE.
 """
 
-__all__ = ["run", "spec", "chromatogram", "obo", "minimum", "plot", "file_classes"]
+__all__ = [
+    "run",
+    "spec",
+    "chromatogram",
+    "obo",
+    "minimum",
+    "plot",
+    "file_classes",
+    "term_migration",
+]
 
 import sys
 
@@ -44,5 +53,6 @@ import pymzml.chromatogram
 from pymzml.spec import MSDecoder
 from pymzml.chromatogram import Chromatogram
 import pymzml.obo
+import pymzml.term_migration
 import pymzml.plot
 import pymzml.utils

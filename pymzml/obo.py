@@ -93,12 +93,20 @@ class OboTranslator(object):
 
     Args:
         version (str): obo version
+
+    Keyword Arguments:
+        allow_download (bool): whether a missing obo file may be downloaded.
+            If False, the translator works strictly offline and raises
+            FileNotFoundError when the pinned obo version is not available
+            locally. Unknown terms are never resolved against a newer
+            online obo release in this mode.
     """
 
     _obo_instance_cache = {}
 
-    def __init__(self, version=None):
+    def __init__(self, version=None, allow_download=True):
         self.version = self.__normalize_version(version)
+        self.allow_download = allow_download
         self.all_dicts = []
         self.id = {}
         self.name = {}
@@ -110,12 +118,15 @@ class OboTranslator(object):
         self.__obo_parsed = False
 
     @classmethod
-    def from_cache(cls, version):
+    def from_cache(cls, version, allow_download=True):
         version = cls.__normalize_version(version)
+        key = (version, bool(allow_download))
         try:
-            return cls._obo_instance_cache[version]
+            return cls._obo_instance_cache[key]
         except KeyError:
-            inst = cls._obo_instance_cache[version] = cls(version)
+            inst = cls._obo_instance_cache[key] = cls(
+                version, allow_download=allow_download
+            )
             return inst
 
     def __setitem__(self, key, value):
@@ -167,6 +178,8 @@ class OboTranslator(object):
         return
 
     def parseOBO(self):
+        if self.__obo_parsed:
+            return
         self.__obo_parsed = True
         """
         Locate and parse the OBO file in the OBO root directory.
@@ -196,9 +209,16 @@ class OboTranslator(object):
             pass
         elif os.path.exists(obo_file + ".gz"):
             obo_file = obo_file + ".gz"
-        else:
+        elif self.allow_download:
             self.download_obo(self.version, obo_file)
             obo_file += ".gz"
+        else:
+            raise FileNotFoundError(
+                "OBO file for pinned version {0} is not available locally "
+                "({1}) and downloads are disabled. Unknown terms are not "
+                "resolved against a newer online obo release in offline "
+                "mode.".format(self.version, obo_file)
+            )
 
         with open(obo_file, "rb") as fin:
             # never rely on file extensions!

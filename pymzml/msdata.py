@@ -131,6 +131,34 @@ class MsData(object):
 
         return return_ele
 
+    def unified_terms(self):
+        """
+        Build the unified terminology view for this spectrum/chromatogram.
+
+        Terms are resolved strictly offline against the obo translator
+        pinned to the file-declared obo version and the migration mapping
+        attached by the reader (if any). Every record keeps the original
+        accession, the original label as written in the file and the mapping
+        version, so re-importing the same partition with the same pinned
+        versions reproduces the identical view. Unknown terms are kept
+        as-is and never resolved against a newer online obo release.
+
+        Returns:
+            list of dicts: see :py:func:`pymzml.term_migration.build_unified_view`
+        """
+        from .term_migration import build_unified_view
+
+        terms = []
+        for element in self.element.iter():
+            accession = element.get("accession")
+            if accession is not None:
+                terms.append((accession, element.get("name")))
+        return build_unified_view(
+            terms,
+            obo_translator=getattr(self, "obo_translator", None),
+            migration=getattr(self, "term_migration", None),
+        )
+
     def _register(self, decoded_tuple):
         d_type, array = decoded_tuple
         if d_type == "mz":

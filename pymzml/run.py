@@ -50,6 +50,7 @@ from . import obo
 from . import regex_patterns
 from .file_interface import FileInterface
 from .file_classes.standardMzml import StandardMzml
+from .term_migration import TermMigration
 
 from logging import getLogger
 
@@ -76,6 +77,14 @@ class Reader(object):
 
         obo_version (str, optional): obo version number as string. If not
             specified the version will be extracted from the mzML file
+        offline (bool, optional): pin the terminology basis to the obo
+            version declared by the mzML file and never download or fall
+            back to a newer obo release. Missing local obo files or files
+            without a declared MS cv version raise an error.
+        term_migration (optional): versioned migration mapping used to
+            build the unified term view (see
+            :py:class:`pymzml.term_migration.TermMigration`). Accepts a
+            TermMigration, a dict or a path to a JSON mapping file.
 
     Note:
         Setting the precision for MS1 and MSn spectra has changed in version 1.2.
@@ -90,12 +99,16 @@ class Reader(object):
         build_index_from_scratch=False,
         skip_chromatogram=True,
         index_regex=None,
+        offline=False,
+        term_migration=None,
         **kwargs,
     ):
         """Initialize and set required attributes."""
         self.index_regex = index_regex
         self.build_index_from_scratch = build_index_from_scratch
         self.skip_chromatogram = skip_chromatogram
+        self.offline = offline
+        self.term_migration = TermMigration.load(term_migration)
         if MS_precisions is None:
             MS_precisions = {}
             if "MS1_Precision" in kwargs.keys():
@@ -132,7 +145,10 @@ class Reader(object):
         )
         self.info["offset_dict"] = self.info["file_object"].offset_dict
         if obo_version:
-            self.info["obo_version"] = self._obo_version_validator(obo_version)
+            if self.offline:
+                self.info["obo_version"] = self._pin_obo_version(obo_version)
+            else:
+                self.info["obo_version"] = self._obo_version_validator(obo_version)
             self.OT = self._init_obo_translator()
         else:
             # obo version not specified -> identified from mzML by self._init_iter
@@ -163,6 +179,8 @@ class Reader(object):
             if event == "end":
                 if element.tag.endswith("}spectrum"):
                     spectrum = spec.Spectrum(element, obo_version=self.OT.version)
+                    spectrum.obo_translator = self.OT
+                    spectrum.term_migration = self.term_migration
                     if has_ref_group:
                         spectrum._set_params_from_reference_group(
                             self.info["referenceable_param_group_list_element"]
@@ -176,6 +194,8 @@ class Reader(object):
                     spectrum = chromatogram.Chromatogram(
                         element, obo_version=self.OT.version
                     )
+                    spectrum.obo_translator = self.OT
+                    spectrum.term_migration = self.term_migration
                     # if has_ref_group:
                     #     spectrum._set_params_from_reference_group(
                     #         self.info['referenceable_param_group_list_element']
@@ -210,6 +230,7 @@ class Reader(object):
 
         element = self.info["file_object"][identifier]
         element.obo_translator = self.OT
+        element.term_migration = self.term_migration
 
         if isinstance(element, spec.Spectrum):
             element.measured_precision = self.ms_precisions[element.ms_level]
@@ -282,7 +303,7 @@ class Reader(object):
                 return self._guess_encoding(sniffer)
 
     @staticmethod
-    def _obo_version_validator(version):
+    def _obo_version_validator(version, fallback=True):
         """
         The obo version should fit file names in the obo folder.
         However, some software generate mzML with built in obo version string like:
@@ -293,8 +314,16 @@ class Reader(object):
         Arguments:
             version (str): The original version to check.
 
+        Keyword Arguments:
+            fallback (bool): if True, unresolvable or locally unavailable
+                versions fall back to DEFAULT_OBO_VERSION. If False, None is
+                returned instead so the caller can pin the declared version
+                or fail explicitly (offline mode).
+
         Returns:
-            version_fixed (str): The checked obo version.
+            version_fixed (str): The checked obo version, or None if
+                fallback is disabled and the version cannot be satisfied
+                locally.
         """
         obo_rgx = re.compile(r"(\d\.\d{1,2}\.\d{1,2})(_[rR][cC]\d{0,2})?")
         obo_years_rgx = re.compile(r"20\d\d")
@@ -337,10 +366,41 @@ class Reader(object):
                 "psi-ms{0}.obo".format("-" + version_fixed if version_fixed else ""),
             )
             if not (os.path.exists(obo_file) or os.path.exists(obo_file + ".gz")):
-                version_fixed = DEFAULT_OBO_VERSION
+                version_fixed = DEFAULT_OBO_VERSION if fallback else None
         else:
-            version_fixed = DEFAULT_OBO_VERSION
+            version_fixed = DEFAULT_OBO_VERSION if fallback else None
 
+        return version_fixed
+
+    @classmethod
+    def _pin_obo_version(cls, declared_version):
+        """
+        Pin the obo version declared by the mzML file for offline import.
+
+        The declared version is normalized but never silently replaced by a
+        newer/default release; if it cannot be satisfied by the locally
+        shipped obo files an error is raised.
+
+        Arguments:
+            declared_version (str): obo version declared by the mzML file
+
+        Returns:
+            version (str): the pinned, locally available obo version
+        """
+        if not declared_version:
+            raise ValueError(
+                "Cannot pin terminology basis: the mzML file declares no MS "
+                "cv version and offline mode forbids falling back to a "
+                "default obo release."
+            )
+        version_fixed = cls._obo_version_validator(declared_version, fallback=False)
+        if version_fixed is None:
+            raise FileNotFoundError(
+                "Cannot pin terminology basis: obo version '{0}' declared by "
+                "the mzML file is not available locally and offline mode "
+                "forbids downloading or substituting another "
+                "release.".format(declared_version)
+            )
         return version_fixed
 
     def _init_obo_translator(self):
@@ -355,9 +415,20 @@ class Reader(object):
         # parse obo, check MS tags and if they are ok in minimum.py (minimum
         # required) ...
         if self.info.get("obo_version", None) is None:
+            if self.offline:
+                raise ValueError(
+                    "Cannot pin terminology basis: the mzML file declares no "
+                    "MS cv version and offline mode forbids falling back to "
+                    "a default obo release."
+                )
             self.info["obo_version"] = DEFAULT_OBO_VERSION
-        obo_translator = obo.OboTranslator.from_cache(version=self.info["obo_version"])
-
+        obo_translator = obo.OboTranslator.from_cache(
+            version=self.info["obo_version"], allow_download=not self.offline
+        )
+        if self.offline:
+            # fail fast if the pinned obo is not available locally instead of
+            # surfacing the error lazily during spectrum access
+            obo_translator.parseOBO()
         return obo_translator
 
     def _init_iter(self):
@@ -392,8 +463,17 @@ class Reader(object):
                     not self.info["obo_version"]
                     and element.attrib.get("id", None) == "MS"
                 ):
-                    obo_in_mzml = element.attrib.get("version", DEFAULT_OBO_VERSION)
-                    self.info["obo_version"] = self._obo_version_validator(obo_in_mzml)
+                    obo_in_mzml = element.attrib.get("version", None)
+                    if self.offline:
+                        # pin the terminology basis declared by the file;
+                        # never fall back to a newer/default release
+                        self.info["obo_version"] = self._pin_obo_version(obo_in_mzml)
+                    else:
+                        if obo_in_mzml is None:
+                            obo_in_mzml = DEFAULT_OBO_VERSION
+                        self.info["obo_version"] = self._obo_version_validator(
+                            obo_in_mzml
+                        )
                     self.OT = self._init_obo_translator()
 
             elif element.tag.endswith("}fileDescription"):

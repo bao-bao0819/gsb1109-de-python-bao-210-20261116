@@ -47,6 +47,10 @@ from .binmodel import ParaRangeTag
 from .binmodel import Field
 from .binmodel import ControlChar
 from .binmodel import Control
+from .binmodel import CharShape
+from .binmodel import Numbering
+from .binmodel import ParaShape
+from .binmodel import Style
 from .charsets import tokenize_unicode_by_lang
 from .dataio import Struct
 from .filestructure import VERSION
@@ -559,6 +563,72 @@ def wrap_modelevents(wrapper_model, modelevents):
     yield ENDEVENT, wrapper_model
 
 
+STYLE_ID_MODELS = (
+    (Style, 'styles'),
+    (CharShape, 'charshapes'),
+    (ParaShape, 'parashapes'),
+    (Numbering, 'numberings'),
+)
+
+
+def docinfo_defined_style_ids(docinfo_events):
+    ''' Collect the sets of style-related ids defined by DocInfo events.
+
+    Ids are assigned in the document order of the DocInfo records, starting
+    from 0.  Styles missing from the archive are not included: no default
+    style is assumed for them.
+
+    :returns: a dict with 'styles', 'charshapes', 'parashapes' and
+              'numberings' sets of defined ids
+    '''
+    defined = dict((name, set()) for model, name in STYLE_ID_MODELS)
+    models = dict(STYLE_ID_MODELS)
+    for event, item in docinfo_events:
+        if event is not STARTEVENT:
+            continue
+        model = item[0]
+        name = models.get(model)
+        if name is not None:
+            defined[name].add(len(defined[name]))
+    return defined
+
+
+def unresolved_style_segments(modelevents, defined_ids):
+    ''' Locate body-text segments referencing undefined styles.
+
+    Yields (item, unresolved) tuples for every Paragraph/Text start event
+    whose style references cannot be resolved against defined_ids.  These
+    are the segments that have to be recalculated once the missing style
+    sheet is supplemented; every other segment keeps its semantics and
+    provenance stable.
+
+    :param modelevents: body-text model events, e.g. Hwp5File.events()
+    :param defined_ids: a dict of defined id sets as returned by
+                        docinfo_defined_style_ids()
+    '''
+    for event, item in modelevents:
+        if event is not STARTEVENT:
+            continue
+        model, attributes, context = item
+        unresolved = dict()
+        if model is Paragraph:
+            style_id = attributes.get('style_id')
+            if (style_id is not None
+                    and style_id not in defined_ids['styles']):
+                unresolved['style_id'] = style_id
+            parashape_id = attributes.get('parashape_id')
+            if (parashape_id is not None
+                    and parashape_id not in defined_ids['parashapes']):
+                unresolved['parashape_id'] = parashape_id
+        elif model is Text:
+            charshape_id = attributes.get('charshape_id')
+            if (charshape_id is not None
+                    and charshape_id not in defined_ids['charshapes']):
+                unresolved['charshape_id'] = charshape_id
+        if unresolved:
+            yield item, unresolved
+
+
 def modelevents_to_xmlevents(modelevents):
     for event, (model, attributes, context) in modelevents:
         try:
@@ -803,8 +873,9 @@ class Hwp5File(binmodel.Hwp5File, XmlEventsMixin):
         else:
             kwargs.pop('embedbin', None)
 
-        events = chain(self.summaryinfo.events(**kwargs),
-                       self.docinfo.events(**kwargs),
+        docinfo = kwargs.pop('docinfo', None)
+        events = chain(self.summaryinfo_events(**kwargs),
+                       self.docinfo_events(docinfo, **kwargs),
                        self.text.events(**kwargs))
 
         hwpdoc = HwpDoc, dict(version=self.header.version), dict()
@@ -814,3 +885,25 @@ class Hwp5File(binmodel.Hwp5File, XmlEventsMixin):
         events = give_elements_unique_id(events)
 
         return events
+
+    def summaryinfo_events(self, **kwargs):
+        if '\005HwpSummaryInformation' in self:
+            return self.summaryinfo.events(**kwargs)
+        # 아카이브에 요약 정보가 없으면 빈 요소만 내보낸다
+        element = HwpSummaryInfo, dict(), dict()
+        return wrap_modelevents(element, ())
+
+    def docinfo_events(self, docinfo=None, **kwargs):
+        if docinfo is None and 'DocInfo' in self:
+            docinfo = self.docinfo
+        if docinfo is not None:
+            if not hasattr(docinfo, 'events'):
+                # 나중에 보충된 스타일시트(DocInfo 스트림)
+                docinfo = self.docinfo_class(docinfo, self.header.version)
+            return docinfo.events(**kwargs)
+        # DocInfo가 없는 아카이브: 누락된 스타일에 기본값을 억지로 입히지
+        # 않고 빈 DocInfo 요소만 내보낸다. 본문의 스타일 참조(style_id,
+        # parashape_id, charshape_id)와 언어 정보는 그대로 유지되므로,
+        # 나중에 스타일시트가 보충되면 그때 재계산할 수 있다.
+        element = DocInfo, dict(), dict()
+        return wrap_modelevents(element, ())

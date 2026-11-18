@@ -7,6 +7,7 @@ from unittest import TestCase
 from xml.etree import ElementTree
 import base64
 import io
+import struct
 
 from hwp5 import binmodel
 from hwp5 import xmlmodel
@@ -18,6 +19,7 @@ from hwp5.binmodel import ParaCharShape
 from hwp5.binmodel import ParaLineSeg
 from hwp5.binmodel import ParaText
 from hwp5.binmodel import SectionDef
+from hwp5.recordstream import encode_record_header
 from hwp5.tagids import HWPTAG_PARA_LINE_SEG
 from hwp5.treeop import STARTEVENT, ENDEVENT
 from hwp5.utils import cached_property
@@ -26,11 +28,13 @@ from hwp5.xmlmodel import Hwp5File
 from hwp5.xmlmodel import ModelEventStream
 from hwp5.xmlmodel import Section
 from hwp5.xmlmodel import XmlEvents
+from hwp5.xmlmodel import docinfo_defined_style_ids
 from hwp5.xmlmodel import embed_bindata
 from hwp5.xmlmodel import line_segmented
 from hwp5.xmlmodel import make_ranged_shapes
 from hwp5.xmlmodel import merge_paragraph_text_charshape_lineseg
 from hwp5.xmlmodel import split_and_shape
+from hwp5.xmlmodel import unresolved_style_segments
 
 from . import test_binmodel
 from .fixtures import get_fixture_path
@@ -328,3 +332,238 @@ class TestEmbedBinData(TestBase):
                   (ENDEVENT, (BinData, bindata, dict()))]
         events = list(embed_bindata(events, self.hwp5file_bin['BinData']))
         self.assertTrue('<text>' in bindata['bindata'])
+
+
+class MemoryStream(object):
+
+    def __init__(self, data):
+        self.data = data
+
+    def open(self):
+        return BytesIO(self.data)
+
+
+def make_fileheader(version=(5, 0, 1, 7)):
+    data = bytearray(256)
+    data[:32] = b'HWP Document File' + b'\x00' * 15
+    major, minor, micro, build = version
+    data[32:36] = bytes([build, micro, minor, major])
+    return bytes(data)
+
+
+def make_record(tagid, level, payload):
+    header = encode_record_header(dict(tagid=tagid, level=level,
+                                       payload=payload))
+    return header + payload
+
+
+# a paragraph with a SectionDef control, taken from a real document;
+# every section starts with one
+SECTION0_PREFIX = bytes.fromhex(
+    '4200600122000000040000000000000305000000010000000000430440040200'
+    '64636573000000000000000002000200646c6f63000000000000000002005cd5'
+    '00ae20003200300030003500200008c61cc820000cd37cc785c7c8b2e4b22e00'
+    '0d00440480020000000007000000130000000800000017000000070000001800'
+    '0000090000001a00000007000000450440020000000000000000d0070000d007'
+    '0000a4060000b00400000000000018a600000000060047044002646365730000'
+    '00006e0400000000401f00000100000000000000000000000000000000004908'
+    '800288e80000dc4801003821000038210000241600009c1000009c1000009c10'
+    '000000000000000000004a08c001000000000000000029000100ffffffff5203'
+    '37021b010101000000004a08c001000000000000000029000100f82fe0005203'
+    '370200000101000000004b08e00001000000890589058905890500004b08e000'
+    '01000000890589058905890500004b08e0000100000089058905890589050000'
+    '47040001646c6f63041000000000000000000000'
+)
+
+LINESEG_PAYLOAD = bytes.fromhex(
+    '0000000000000000140500001405000051040000fcfeffff'
+    '00000000580b000000000600'
+)
+
+
+def make_paragraph_records(parashape_id, style_id, charshape_id, text):
+    para_header = struct.pack('<IIHBBHHHI',
+                              len(text), 0, parashape_id, style_id, 0,
+                              1, 0, 1, 0)
+    para_charshape = struct.pack('<II', 0, charshape_id)
+    return b''.join([
+        make_record(66, 0, para_header),
+        make_record(67, 1, text.encode('utf-16le')),
+        make_record(68, 1, para_charshape),
+        make_record(69, 1, LINESEG_PAYLOAD),
+    ])
+
+
+def make_section0():
+    return b''.join([
+        SECTION0_PREFIX,
+        make_paragraph_records(0, 0, 0, '가나다라'),
+        make_paragraph_records(7, 5, 9, '마바사아'),
+    ])
+
+
+def make_bstr(s):
+    return struct.pack('<H', len(s)) + s.encode('utf-16le')
+
+
+def make_docinfo_stream():
+    ''' a minimal style sheet: 1 charshape, 1 parashape, 1 style '''
+    document_properties = bytes(26)
+    idmappings = struct.pack('<16I',
+                             0, 0, 0, 0, 0, 0, 0, 0,
+                             0, 1, 0, 0, 0, 1, 1, 0)
+    charshape = bytes(68)
+    parashape = bytes(46)
+    style = (make_bstr('바탕글') + make_bstr('Normal')
+             + struct.pack('<BBhHHH', 0, 0, 1042, 0, 0, 0))
+    return b''.join([
+        make_record(16, 0, document_properties),
+        make_record(17, 0, idmappings),
+        make_record(21, 0, charshape),
+        make_record(25, 0, parashape),
+        make_record(26, 0, style),
+    ])
+
+
+def make_storage(with_docinfo=False):
+    storage = {
+        'FileHeader': MemoryStream(make_fileheader()),
+        'BodyText': {
+            'Section0': MemoryStream(make_section0()),
+        },
+    }
+    if with_docinfo:
+        storage['DocInfo'] = MemoryStream(make_docinfo_stream())
+    return storage
+
+
+def findall_attributes(events, model):
+    for event, item in events:
+        item_model, attributes, context = item
+        if event is STARTEVENT and item_model is model:
+            yield attributes
+
+
+class TestArchiveWithoutDocInfo(TestCase):
+    ''' 아카이브에 본문만 있고 DocInfo 스타일이 없는 경우 '''
+
+    @cached_property
+    def hwp5file(self):
+        return Hwp5File(make_storage())
+
+    def dump_xml(self, hwp5file, **kwargs):
+        out = BytesIO()
+        hwp5file.xmlevents(**kwargs).dump(out)
+        return out.getvalue().decode('utf-8')
+
+    def test_events_without_docinfo(self):
+        events = list(self.hwp5file.events())
+        models = [item[0] for event, item in events if event is STARTEVENT]
+        self.assertTrue(DocInfo in models)
+        self.assertTrue(binmodel.Paragraph in models)
+
+    def test_export_text_without_docinfo(self):
+        xml = self.dump_xml(self.hwp5file)
+        doc = ElementTree.fromstring(xml)
+        (docinfo,) = doc.findall('DocInfo')
+        # missing styles are not replaced with fabricated defaults
+        self.assertEqual(0, len(list(docinfo)))
+        bodytexts = doc.findall('BodyText')
+        self.assertEqual(1, len(bodytexts))
+
+    def test_style_references_preserved(self):
+        events = list(self.hwp5file.events())
+        paragraphs = list(findall_attributes(events, binmodel.Paragraph))
+        self.assertEqual(3, len(paragraphs))
+        self.assertEqual(0, paragraphs[1]['style_id'])
+        self.assertEqual(0, paragraphs[1]['parashape_id'])
+        self.assertEqual(5, paragraphs[2]['style_id'])
+        self.assertEqual(7, paragraphs[2]['parashape_id'])
+
+        texts = list(findall_attributes(events, binmodel.Text))
+        charshape_ids = [t['charshape_id'] for t in texts]
+        self.assertTrue(0 in charshape_ids)
+        self.assertTrue(9 in charshape_ids)
+        # determinable language information is preserved
+        self.assertEqual('ko', texts[-1]['lang'])
+
+    def test_docinfo_defined_style_ids_empty(self):
+        events = self.hwp5file.docinfo_events()
+        defined = docinfo_defined_style_ids(events)
+        self.assertEqual(dict(styles=set(), charshapes=set(),
+                              parashapes=set(), numberings=set()),
+                         defined)
+
+    def test_unresolved_segments_without_styles(self):
+        events = list(self.hwp5file.events())
+        defined = docinfo_defined_style_ids(self.hwp5file.docinfo_events())
+        segments = list(unresolved_style_segments(events, defined))
+        paragraphs = [item for item, unresolved in segments
+                      if item[0] is binmodel.Paragraph]
+        # every paragraph references undefined styles
+        self.assertEqual(3, len(paragraphs))
+
+    def test_docinfo_in_storage(self):
+        hwp5file = Hwp5File(make_storage(with_docinfo=True))
+        xml = self.dump_xml(hwp5file)
+        self.assertTrue('<Style ' in xml)
+        self.assertTrue('name="Normal"' in xml)
+
+    def test_supplement_stylesheet_stream(self):
+        docinfo = MemoryStream(make_docinfo_stream())
+        xml = self.dump_xml(self.hwp5file, docinfo=docinfo)
+        doc = ElementTree.fromstring(xml)
+        (docinfo_element,) = doc.findall('DocInfo')
+        (style,) = docinfo_element.findall('Style')
+        # inheritance chain and language information of the supplemented
+        # style sheet are preserved
+        self.assertEqual('Normal', style.get('name'))
+        self.assertEqual('0', style.get('next-style-id'))
+        self.assertEqual('1042', style.get('lang-id'))
+        self.assertEqual('0', style.get('parashape-id'))
+        self.assertEqual('0', style.get('charshape-id'))
+
+    def test_supplement_stylesheet_events(self):
+        class SupplementedDocInfo(object):
+            def events(self, **kwargs):
+                item = (binmodel.Style,
+                        dict(local_name='바탕글', name='Normal'), dict())
+                yield STARTEVENT, item
+                yield ENDEVENT, item
+
+        xml = self.dump_xml(self.hwp5file, docinfo=SupplementedDocInfo())
+        self.assertTrue('<Style ' in xml)
+
+    def test_supplement_keeps_body_stable(self):
+        xml_without = self.dump_xml(self.hwp5file)
+        docinfo = MemoryStream(make_docinfo_stream())
+        xml_with = self.dump_xml(self.hwp5file, docinfo=docinfo)
+        body_without = xml_without[xml_without.index('<BodyText>'):]
+        body_with = xml_with[xml_with.index('<BodyText>'):]
+        # segments unrelated to the supplemented style sheet keep their
+        # semantics and provenance
+        self.assertEqual(body_without, body_with)
+
+    def test_unresolved_segments_after_supplement(self):
+        docinfo = MemoryStream(make_docinfo_stream())
+        defined = docinfo_defined_style_ids(
+            self.hwp5file.docinfo_events(docinfo))
+        self.assertEqual(dict(styles=set([0]), charshapes=set([0]),
+                              parashapes=set([0]), numberings=set()),
+                         defined)
+
+        events = list(self.hwp5file.events())
+        segments = list(unresolved_style_segments(events, defined))
+        paragraphs = [item for item, unresolved in segments
+                      if item[0] is binmodel.Paragraph]
+        # only the paragraph referencing still-undefined styles
+        # needs recalculation
+        self.assertEqual(1, len(paragraphs))
+        attributes = paragraphs[0][1]
+        self.assertEqual(5, attributes['style_id'])
+        self.assertEqual(7, attributes['parashape_id'])
+
+        texts = [item for item, unresolved in segments
+                 if item[0] is binmodel.Text]
+        charshape_ids = sorted(set(t[1]['charshape_id'] for t in texts))
+        self.assertEqual([7, 8, 9], charshape_ids)

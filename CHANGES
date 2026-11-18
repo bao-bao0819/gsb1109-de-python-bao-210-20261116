@@ -6,6 +6,17 @@ CHANGES
 
 - [CVE-2023-0286] Depends on cryptography >= 40.0.1
 - [CVE-2022-2309] Depends on lxml >= 4.9,2
+- hwp5.xmlmodel.Hwp5File: archives without the DocInfo stream (e.g. ones
+  containing body-text paragraphs only) can be exported now.  An empty
+  DocInfo element is emitted instead of failing with KeyError, and no
+  default style is fabricated for the missing styles: original style
+  references (style_id, parashape_id, charshape_id), inheritance chains
+  and determinable language/numbering information are preserved as-is.
+  A style sheet can be supplemented later with the new ``docinfo``
+  keyword argument of Hwp5File.events()/xmlevents(); new functions
+  docinfo_defined_style_ids() and unresolved_style_segments() locate the
+  text segments that have to be recalculated once the missing styles are
+  supplemented, while unrelated segments stay stable.
 
 
 0.1b15 (2020-05-30)

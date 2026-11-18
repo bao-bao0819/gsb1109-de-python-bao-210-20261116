@@ -52,15 +52,26 @@ class OutOfData(Exception):
 
 
 def readn(f, size):
-    data = f.read(size)
-    datasize = len(data)
-    if datasize == 0:
-        try:
-            pos = f.tell()
-        except IOError:
-            pos = '<UNKNOWN>'
-        raise Eof(pos)
-    return data
+    ''' read exactly `size' bytes from f
+
+        Short reads are retried until `size' bytes are collected, so the
+        result does not depend on short-read timing of the underlying
+        stream.  Eof is raised only when the stream is exhausted before
+        `size' bytes are read.
+    '''
+    chunks = []
+    remaining = size
+    while remaining > 0:
+        chunk = f.read(remaining)
+        if len(chunk) == 0:
+            try:
+                pos = f.tell()
+            except IOError:
+                pos = '<UNKNOWN>'
+            raise Eof(pos)
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b''.join(chunks)
 
 
 class PrimitiveType(type):

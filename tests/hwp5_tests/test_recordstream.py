@@ -3,13 +3,20 @@ from __future__ import absolute_import
 from __future__ import print_function
 from __future__ import unicode_literals
 from io import BytesIO
+from unittest import TestCase
 import json
+import os
+import zlib
 
 from hwp5 import recordstream as RS
 from hwp5.recordstream import RecordStream
+from hwp5.recordstream import decompress_records
 from hwp5.recordstream import dump_record
 from hwp5.recordstream import read_record
+from hwp5.recordstream import read_records
+from hwp5.recordstream import read_records_with_tail
 from hwp5.recordstream import record_to_json
+from hwp5.recordstream import split_records
 from hwp5.storage import ExtraItemStorage
 from hwp5.tagids import HWPTAG_DOCUMENT_PROPERTIES
 from hwp5.tagids import HWPTAG_ID_MAPPINGS
@@ -17,6 +24,136 @@ from hwp5.tagids import HWPTAG_PARA_HEADER
 from hwp5.utils import cached_property
 
 from . import test_filestructure
+
+
+class TestTruncatedRecords(TestCase):
+
+    @cached_property
+    def records(self):
+        return [
+            RS.Record(HWPTAG_PARA_HEADER, 0, os.urandom(5)),
+            RS.Record(HWPTAG_PARA_HEADER + 1, 1, os.urandom(500)),
+            RS.Record(HWPTAG_PARA_HEADER + 2, 1, b''),
+            # payload big enough to require the extended (8-byte) header
+            RS.Record(HWPTAG_PARA_HEADER + 3, 0, os.urandom(5000)),
+            RS.Record(HWPTAG_PARA_HEADER + 4, 0, os.urandom(4)),
+        ]
+
+    @cached_property
+    def records_data(self):
+        f = BytesIO()
+        for record in self.records:
+            dump_record(f, record)
+        return f.getvalue()
+
+    @cached_property
+    def compressed_data(self):
+        c = zlib.compressobj(9, zlib.DEFLATED, -15)
+        return c.compress(self.records_data) + c.flush()
+
+    def record_keys(self, records):
+        return [(rec['tagid'], rec['level'], rec['size'], rec['payload'],
+                 rec['seqno']) for rec in records]
+
+    def offset_of(self, idx):
+        f = BytesIO()
+        for record in self.records[:idx]:
+            dump_record(f, record)
+        return len(f.getvalue())
+
+    def test_split_records_of_a_complete_buffer(self):
+        records, tail = split_records(self.records_data)
+        self.assertEqual(len(self.records), len(records))
+        self.assertEqual(b'', tail)
+        for rec, expected in zip(records, self.records):
+            self.assertEqual(expected['tagid'], rec['tagid'])
+            self.assertEqual(expected['level'], rec['level'])
+            self.assertEqual(expected['payload'], rec['payload'])
+        self.assertEqual(list(range(len(records))),
+                         [rec['seqno'] for rec in records])
+
+    def test_split_records_of_a_truncated_payload(self):
+        # cut in the middle of the 4th record's payload
+        cut = len(self.records_data) - 2500
+        records, tail = split_records(self.records_data[:cut])
+        self.assertEqual(3, len(records))
+        # the partially present record stays in the undetermined tail
+        self.assertEqual(self.records_data[self.offset_of(3):cut], tail)
+        self.assertTrue(len(tail) > 0)
+
+    def test_split_records_of_a_truncated_header(self):
+        # cut 2 bytes into the 4-byte header of the last record
+        cut = self.offset_of(4) + 2
+        records, tail = split_records(self.records_data[:cut])
+        self.assertEqual(4, len(records))
+        self.assertEqual(self.records_data[self.offset_of(4):cut], tail)
+        self.assertEqual(2, len(tail))
+
+    def test_split_records_of_a_truncated_extended_header(self):
+        # cut in the middle of the 8-byte extended header of the 4th record
+        cut = self.offset_of(3) + 6
+        records, tail = split_records(self.records_data[:cut])
+        self.assertEqual(3, len(records))
+        self.assertEqual(self.records_data[self.offset_of(3):cut], tail)
+        self.assertEqual(6, len(tail))
+
+    def test_read_records_with_tail(self):
+        cut = len(self.records_data) - 2500
+        records, tail = read_records_with_tail(
+            BytesIO(self.records_data[:cut]))
+        self.assertEqual(3, len(records))
+        self.assertEqual(self.records_data[self.offset_of(3):cut], tail)
+
+    def test_read_records_stops_at_a_truncated_record(self):
+        cut = len(self.records_data) - 2500
+        records = list(read_records(BytesIO(self.records_data[:cut])))
+        self.assertEqual(3, len(records))
+
+    def test_decompress_records_of_a_complete_stream(self):
+        for bufsize in (1, 2, 3, 7, 4096, 65536):
+            records, tail, status = decompress_records(
+                BytesIO(self.compressed_data), bufsize)
+            self.assertEqual(len(self.records), len(records))
+            self.assertEqual(b'', tail)
+            self.assertTrue(status.eof)
+            self.assertFalse(status.truncated)
+
+    def test_decompress_records_of_a_truncated_stream(self):
+        # truncate the compressed stream: some records are complete, the
+        # decompressed half of the next record stays in the tail
+        truncated = self.compressed_data[:-100]
+        results = []
+        for bufsize in (1, 2, 3, 7, 4096, 65536):
+            records, tail, status = decompress_records(
+                BytesIO(truncated), bufsize)
+            results.append((self.record_keys(records), tail, status))
+
+        # decompression status and record completeness are reported
+        # separately
+        for keys, tail, status in results:
+            self.assertTrue(status.input_exhausted)
+            self.assertFalse(status.eof)
+            self.assertTrue(status.truncated)
+            self.assertTrue(len(keys) > 0)
+            self.assertTrue(len(tail) > 0)
+
+        # the determined records and their source bytes do not depend on
+        # the input chunk size
+        for keys, tail, status in results:
+            self.assertEqual(results[0][0], keys)
+            self.assertEqual(results[0][1], tail)
+
+        # only structurally complete records are accepted
+        keys = results[0][0]
+        complete, _ = split_records(self.records_data)
+        self.assertEqual(self.record_keys(complete)[:len(keys)], keys)
+
+    def test_decompress_records_matches_read_records(self):
+        records, tail, status = decompress_records(
+            BytesIO(self.compressed_data), 4096)
+        streamed = list(read_records(BytesIO(self.records_data)))
+        self.assertEqual(self.record_keys(streamed),
+                         self.record_keys(records))
 
 
 class TestBase(test_filestructure.TestBase):

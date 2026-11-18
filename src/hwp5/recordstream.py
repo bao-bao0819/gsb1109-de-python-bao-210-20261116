@@ -82,6 +82,82 @@ def read_record(f, seqno):
     return Record(tagid, level, payload, size, seqno)
 
 
+def decode_record_header_from(buffer, offset=0):
+    ''' decode a record header from buffer at offset
+
+        returns (tagid, level, size, header_size), or None if the buffer
+        does not contain a complete header at offset
+    '''
+    if len(buffer) - offset < 4:
+        return None
+    rechdr, = struct.unpack('<I', buffer[offset:offset + 4])
+    tagid = rechdr & 0x3ff
+    level = (rechdr >> 10) & 0x3ff
+    size = (rechdr >> 20) & 0xfff
+    header_size = 4
+    if size == 0xfff:
+        if len(buffer) - offset < 8:
+            return None
+        size, = struct.unpack('<I', buffer[offset + 4:offset + 8])
+        header_size = 8
+    return tagid, level, size, header_size
+
+
+def split_records(buffer, seqno=0):
+    ''' split buffer into complete records and the undetermined tail
+
+        A record is complete only if its header and its whole payload are
+        present in the buffer; a partially present record is not accepted
+        and remains in the tail.  The result depends only on the bytes in
+        the buffer, not on how they were read.
+
+        returns (records, tail)
+    '''
+    records = []
+    offset = 0
+    while True:
+        header = decode_record_header_from(buffer, offset)
+        if header is None:
+            break
+        tagid, level, size, header_size = header
+        record_end = offset + header_size + size
+        if len(buffer) < record_end:
+            break
+        payload = bytes(buffer[offset + header_size:record_end])
+        records.append(Record(tagid, level, payload, size, seqno))
+        seqno += 1
+        offset = record_end
+    return records, bytes(buffer[offset:])
+
+
+def read_records_with_tail(f, seqno=0):
+    ''' read complete records from f, leaving the undetermined tail
+
+        returns (records, tail)
+    '''
+    return split_records(f.read(), seqno)
+
+
+def decompress_records(source, bufsize=4096):
+    ''' decompress a deflate stream and split it into records
+
+        Decompression status and record completeness are reported
+        separately: the decompressed bytes are split into structurally
+        complete records and the undetermined tail, regardless of the
+        input chunk size.
+
+        source: a file-like readable of a (possibly truncated) deflate
+                stream
+        returns (records, tail, status)
+    '''
+    from .compressed import DecompressionStatus, decompress_gen
+    status = DecompressionStatus()
+    chunks = decompress_gen(source, bufsize, status)
+    decompressed = b''.join(chunks)
+    records, tail = split_records(decompressed)
+    return records, tail, status
+
+
 def dump_record(f, record):
     hdr = encode_record_header(record)
     f.write(hdr)
@@ -91,7 +167,13 @@ def dump_record(f, record):
 def read_records(f):
     seqno = 0
     while True:
-        record = read_record(f, seqno)
+        try:
+            record = read_record(f, seqno)
+        except Eof:
+            # truncated record: only complete records are yielded; the
+            # partial record remains as the undetermined tail of the
+            # stream (see read_records_with_tail)
+            return
         if record:
             yield record
         else:

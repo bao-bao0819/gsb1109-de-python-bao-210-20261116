@@ -375,3 +375,58 @@ class TestDecodeUTF16LEPUA(TestCase):
         bytes = expected.encode('utf-16le')
         u = decode_utf16le_with_hypua(bytes)
         self.assertEqual(expected, u)
+
+
+class ShortReadStream(object):
+    ''' a file-like readable which never returns more than `maxchunk'
+    bytes per read, even if more is requested and available '''
+
+    def __init__(self, data, maxchunk):
+        self.data = data
+        self.maxchunk = maxchunk
+        self.pos = 0
+
+    def read(self, size=-1):
+        remaining = len(self.data) - self.pos
+        if size is None or size < 0 or size > remaining:
+            size = remaining
+        if size > self.maxchunk:
+            size = self.maxchunk
+        chunk = self.data[self.pos:self.pos + size]
+        self.pos += size
+        return chunk
+
+    def tell(self):
+        return self.pos
+
+
+class TestReadn(TestCase):
+
+    def test_readn(self):
+        from hwp5.dataio import readn
+        data = b'hello world'
+        self.assertEqual(b'hello', readn(BytesIO(data), 5))
+
+    def test_readn_of_zero(self):
+        from hwp5.dataio import readn
+        self.assertEqual(b'', readn(BytesIO(b'hello'), 0))
+
+    def test_readn_retries_short_reads(self):
+        from hwp5.dataio import readn
+        data = b'hello world'
+        f = ShortReadStream(data, 2)
+        self.assertEqual(b'hello', readn(f, 5))
+        self.assertEqual(b' worl', readn(f, 5))
+
+    def test_readn_raises_eof_at_the_end(self):
+        from hwp5.dataio import Eof, readn
+        data = b'hello'
+        f = ShortReadStream(data, 2)
+        self.assertEqual(b'hello', readn(f, 5))
+        self.assertRaises(Eof, readn, f, 1)
+
+    def test_readn_raises_eof_on_a_truncated_read(self):
+        from hwp5.dataio import Eof, readn
+        data = b'hello'
+        f = ShortReadStream(data, 2)
+        self.assertRaises(Eof, readn, f, 10)

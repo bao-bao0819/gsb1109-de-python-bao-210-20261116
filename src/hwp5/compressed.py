@@ -43,14 +43,58 @@ class ZLibIncrementalDecoder(codecs.IncrementalDecoder):
         self.decompressobj = zlib.decompressobj(self.wbits)
 
 
-def decompress_gen(source, bufsize=4096):
+class DecompressionStatus(object):
+    ''' status of an incremental decompression session
+
+    - ``eof``: the end of the zlib stream has been reached
+    - ``input_exhausted``: the input stream has been exhausted
+    - ``error``: a zlib.error if decompression failed
+    '''
+
+    def __init__(self):
+        self.eof = False
+        self.input_exhausted = False
+        self.error = None
+
+    @property
+    def truncated(self):
+        ''' the zlib stream end has not been reached '''
+        return not self.eof
+
+    def __repr__(self):
+        return ('<%s eof=%r input_exhausted=%r error=%r>'
+                % (type(self).__name__, self.eof, self.input_exhausted,
+                   self.error))
+
+
+def decompress_gen(source, bufsize=4096, status=None):
+    ''' generate decompressed chunks from a deflate stream
+
+        source: a file-like readable
+        bufsize: input chunk size; the resulting bytes do not depend on it
+        status: an optional DecompressionStatus to be updated
+
+        The input is read until an empty read occurs; short reads do not
+        terminate the decompression, so the outcome does not depend on
+        short-read timing.  If the input ends before the zlib stream end
+        (i.e. truncated), the bytes decompressed so far are yielded and
+        ``status.truncated`` reports True.
+    '''
     dec = ZLibIncrementalDecoder(wbits=-15)
-    exausted = False
-    while not exausted:
-        input = source.read(bufsize)
-        if len(input) < bufsize:
-            exausted = True
-        yield dec.decode(input, exausted)
+    try:
+        while True:
+            input = source.read(bufsize)
+            if len(input) == 0:
+                break
+            yield dec.decode(input)
+        yield dec.decode(b'', True)
+    except zlib.error as e:
+        if status is not None:
+            status.error = e
+        raise
+    if status is not None:
+        status.input_exhausted = True
+        status.eof = dec.decompressobj.eof
 
 
 def decompress_experimental(source, bufsize=4096):
@@ -62,17 +106,22 @@ def decompress_experimental(source, bufsize=4096):
     return GeneratorReader(decompress_gen(source, bufsize))
 
 
-def decompress(stream):
+def decompress(stream, bufsize=4096, status=None):
     ''' decompress inputstream
 
         stream: a file-like readable
         returns a file-like readable
+
+        If the stream is truncated, the bytes decompressed so far are
+        returned; pass ``status`` (a DecompressionStatus) to tell whether
+        the zlib stream end has been reached.
     '''
-    
+
     # #176 참고. #175의 임시방편을 사용한다.
     compressed_maybe = stream.read()
     try:
-        decompressed = zlib.decompress(compressed_maybe, -15)  # without gzip header
+        chunks = decompress_gen(BytesIO(compressed_maybe), bufsize, status)
+        decompressed = b''.join(chunks)
     except zlib.error:
         return BytesIO(compressed_maybe)
     else:

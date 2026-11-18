@@ -3,6 +3,8 @@
 Usage:
   gtfs2db append <feed_file> <database> [--chunk-size <integer>] [--ignore_files FILES]
   gtfs2db overwrite <feed_file> <database> [-i, --interactive] [--chunk-size <integer>] [--ignore_files FILES]
+  gtfs2db update <feed_file> <database> [--old-feed-file <file>] [--feed-id <id>] [--chunk-size <integer>] [--ignore_files FILES]
+  gtfs2db diff <feed_file> <database> [--old-feed-file <file>] [--feed-id <id>] [--ignore_files FILES]
   gtfs2db delete <feed_file> <database> [-i, --interactive]
   gtfs2db list <database>
   gtfs2db (-h | --help)
@@ -15,6 +17,8 @@ Options:
   --chunk-size <int>    How often to flush database. If memory consumption is high,
                         lower this number. [default: 10000]
   --ignore_files FILES  Ignore these files in the read, e.g. "routes.txt,stop_times.txt".
+  --old-feed-file <file> The previous feed version to use as the diff baseline.
+  --feed-id <id>        Feed id to update when several feeds exist.
   <feed_file>           The gtfs file on which to operate. Can be either a folder
                         containing .txt files, or a .zip file.
   <database>            The database. Can be either a file, which is interpreted
@@ -25,6 +29,8 @@ Commands:
   append            appends the gtfs feed to the database
   overwrite         delete any existing feeds which had the same original
                     filename as the new file, and then append the new file.
+  update            apply only the rows which changed in a revised feed
+  diff              show what an update would rebuild, without changing anything
   delete            delete from the database any feeds with the name supplied.
   list              list existing feeds in the database.
 
@@ -36,9 +42,12 @@ Description:
 """
 
 
+import json
+
 from docopt import docopt
 
-from . import __version__, append_feed, delete_feed, overwrite_feed, list_feeds
+from . import (__version__, append_feed, delete_feed, diff_feed,
+               overwrite_feed, update_feed, list_feeds)
 from .schedule import Schedule
 
 
@@ -52,6 +61,8 @@ def main():
     if ignore_files_str := args['--ignore_files']:
         ignore_files = ignore_files_str.split(',')
 
+    feed_id = int(args['--feed-id']) if args['--feed-id'] else None
+
     if args['append']:
         append_feed(schedule, args['<feed_file>'],
                     chunk_size=int(args['--chunk-size']),
@@ -64,6 +75,19 @@ def main():
                        interactive=args['--interactive'],
                        chunk_size=int(args['--chunk-size']),
                        ignore_files=ignore_files)
+    elif args['update']:
+        update_feed(schedule, args['<feed_file>'],
+                    old_feed_filename=args['--old-feed-file'],
+                    feed_id=feed_id,
+                    chunk_size=int(args['--chunk-size']),
+                    ignore_files=ignore_files)
+    elif args['diff']:
+        changes = diff_feed(schedule, args['<feed_file>'],
+                            old_feed_filename=args['--old-feed-file'],
+                            feed_id=feed_id,
+                            ignore_files=ignore_files)
+        print(json.dumps(changes.report(), indent=2, default=str))
+        return changes
     elif args['list']:
         list_feeds(schedule)
 

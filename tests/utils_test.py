@@ -521,6 +521,177 @@ class UtilsTest(unittest.TestCase):
                 # but they must match a value from the given input values
                 self.assertIn(record[key], values[i])
 
+    def test_dedupe_headers(self):
+        """Test dedupe_headers preserves order and duplicates"""
+        self.assertListEqual(utils.dedupe_headers([]), [])
+        self.assertListEqual(
+            utils.dedupe_headers(["date", "amount", "currency"]),
+            ["date", "amount", "currency"],
+        )
+        self.assertListEqual(
+            utils.dedupe_headers(["date", "amount", "amount"]),
+            ["date", "amount", "amount_2"],
+        )
+        self.assertListEqual(
+            utils.dedupe_headers(["amount", "amount", "amount"]),
+            ["amount", "amount_2", "amount_3"],
+        )
+
+    def test_dedupe_headers_key_collision(self):
+        """Test dedupe_headers with a header equal to a generated key"""
+        self.assertListEqual(
+            utils.dedupe_headers(["amount", "amount_2", "amount"]),
+            ["amount", "amount_2", "amount_3"],
+        )
+
+    def test_align_headers_insert_between_duplicates(self):
+        """Inserting a column between two identical headers must not shift
+        their identities"""
+        old_headers = ["date", "amount", "amount"]
+        new_headers = ["date", "amount", "currency", "amount"]
+
+        alignment = utils.align_headers(old_headers, new_headers)
+
+        self.assertTrue(alignment.is_resolved)
+        self.assertEqual(alignment.paused_indices, [])
+        self.assertEqual(alignment.removed_indices, [])
+
+        resolutions = [column.resolution for column in alignment.columns]
+        self.assertEqual(
+            resolutions,
+            [
+                utils.ColumnResolution.matched,
+                utils.ColumnResolution.matched,
+                utils.ColumnResolution.new,
+                utils.ColumnResolution.matched,
+            ],
+        )
+        old_indices = [column.old_index for column in alignment.columns]
+        self.assertEqual(old_indices, [0, 1, None, 2])
+
+        # the second "amount" keeps its identity despite the position shift
+        self.assertEqual(
+            alignment.field_keys, ["date", "amount", "currency", "amount_2"]
+        )
+
+    def test_align_headers_ambiguous_duplicates_are_paused(self):
+        """When the occurrence count of a duplicated header changes, the
+        correspondence is ambiguous: pause instead of mapping the old second
+        column onto the new second column"""
+        old_headers = ["id", "amount", "amount"]
+        new_headers = ["id", "amount", "amount", "amount"]
+
+        alignment = utils.align_headers(old_headers, new_headers)
+
+        self.assertFalse(alignment.is_resolved)
+        self.assertEqual(alignment.paused_indices, [1, 2, 3])
+        # while paused, the old "amount" columns have no confirmed counterpart
+        self.assertEqual(alignment.removed_indices, [1, 2])
+
+        # the unique header is still matched
+        self.assertEqual(
+            alignment.columns[0].resolution, utils.ColumnResolution.matched
+        )
+        self.assertEqual(alignment.columns[0].old_index, 0)
+
+        # paused columns have no field key: their increment is paused
+        self.assertEqual(alignment.field_keys, ["id", None, None, None])
+
+    def test_align_headers_confirmed_mapping_resolves_pause(self):
+        """Caller-confirmed mapping resolves paused columns, then old and new
+        rows reconcile on stable keys"""
+        old_headers = ["id", "amount", "amount"]
+        new_headers = ["id", "amount", "amount", "amount"]
+
+        alignment = utils.align_headers(
+            old_headers,
+            new_headers,
+            confirmed_mapping={1: 1, 2: 2},
+        )
+
+        self.assertTrue(alignment.is_resolved)
+        self.assertEqual(alignment.paused_indices, [])
+
+        # the confirmed columns reuse the old keys, the extra one is new
+        self.assertEqual(alignment.columns[3].resolution, utils.ColumnResolution.new)
+        self.assertEqual(
+            alignment.field_keys, ["id", "amount", "amount_2", "amount_3"]
+        )
+
+        old_keys = utils.dedupe_headers(old_headers)
+        old_records = utils.to_records(old_keys, [["A1", "10", "99"]])
+        new_records = utils.to_aligned_records(alignment, [["A2", "20", "88", "x"]])
+
+        # old and new business rows share the same keys for matched fields
+        self.assertEqual(new_records[0]["amount"], "20")
+        self.assertEqual(new_records[0]["amount_2"], "88")
+        for key in old_records[0]:
+            self.assertIn(key, new_records[0])
+
+    def test_align_headers_reconcile_after_column_insert(self):
+        """End to end: two identical headers, one column inserted in the
+        middle, old and new business rows keep reconciling"""
+        old_headers = ["id", "amount", "amount"]
+        old_keys = utils.dedupe_headers(old_headers)
+        old_records = utils.to_records(old_keys, [["A1", "10", "99"]])
+
+        new_headers = ["id", "amount", "currency", "amount"]
+        alignment = utils.align_headers(old_headers, new_headers)
+        new_records = utils.to_aligned_records(alignment, [["A2", "20", "CNY", "88"]])
+
+        self.assertEqual(new_records[0]["id"], "A2")
+        self.assertEqual(new_records[0]["amount"], "20")
+        self.assertEqual(new_records[0]["amount_2"], "88")
+        self.assertEqual(new_records[0]["currency"], "CNY")
+        self.assertEqual(old_records[0]["amount_2"], "99")
+
+    def test_align_headers_to_aligned_records_pauses_columns(self):
+        """Paused columns are excluded from the records: no value is ever
+        attributed to a stale field identity"""
+        old_headers = ["id", "amount", "amount"]
+        new_headers = ["id", "amount", "amount", "amount"]
+
+        alignment = utils.align_headers(old_headers, new_headers)
+        records = utils.to_aligned_records(alignment, [["A2", "20", "30", "40"]])
+
+        self.assertEqual(records, [{"id": "A2"}])
+
+    def test_align_headers_unique_headers_match_by_name(self):
+        """Unique headers match by name regardless of position"""
+        old_headers = ["A", "B", "C"]
+        new_headers = ["X", "C", "A"]
+
+        alignment = utils.align_headers(old_headers, new_headers)
+
+        self.assertTrue(alignment.is_resolved)
+        self.assertEqual(
+            [column.resolution for column in alignment.columns],
+            [
+                utils.ColumnResolution.new,
+                utils.ColumnResolution.matched,
+                utils.ColumnResolution.matched,
+            ],
+        )
+        self.assertEqual(
+            [column.old_index for column in alignment.columns], [None, 2, 0]
+        )
+        self.assertEqual(alignment.removed_indices, [1])
+        self.assertEqual(alignment.field_keys, ["X", "C", "A"])
+
+    def test_align_headers_invalid_confirmed_mapping(self):
+        """confirmed_mapping is validated"""
+        old_headers = ["amount", "amount"]
+        new_headers = ["amount", "amount", "amount"]
+
+        with self.assertRaises(ValueError):
+            utils.align_headers(old_headers, new_headers, {3: 0})
+
+        with self.assertRaises(ValueError):
+            utils.align_headers(old_headers, new_headers, {0: 2})
+
+        with self.assertRaises(ValueError):
+            utils.align_headers(old_headers, new_headers, {0: 0, 1: 0})
+
     def test_find_table_simple(self):
         """Test find table with basic case"""
         values = [

@@ -21,6 +21,7 @@ from typing import (
     Iterable,
     List,
     Mapping,
+    NamedTuple,
     Optional,
     Tuple,
     TypeVar,
@@ -1000,6 +1001,315 @@ def to_records(
     """
 
     return [dict(zip(headers, row)) for row in values]
+
+
+def dedupe_headers(headers: Iterable[Any]) -> List[Any]:
+    """Builds a unique key for each header, preserving the original header
+    order and any duplicate header names.
+
+    The first occurrence of a header is kept as-is. Each subsequent
+    occurrence of the same header gets a ``"_N"`` suffix where ``N`` is its
+    1-based occurrence rank among identical headers. If a generated key
+    collides with an existing header, the suffix is incremented until the
+    key is unique.
+
+    :param list headers: the header row, may contain duplicates.
+
+    Examples::
+
+        >>> dedupe_headers(["date", "amount", "amount"])
+        ["date", "amount", "amount_2"]
+
+        >>> dedupe_headers(["amount", "amount_2", "amount"])
+        ["amount", "amount_2", "amount_3"]
+    """
+    counts: Dict[Any, int] = defaultdict(int)
+    used = set()
+    keys = []
+    for header in headers:
+        counts[header] += 1
+        key = header if counts[header] == 1 else f"{header}_{counts[header]}"
+        if key in used:
+            rank = counts[header] + 1
+            key = f"{header}_{rank}"
+            while key in used:
+                rank += 1
+                key = f"{header}_{rank}"
+        used.add(key)
+        keys.append(key)
+    return keys
+
+
+class ColumnResolution(StrEnum):
+    """Resolution status of a new header row column after alignment."""
+
+    matched = "matched"
+    """The column was uniquely matched to a column of the old header row."""
+
+    new = "new"
+    """The column has no counterpart in the old header row."""
+
+    paused = "paused"
+    """The column could not be uniquely matched; its identity is unknown."""
+
+
+class AlignedColumn(NamedTuple):
+    """Alignment result for a single column of the new header row."""
+
+    new_index: int
+    """0-based index of the column in the new header row."""
+
+    header: Any
+    """The raw header value of the column in the new header row."""
+
+    resolution: ColumnResolution
+    """How the column was resolved, see :class:`ColumnResolution`."""
+
+    old_index: Optional[int]
+    """0-based index of the matched column in the old header row,
+    or ``None`` when the column is not matched."""
+
+
+class HeaderAlignment(NamedTuple):
+    """Alignment between an old and a new header row.
+
+    Produced by :func:`align_headers`. Holds one :class:`AlignedColumn`
+    per column of the new header row, in the original header order.
+    """
+
+    old_headers: Tuple[Any, ...]
+    new_headers: Tuple[Any, ...]
+    columns: Tuple[AlignedColumn, ...]
+
+    @property
+    def paused_indices(self) -> List[int]:
+        """0-based indices of the new columns whose identity could not be
+        uniquely resolved. Increments for these columns must be paused."""
+        return [
+            column.new_index
+            for column in self.columns
+            if column.resolution is ColumnResolution.paused
+        ]
+
+    @property
+    def is_resolved(self) -> bool:
+        """``True`` when every new column is either matched or known to be new."""
+        return not self.paused_indices
+
+    @property
+    def removed_indices(self) -> List[int]:
+        """0-based indices of the old columns with no counterpart in the new
+        header row."""
+        matched_old_indices = {
+            column.old_index
+            for column in self.columns
+            if column.old_index is not None
+        }
+        return [
+            index
+            for index in range(len(self.old_headers))
+            if index not in matched_old_indices
+        ]
+
+    @property
+    def field_keys(self) -> List[Optional[str]]:
+        """Stable field key for each column of the new header row.
+
+        Matched columns reuse the key derived from the old header row, so
+        records built before and after the header change share the same keys
+        and can be reconciled. New columns get a fresh unique key. Paused
+        columns get ``None`` and must be excluded from incremental updates.
+        """
+        old_keys = dedupe_headers(self.old_headers)
+        new_keys = dedupe_headers(self.new_headers)
+        used = set()
+        keys: List[Optional[str]] = []
+        for column in self.columns:
+            if column.resolution is ColumnResolution.paused:
+                keys.append(None)
+                continue
+            if (
+                column.resolution is ColumnResolution.matched
+                and column.old_index is not None
+            ):
+                key = old_keys[column.old_index]
+            else:
+                key = new_keys[column.new_index]
+                if key in used:
+                    base = key
+                    rank = 2
+                    key = f"{base}_{rank}"
+                    while key in used:
+                        rank += 1
+                        key = f"{base}_{rank}"
+            used.add(key)
+            keys.append(key)
+        return keys
+
+
+def _validate_confirmed_mapping(
+    confirmed: Mapping[int, int], old_count: int, new_count: int
+) -> None:
+    """This is a private function, validating a caller-confirmed column
+    mapping against the old and new header row sizes."""
+    for new_index, old_index in confirmed.items():
+        if not 0 <= new_index < new_count:
+            raise ValueError(
+                "confirmed_mapping contains an out of range new column index: "
+                f"{new_index}"
+            )
+        if not 0 <= old_index < old_count:
+            raise ValueError(
+                "confirmed_mapping contains an out of range old column index: "
+                f"{old_index}"
+            )
+    if len(set(confirmed.values())) != len(confirmed):
+        raise ValueError(
+            "confirmed_mapping assigns the same old column to several new columns"
+        )
+
+
+def _resolve_column_group(
+    header: Any, new_indices: List[int], old_indices: List[int]
+) -> List[AlignedColumn]:
+    """This is a private function, resolving the columns sharing one header
+    value between the old and the new header row.
+
+    Columns are paired by occurrence rank when the occurrence count of the
+    header is the same on both sides. Otherwise the columns are either new
+    (no old counterpart) or paused (ambiguous correspondence).
+    """
+    if len(old_indices) == len(new_indices):
+        return [
+            AlignedColumn(
+                new_index=new_index,
+                header=header,
+                resolution=ColumnResolution.matched,
+                old_index=old_index,
+            )
+            for new_index, old_index in zip(new_indices, old_indices)
+        ]
+
+    if not old_indices:
+        resolution = ColumnResolution.new
+    else:
+        # ambiguous correspondence: pause instead of guessing by position
+        resolution = ColumnResolution.paused
+
+    return [
+        AlignedColumn(
+            new_index=new_index,
+            header=header,
+            resolution=resolution,
+            old_index=None,
+        )
+        for new_index in new_indices
+    ]
+
+
+def align_headers(
+    old_headers: Iterable[Any],
+    new_headers: Iterable[Any],
+    confirmed_mapping: Optional[Mapping[int, int]] = None,
+) -> HeaderAlignment:
+    """Aligns a new header row against a previous one, maintaining the
+    identity of each field across structural changes such as inserted
+    columns, even when headers are duplicated.
+
+    Columns are matched using stable column evidence: a column of the new
+    header row is matched to a column of the old header row only when their
+    header values are identical and the number of occurrences of that header
+    is the same on both sides. In that case columns are paired by occurrence
+    rank, so inserting a column between two identical headers does not shift
+    their identities.
+
+    When a header occurs a different number of times on each side, the
+    correspondence is ambiguous: all involved new columns are marked as
+    :attr:`ColumnResolution.paused` instead of being guessed by position.
+    In particular the old second column is never blindly mapped onto the new
+    second column.
+
+    The caller may confirm (or override) the identity of any column with
+    ``confirmed_mapping``. Once every paused column is confirmed,
+    :attr:`HeaderAlignment.is_resolved` is true and old and new business
+    rows can be reconciled through :attr:`HeaderAlignment.field_keys`.
+
+    :param list old_headers: the previous header row, duplicates allowed.
+    :param list new_headers: the current header row, duplicates allowed.
+    :param dict confirmed_mapping: (optional) caller-confirmed identities as
+        a mapping of 0-based new column index to 0-based old column index.
+
+    Examples::
+
+        >>> align_headers(
+        ...     ["date", "amount", "amount"],
+        ...     ["date", "amount", "currency", "amount"],
+        ... ).is_resolved
+        True
+
+        >>> alignment = align_headers(["a", "a"], ["a", "a", "a"])
+        >>> alignment.paused_indices
+        [0, 1, 2]
+    """
+    old_headers = list(old_headers)
+    new_headers = list(new_headers)
+    confirmed = dict(confirmed_mapping) if confirmed_mapping else {}
+
+    _validate_confirmed_mapping(confirmed, len(old_headers), len(new_headers))
+
+    columns: List[Optional[AlignedColumn]] = [None] * len(new_headers)
+
+    claimed_old_indices = set(confirmed.values())
+    for new_index, old_index in confirmed.items():
+        columns[new_index] = AlignedColumn(
+            new_index=new_index,
+            header=new_headers[new_index],
+            resolution=ColumnResolution.matched,
+            old_index=old_index,
+        )
+
+    old_unclaimed: Dict[Any, List[int]] = defaultdict(list)
+    for old_index, header in enumerate(old_headers):
+        if old_index not in claimed_old_indices:
+            old_unclaimed[header].append(old_index)
+
+    new_unresolved: Dict[Any, List[int]] = defaultdict(list)
+    for new_index, header in enumerate(new_headers):
+        if columns[new_index] is None:
+            new_unresolved[header].append(new_index)
+
+    for header, new_indices in new_unresolved.items():
+        old_indices = old_unclaimed.get(header, [])
+        for column in _resolve_column_group(header, new_indices, old_indices):
+            columns[column.new_index] = column
+
+    return HeaderAlignment(
+        old_headers=tuple(old_headers),
+        new_headers=tuple(new_headers),
+        columns=tuple(column for column in columns if column is not None),
+    )
+
+
+def to_aligned_records(
+    alignment: HeaderAlignment, values: Iterable[Iterable[Any]]
+) -> List[Dict[str, Any]]:
+    """Builds records from rows of ``values`` using the stable field keys of
+    an :class:`HeaderAlignment`.
+
+    Matched columns are keyed exactly like the records built from the old
+    header row, so old and new business rows can be reconciled. Paused
+    columns are excluded from the records: their increment is paused and
+    their values are never attributed to a stale field identity.
+
+    :param HeaderAlignment alignment: the alignment returned by
+        :func:`align_headers`.
+    :param list values: a matrix of values matching the new header row.
+    """
+    keys = alignment.field_keys
+    return [
+        {key: value for key, value in zip(keys, row) if key is not None}
+        for row in values
+    ]
 
 
 def _expand_right(values: List[List[str]], start: int, end: int, row: int) -> int:

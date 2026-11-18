@@ -81,6 +81,7 @@ Contents:
 
    schedule
    loader
+   transfer
    gtfs_entities
    gtfs2db
    internal

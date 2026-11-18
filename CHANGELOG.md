@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `LasData.plan_return_repair` / `laspy.plan_return_repair`: computes a
+  minimum-cost repair of `return_number` and `number_of_returns` from explicit
+  pulse ids, optional candidates, mixed old/new bit widths and per-flight-line
+  control totals. Fields whose optimal value is ambiguous are left for review,
+  and the report keeps the original codes plus before/after statistics.
+
 ## Version 2.7.0 (14/01/2026)
 
 ### Added

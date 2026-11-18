@@ -18,6 +18,14 @@ from .point import DimensionInfo, DimensionKind, ExtraBytesParams, PointFormat
 from .point.dims import supported_point_formats, supported_versions
 from .point.format import lost_dimensions
 from .point.record import PackedPointRecord, ScaleAwarePointRecord
+from .repair import (
+    ReturnCandidate,
+    ReturnRepairError,
+    ReturnRepairPlan,
+    ReturnRepairReport,
+    plan_return_repair,
+    validate_returns,
+)
 from .vlrs import VLR
 from .waveform.mode import WaveformMode
 

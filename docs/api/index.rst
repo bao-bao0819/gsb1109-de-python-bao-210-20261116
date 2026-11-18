@@ -43,6 +43,18 @@ Re-exported classes
  - :class:`.CopcReader`
 
 
+Return repair
+-------------
+
+ - :func:`.plan_return_repair`
+ - :func:`.validate_returns`
+ - :class:`.ReturnCandidate`
+ - :class:`.ReturnRepairPlan`
+ - :class:`.ReturnRepairReport`
+ - :class:`.ReturnStatistics`
+ - :class:`.ReturnRepairError`
+
+
 Submodules
 ----------
 
@@ -63,4 +75,6 @@ Submodules
    laspy.lasmmap
    laspy.lasappender
    laspy.laswriter
+   laspy.repair
+
 

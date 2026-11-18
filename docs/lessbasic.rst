@@ -154,3 +154,40 @@ will be able to automatically parse the VLR when reading the file & write it whe
 >>> las.vlrs[0].numbers
 [1, 2, 3]
 
+
+
+Auditing return numbers
+=======================
+
+``return_number`` and ``number_of_returns`` share a small bit field. A point is
+valid when ``1 <= return_number <= number_of_returns`` and both values fit the
+point format (3 bits for formats 0-5, 4 bits for formats 6-10). Points that
+come from the same emitted pulse must also share one ``number_of_returns`` and
+use distinct return numbers.
+
+laspy can report these problems and plan a minimum-cost repair:
+
+.. code-block:: python
+
+    import laspy
+
+    las = laspy.read("some_file.las")
+    issues = las.validate_returns(pulse_ids)
+    plan = las.plan_return_repair(pulse_ids)
+
+``pulse_ids`` is mandatory for both calls. It is supplied by the caller (for
+example from the acquisition system) and is never derived from X/Y/Z, so nearby
+points are not silently treated as one pulse.
+
+When several minimum-cost repairs exist, only the field values that all of them
+agree on are written by ``plan.apply_in_place()`` (or by
+``las.repair_returns(pulse_ids)``). Fields whose optimal value is ambiguous are
+left untouched and listed in ``plan.report.review_items`` together with their
+possible values. ``plan.report`` also keeps the original codes, the applied
+changes, one concrete optimal revision and before/after counts. It can be
+serialized with ``plan.to_json()`` or written per point with ``plan.to_csv()``.
+
+``return_number_counts`` and ``number_of_returns_counts`` optionally pin exact
+per-flight-line totals. ``source_point_format_ids`` and the ``*_bits`` arguments
+narrow the allowed values when a batch mixes old and new point formats. See
+:func:`laspy.repair.plan_return_repair` for the full signature.

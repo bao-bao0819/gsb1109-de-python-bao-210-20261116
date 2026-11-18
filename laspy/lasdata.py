@@ -491,6 +491,38 @@ class LasData:
             if self.header.version.minor >= 4 and self.evlrs is not None:
                 writer.write_evlrs(self.evlrs)
 
+    def validate_returns(self, pulse_ids, **kwargs):
+        """Returns the return-number consistency issues of this point cloud.
+
+        ``pulse_ids`` explicitly identifies the pulse of every point; pulse
+        membership is never inferred from coordinates.  See
+        :func:`laspy.repair.validate_returns` for the full parameters.
+        """
+        from .repair import validate_returns
+
+        return validate_returns(self, pulse_ids, **kwargs)
+
+    def plan_return_repair(self, pulse_ids, **kwargs):
+        """Plans a minimum-cost, auditable repair of the two return fields.
+
+        The plan never modifies this object.  Only fields that every optimal
+        revision agrees on are present in ``plan.revised``; the rest are
+        returned as review items with their possible values.  See
+        :func:`laspy.repair.plan_return_repair` for the full parameters.
+        """
+        from .repair import plan_return_repair
+
+        return plan_return_repair(self, pulse_ids, **kwargs)
+
+    def repair_returns(self, pulse_ids, **kwargs):
+        """Applies the consensus part of :meth:`plan_return_repair` in place.
+
+        Fields on which optimal revisions disagree are left untouched and are
+        listed in the returned report.  The report also keeps the original
+        codes and the before/after statistics.
+        """
+        return self.plan_return_repair(pulse_ids, **kwargs).apply_in_place()
+
     def change_scaling(self, scales=None, offsets=None) -> None:
         """This changes the scales and/or offset used for the x,y,z
         dimensions.

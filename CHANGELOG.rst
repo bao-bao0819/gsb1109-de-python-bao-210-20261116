@@ -1,6 +1,11 @@
 Change Log
 ==========
 
+Unreleased
+  Add ``xport.audit`` for reconciling a displayed value with a stored
+  value using exact rounding pre-image intervals, including boundary
+  openness, candidate rounding rules, and dimension checks.
+
 v0.1.0, 2012-05-02
   Initial release.
 

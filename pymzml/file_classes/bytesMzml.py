@@ -24,6 +24,8 @@ class BytesMzml(StandardMzml):
         self.binary = binary
         self.file_handler = self.get_file_handler(encoding)
         self.offset_dict = dict()
+        self.index_dict = {}
+        self._scan_number_aliases = {}
         self.spec_open = regex_patterns.SPECTRUM_OPEN_PATTERN
         self.spec_close = regex_patterns.SPECTRUM_CLOSE_PATTERN
         if build_index_from_scratch is True:

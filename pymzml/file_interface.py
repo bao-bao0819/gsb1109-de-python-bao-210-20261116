@@ -30,6 +30,7 @@ class FileInterface(object):
         self.index_regex = index_regex
         self.file_handler = self._open(path)
         self.offset_dict = self.file_handler.offset_dict
+        self.index_dict = getattr(self.file_handler, "index_dict", None)
 
     def close(self):
         """Close the internal file handler."""

@@ -431,6 +431,7 @@ class Spectrum(MsData):
             "_id_dict",
             "_index",
             "_measured_precision",
+            "_native_id",
             "_peaks",
             "_profile",
             "_reprofiled_peaks",
@@ -451,6 +452,7 @@ class Spectrum(MsData):
         self._ID = None
         self._id_dict = None
         self._index = None
+        self._native_id = None
         self._ms_level = None
         self._mz = None
         self._peak_dict = {
@@ -830,6 +832,14 @@ class Spectrum(MsData):
 
         Returns:
             ID (str): native ID of the spectrum
+
+        Note:
+            This is only the local number encoded at the end of the id
+            attribute (e.g. the scan number). Spectra from different
+            controllers may share the same local number, so this is not
+            a stable identity. Use :py:attr:`native_id` for the full,
+            unique native id and :py:attr:`index` for the positional
+            index of the spectrum in the spectrumList.
         """
         if self._ID is None:
             if self.element:
@@ -844,6 +854,27 @@ class Spectrum(MsData):
                 else:
                     self._ID = self.element.get("id")
         return self._ID
+
+    @property
+    def native_id(self):
+        """
+        Access the full native id of the spectrum, i.e. the complete
+        content of the id attribute
+        (e.g. 'controllerType=0 controllerNumber=1 scan=1').
+
+        Returns:
+            native_id (str): full native ID of the spectrum
+
+        Note:
+            This is the stable identity of a spectrum within a run.
+            In contrast to :py:attr:`ID`, spectra with the same local
+            scan number but different controllerType/controllerNumber
+            keep distinct native ids and are never merged.
+        """
+        if self._native_id is None:
+            if self.element is not None:
+                self._native_id = self.element.get("id")
+        return self._native_id
 
     @property
     def id_dict(self):

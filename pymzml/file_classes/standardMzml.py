@@ -60,6 +60,8 @@ class StandardMzml(object):
         self.path = path
         self.file_handler = self.get_file_handler(encoding)
         self.offset_dict = {}
+        self.index_dict = {}
+        self._scan_number_aliases = {}
         self.spec_open = regex_patterns.SPECTRUM_OPEN_PATTERN
         self.spec_close = regex_patterns.SPECTRUM_CLOSE_PATTERN
 
@@ -122,6 +124,18 @@ class StandardMzml(object):
                 spectrum = chromatogram.Chromatogram(XML(data))
         elif type(identifier) == str:
             return self._search_string_identifier(identifier)
+        elif (
+            type(identifier) == int
+            and identifier in self._scan_number_aliases
+            and self._scan_number_aliases[identifier] is None
+        ):
+            raise KeyError(
+                "Scan number {0} is ambiguous, multiple spectra with "
+                "different native ids share this local number. "
+                "Use the full native id (e.g. 'controllerType=0 "
+                "controllerNumber=1 scan={0}') to access a specific "
+                "spectrum.".format(identifier)
+            )
         else:
             spectrum = self._binary_search(identifier)
 
@@ -258,6 +272,57 @@ class StandardMzml(object):
             spectrum = spec.Spectrum(XML(spec_string), measured_precision=5e-6)
             return spectrum
 
+    @staticmethod
+    def _scan_number_of(native_key):
+        """
+        Extract the local scan number from a native id string.
+
+        Arguments:
+            native_key (str): full native id of a spectrum
+
+        Returns:
+            scan number (int) or None if the native id does not encode
+            a scan number
+        """
+        if not isinstance(native_key, str):
+            return None
+        match = regex_patterns.SPECTRUM_ID_PATTERN2.search(native_key)
+        if match is None:
+            return None
+        return int(match.group(2))
+
+    def _add_to_index(self, native_key, offset):
+        """
+        Register a spectrum in the offset dict and the positional index.
+
+        The full native id (e.g. 'controllerType=0 controllerNumber=1
+        scan=1') is always used as the key of the offset dict, so spectra
+        keep their stable identity. Additionally, the local scan number
+        is registered as an integer alias for backwards compatibility,
+        but only as long as it is unambiguous. If two distinct native
+        ids share the same local number, the alias is removed again so
+        the spectra are never merged.
+
+        Arguments:
+            native_key (str or int): full native id of the spectrum
+            offset (tuple): byte offset(s) of the spectrum in the file
+        """
+        position = len(self.index_dict)
+        self.index_dict[position] = native_key
+        self.offset_dict[native_key] = offset
+        scan_number = self._scan_number_of(native_key)
+        if scan_number is None:
+            return
+        if scan_number in self._scan_number_aliases:
+            if self._scan_number_aliases[scan_number] != native_key:
+                # same local number for different native ids,
+                # drop the ambiguous alias instead of merging
+                self.offset_dict.pop(scan_number, None)
+                self._scan_number_aliases[scan_number] = None
+        else:
+            self._scan_number_aliases[scan_number] = native_key
+            self.offset_dict[scan_number] = offset
+
     def _build_index(self, from_scratch=False):
         """
         Build an index.
@@ -319,7 +384,14 @@ class StandardMzml(object):
             spectrum_index_pattern = regex_patterns.SPECTRUM_INDEX_PATTERN
             sim_index_pattern = regex_patterns.SIM_INDEX_PATTERN
 
+            in_spectrum_index = False
             for line in seeker:
+                if b"<index " in line:
+                    in_spectrum_index = b'name="spectrum"' in line
+                    continue
+                if b"</index>" in line:
+                    in_spectrum_index = False
+                    continue
                 match_spec = spectrum_index_pattern.search(line)
                 if match_spec and match_spec.group("nativeID") == b"":
                     match_spec = None
@@ -328,21 +400,18 @@ class StandardMzml(object):
                     if match_spec:
                         offset = int(bytes.decode(match_spec.group("offset")))
                         native_id = int(bytes.decode(match_spec.group("nativeID")))
-                        self.offset_dict[native_id] = offset
+                        if in_spectrum_index:
+                            self._add_to_index(native_id, offset)
+                        else:
+                            self.offset_dict[native_id] = offset
                     elif match_sim:
                         offset = int(bytes.decode(match_sim.group("offset")))
                         native_id = bytes.decode(match_sim.group("nativeID"))
-                        try:
-                            native_id = int(
-                                regex_patterns.SPECTRUM_ID_PATTERN2.search(
-                                    native_id
-                                ).group(2)
-                            )
-                        except AttributeError:
-                            # match is None and has no attribute group,
-                            # so use the whole string as ID
-                            pass
-                        self.offset_dict[native_id] = (offset,)
+                        if in_spectrum_index:
+                            # keep the full native id as stable identity
+                            self._add_to_index(native_id, (offset,))
+                        else:
+                            self.offset_dict[native_id] = (offset,)
                 else:
                     match = self.index_regex.search(line)
                     if match:
@@ -352,7 +421,10 @@ class StandardMzml(object):
                         except ValueError:
                             pass
                         offset = int(match.group("offset"))
-                        self.offset_dict[native_id] = (offset,)
+                        if in_spectrum_index:
+                            self._add_to_index(native_id, (offset,))
+                        else:
+                            self.offset_dict[native_id] = (offset,)
 
         elif from_scratch is True:
             seeker.seek(0)
@@ -420,9 +492,7 @@ class StandardMzml(object):
             # Check if everything is ok (e.g. we found the right number of
             # chromatograms and spectra) and then return the dictionary.
             if chromcnt == len(chrom_positions) and speccnt == len(spec_positions):
-                positions = {}
-                positions.update(chrom_positions)
-                positions.update(spec_positions)
+                pass
             else:
                 logger.warning(
                     "Found {spec_count} spectra "
@@ -440,25 +510,15 @@ class StandardMzml(object):
                     "but some might be still missing. "
                     "This may happen because your is file truncated"
                 )
-                positions = {}
-                positions.update(chrom_positions)
-                positions.update(spec_positions)
-            return positions
+            return chrom_positions, spec_positions
 
         indices = get_data_indices(seeker)
         if indices is not None:
-            tmp_dict = {}
-
-            item_list = sorted(indices.items(), key=lambda x: x[1])
-            for i in range(len(item_list)):
-                key = item_list[i][0]
-                tmp_dict[key] = (item_list[i][1],)
-
-            self.offset_dict.update(tmp_dict)
-
-            # make sure the list is sorted (for bisect)
-            # self.info['offsetList'] = sorted(self.info['offsetList'])
-            # self.info['seekable'] = True
+            chrom_positions, spec_positions = indices
+            for key, offset in sorted(chrom_positions.items(), key=lambda x: x[1]):
+                self.offset_dict[key] = (offset,)
+            for key, offset in sorted(spec_positions.items(), key=lambda x: x[1]):
+                self._add_to_index(key, (offset,))
 
         return
 

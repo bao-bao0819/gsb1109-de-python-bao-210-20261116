@@ -195,12 +195,22 @@ class Reader(object):
         Access spectrum or chromatogram with native id 'identifier'.
 
         Arguments:
-            identifier (str or int): last number in the id tag of the spectrum
-                element or a chromatogram identifier like 'TIC'
+            identifier (str or int): full native id of the spectrum
+                (str, e.g. 'controllerType=0 controllerNumber=1 scan=1'),
+                a chromatogram identifier like 'TIC', or the last number
+                of the native id (int, legacy behavior)
 
         Returns:
             spectrum (Spectrum or Chromatogram): spectrum/chromatogram object
             with native id 'identifier'
+
+        Note:
+            To explicitly distinguish between the native id and the
+            positional index of a spectrum, use
+            :py:meth:`get_spectrum_by_native_id` and
+            :py:meth:`get_spectrum_by_index`. Integer identifiers refer
+            to the local scan number of the native id, which may be
+            ambiguous for files with multiple controllers.
         """
         try:
             if isinstance(identifier, int) and identifier > self.get_spectrum_count():
@@ -474,8 +484,9 @@ class Reader(object):
         Access spectrum with the given identifier.
 
         Arguments:
-            identifier (str or int): Either a string identifier or an index (0-based)
-                to access spectra in order.
+            identifier (str or int): Either a string identifier or the
+                last number of the native id (int, legacy behavior,
+                see :py:meth:`__getitem__`).
 
         Returns:
             spectrum (Spectrum): spectrum object with the given identifier
@@ -483,8 +494,79 @@ class Reader(object):
         Note:
             This method provides the same functionality as using the indexing syntax
             (e.g., run[0]), but with a more explicit method name.
+            To explicitly distinguish between native ids and positional
+            indices, use :py:meth:`get_spectrum_by_native_id` and
+            :py:meth:`get_spectrum_by_index`.
         """
         return self[identifier]
+
+    def get_spectrum_by_native_id(self, native_id):
+        """
+        Access spectrum by its full native id.
+
+        Arguments:
+            native_id (str): full native id of the spectrum, i.e. the
+                complete id attribute of the spectrum element
+                (e.g. 'controllerType=0 controllerNumber=1 scan=1')
+
+        Returns:
+            spectrum (Spectrum): spectrum object with the given native id
+
+        Note:
+            The full native id is the stable identity of a spectrum.
+            Spectra with the same local scan number but different
+            controllerType/controllerNumber are never merged when
+            accessed by their native id.
+        """
+        return self[native_id]
+
+    def get_spectrum_by_index(self, index):
+        """
+        Access spectrum by its positional index.
+
+        Arguments:
+            index (int): 0-based position of the spectrum in the
+                spectrumList of the file
+
+        Returns:
+            spectrum (Spectrum): spectrum object at the given position
+
+        Note:
+            The positional index is the order of the spectrum in the
+            file (mirroring the index attribute of the spectrum
+            element) and must not be confused with the native id.
+            Both entry points resolve to the same raw spectrum, i.e.
+            run.get_spectrum_by_index(i) returns the i-th spectrum
+            that sequential iteration over the Reader would yield.
+        """
+        if not isinstance(index, int):
+            raise ValueError("Index must be an integer")
+        if index < 0:
+            raise IndexError("Spectrum index must be non-negative")
+        index_dict = self.info["file_object"].index_dict
+        if index_dict and index in index_dict:
+            return self[index_dict[index]]
+        # no (complete) positional index available,
+        # fall back to sequential read
+        spectrum_count = self.get_spectrum_count()
+        if spectrum_count is not None and index >= spectrum_count:
+            raise IndexError(
+                "Spectrum index {0} is out of range (0-{1})".format(
+                    index, spectrum_count - 1
+                )
+            )
+        self.info["file_object"].close()
+        self.info["file_object"] = self._open_file(
+            self.path_or_file, build_index_from_scratch=False
+        )
+        self.iter = self._init_iter()
+        position = 0
+        for element in self:
+            if isinstance(element, spec.Spectrum):
+                if position == index:
+                    return element
+                position += 1
+        raise IndexError("Spectrum with index {0} not found".format(index))
 
     def get_chromatogram(self, identifier):
         """

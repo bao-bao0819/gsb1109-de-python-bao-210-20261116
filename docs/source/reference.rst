@@ -17,3 +17,7 @@ API reference
    Patient
    Recording
    AnonymizedDateError
+   convert_bdf_to_edf
+   BdfToEdfReport
+   ChannelConversionReport
+   SaturatedSample

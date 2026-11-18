@@ -105,3 +105,38 @@ edf = read_edf("example.edf")
 edf.anonymize()
 edf.write("example_anonymized.edf")
 ```
+
+## Convert a BDF recording to EDF
+BDF stores 24-bit samples, EDF only 16-bit samples. `convert_bdf_to_edf`
+requantizes each channel in the physical domain instead of truncating the high
+bits, using the allowed absolute error to choose the physical range written to
+the header:
+
+```python
+from edfio import convert_bdf_to_edf, read_bdf
+
+bdf = read_bdf("example.bdf")
+
+# one tolerance per channel, specified by label (or by index)
+result = convert_bdf_to_edf(
+    bdf,
+    tolerances={"EEG Fpz-Cz": 0.5, "Body Temp": 0.01},
+    default_tolerance=0.1,
+)
+edf, report = result  # ConversionResult is also an Edf
+
+if not report.all_satisfied:
+    print("unsatisfiable:", report.unsatisfiable_channels.labels)
+for channel in report.unsatisfiable_channels:
+    print(channel.label, channel.reason, channel.error_bound)
+    for sample in channel.saturated_samples:
+        print(sample.index, sample.value, sample.decoded_value, sample.error)
+
+edf.write("example.edf")
+```
+
+The reported error bound (`channel.error_bound`) covers every sample of the
+segment after decoding the EDF values back to physical values. When the
+amplitude of a channel requires more physical range than the tolerance allows,
+the range is centered on the data and the unavoidable clipping is reported as
+saturated samples instead of silently truncating bits.

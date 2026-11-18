@@ -1,3 +1,10 @@
+from edfio.bdf_to_edf import (
+    BdfToEdfReport,
+    ChannelConversionReport,
+    ConversionResult,
+    SaturatedSample,
+    convert_bdf_to_edf,
+)
 from edfio.edf import Bdf, Edf, read_bdf, read_edf
 from edfio.edf_annotations import EdfAnnotation
 from edfio.edf_header import AnonymizedDateError, Patient, Recording
@@ -15,11 +22,16 @@ __all__ = [
     "AnonymizedDateError",
     "Bdf",
     "BdfSignal",
+    "BdfToEdfReport",
+    "ChannelConversionReport",
+    "ConversionResult",
     "Edf",
     "EdfAnnotation",
     "EdfSignal",
     "Patient",
     "Recording",
+    "SaturatedSample",
+    "convert_bdf_to_edf",
     "read_bdf",
     "read_edf",
 ]

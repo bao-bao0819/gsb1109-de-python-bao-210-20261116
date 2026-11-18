@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- Add `convert_bdf_to_edf` (and `Bdf.to_edf`/`BdfSignal.to_edf`) to convert 24-bit BDF recordings to 16-bit EDF by requantizing physical values per channel according to an allowed absolute error. The result reports unsatisfiable channels and every saturated sample with its index and realized error.
+
 ## [0.4.18] - 2026-10-01
 
 ### Fixed

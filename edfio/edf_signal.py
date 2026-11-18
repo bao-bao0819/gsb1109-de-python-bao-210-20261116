@@ -691,3 +691,21 @@ class BdfSignal(_BaseSignal[np.int32]):
             digital_range=digital_range,
             prefiltering=prefiltering,
         )
+
+    def to_edf(
+        self,
+        allowed_error: float,
+        *,
+        digital_range: tuple[int, int] | None = None,
+    ) -> tuple[EdfSignal, Any]:
+        """Convert this BDF signal to a 16-bit EDF signal.
+
+        See :func:`edfio.bdf_to_edf.convert_signal_to_edf` for details.
+        """
+        from edfio.bdf_to_edf import convert_signal_to_edf  # noqa: PLC0415
+
+        return convert_signal_to_edf(
+            self,
+            allowed_error,
+            digital_range=digital_range,
+        )

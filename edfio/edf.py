@@ -13,7 +13,7 @@ from decimal import Decimal
 from fractions import Fraction
 from math import ceil, floor
 from pathlib import Path
-from typing import ClassVar, Generic, Literal, TypeVar, Union
+from typing import Any, ClassVar, Generic, Literal, TypeVar, Union
 
 import numpy as np
 
@@ -1298,6 +1298,35 @@ class Bdf(_Base[BdfSignal]):
     def version(self) -> str:
         """The BDF version, always `�BIOSEMI`."""
         return decode_str(self._version)
+
+    def to_edf(
+        self,
+        tolerances: Any = None,
+        *,
+        tolerance: Any = None,
+        allowed_error: Any = None,
+        default_tolerance: float | None = None,
+        digital_range: tuple[int, int] | None = None,
+        data_record_duration: float | None = None,
+    ) -> Any:
+        """Convert this BDF recording to a 16-bit EDF recording.
+
+        See :func:`edfio.bdf_to_edf.convert_bdf_to_edf` for details.  Each
+        channel is requantized in the physical domain according to its allowed
+        absolute error; the returned object carries a `report` describing
+        unsatisfiable channels and every saturated sample.
+        """
+        from edfio.bdf_to_edf import convert_bdf_to_edf  # noqa: PLC0415
+
+        return convert_bdf_to_edf(
+            self,
+            tolerances,
+            tolerance=tolerance,
+            allowed_error=allowed_error,
+            default_tolerance=default_tolerance,
+            digital_range=digital_range,
+            data_record_duration=data_record_duration,
+        )
 
 
 def _calculate_num_data_records(

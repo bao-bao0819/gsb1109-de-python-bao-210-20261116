@@ -452,17 +452,23 @@ class LasHeader:
         """
         import pyproj
 
-        # check and remove any existing crs vlrs
-        for crs_vlr_name in (
-            "WktCoordinateSystemVlr",
-            "GeoKeyDirectoryVlr",
-            "GeoAsciiParamsVlr",
-            "GeoDoubleParamsVlr",
-        ):
-            try:
-                self._vlrs.extract(crs_vlr_name)
-            except IndexError:
-                pass
+        # Check and remove any existing CRS VLRs, including CRS records stored
+        # in EVLRs.  Leaving an old EVLR behind would make a later
+        # resolve_crs() see the previous value alongside the new one.
+        vlr_containers = [self._vlrs]
+        if self.evlrs is not None:
+            vlr_containers.append(self.evlrs)
+        for vlrs in vlr_containers:
+            for crs_vlr_name in (
+                "WktCoordinateSystemVlr",
+                "GeoKeyDirectoryVlr",
+                "GeoAsciiParamsVlr",
+                "GeoDoubleParamsVlr",
+            ):
+                try:
+                    vlrs.extract(crs_vlr_name)
+                except IndexError:
+                    pass
 
         new_ver = self._version >= Version(1, 4)
         new_pt = self.point_format.id >= 6
@@ -472,6 +478,7 @@ class LasHeader:
             self.global_encoding.wkt = True
         else:
             self._vlrs.extend(create_geotiff_projection_vlrs(crs))
+            self.global_encoding.wkt = False
 
     def remove_extra_dim(self, name: str) -> None:
         self.remove_extra_dims([name])
@@ -875,6 +882,11 @@ class LasHeader:
         Returns None if no CRS VLR is present, or if the CRS specified
         in the VLRS is not understood.
 
+        .. note::
+            This method keeps its historical behaviour and does not signal
+            conflicting metadata. Use :meth:`resolve_crs` when the
+            interpretation must be recorded and conflicts must prevent
+            coordinate operations.
 
         Parameters
         ----------
@@ -914,6 +926,144 @@ class LasHeader:
             return parsed_crs[preferred]
         except KeyError:
             return parsed_crs[other]
+
+    def crs_candidates(self, include_non_standard: bool = True):
+        """Return the CRS descriptions found in the header and EVLRs.
+
+        This is a read-only inspection helper; it never changes coordinates
+        or VLRs.  See :func:`laspy.crs.collect_crs_candidates`.
+        """
+        from .crs import collect_crs_candidates
+
+        candidates = collect_crs_candidates(self)
+        if include_non_standard:
+            return candidates
+        return tuple(candidate for candidate in candidates if candidate.is_standard)
+
+    def apply_crs_header(self, repaired_header: "LasHeader") -> None:
+        """Adopt CRS metadata from a corrected header.
+
+        Only the CRS VLRs from ``repaired_header`` replace this header's CRS
+        VLRs; all other header fields remain untouched.  This is intended for
+        ingestion repair: correct one record, then call
+        :meth:`laspy.LasData.recompute_crs`.
+        """
+        names = {
+            "WktCoordinateSystemVlr",
+            "GeoKeyDirectoryVlr",
+            "GeoAsciiParamsVlr",
+            "GeoDoubleParamsVlr",
+        }
+        for name in names:
+            self._vlrs.extract(name)
+        if self.evlrs is not None:
+            for name in names:
+                self.evlrs.extract(name)
+        for vlr in repaired_header.vlrs:
+            if vlr.__class__.__name__ in names:
+                self._vlrs.append(vlr)
+        self.global_encoding.wkt = repaired_header.global_encoding.wkt
+
+    def resolve_crs(
+        self,
+        *,
+        policy=None,
+        prefer_wkt=None,
+        require_agreement: bool = False,
+    ):
+        """Explain how the header's CRS metadata is interpreted.
+
+        The returned :class:`laspy.crs.CrsInterpretation` records every
+        candidate, the selected one (if any), the version rule or caller
+        convention used, and whether the candidates conflict.  This method
+        performs no coordinate transformation.
+
+        Parameters
+        ----------
+        policy:
+            A :class:`laspy.crs.CrsPolicy` or a string alias.
+            ``"version"`` (default) applies the LAS version rule,
+            ``"prefer_wkt"`` / ``"prefer_geotiff"`` are caller conventions,
+            and ``"require_agreement"`` only resolves when all usable
+            candidates describe the same CRS.
+        prefer_wkt:
+            Compatibility shortcut for the ``prefer_wkt`` /
+            ``prefer_geotiff`` policies.
+        require_agreement:
+            Shortcut for ``policy="require_agreement"``.
+        """
+        from .crs import resolve_crs
+
+        return resolve_crs(
+            self,
+            policy=policy,
+            prefer_wkt=prefer_wkt,
+            require_agreement=require_agreement,
+        )
+
+    #: Explicit alias used by callers that prefer the word "interpret".
+    interpret_crs = resolve_crs
+
+    def crs_interpretation(
+        self,
+        *,
+        policy=None,
+        prefer_wkt=None,
+        require_agreement: bool = False,
+    ):
+        """Alias for :meth:`resolve_crs`."""
+        return self.resolve_crs(
+            policy=policy,
+            prefer_wkt=prefer_wkt,
+            require_agreement=require_agreement,
+        )
+
+    def usable_crs(
+        self,
+        *,
+        policy=None,
+        prefer_wkt=None,
+        require_agreement: bool = False,
+    ):
+        """Return the resolved CRS or ``None`` without raising."""
+        return self.resolve_crs(
+            policy=policy,
+            prefer_wkt=prefer_wkt,
+            require_agreement=require_agreement,
+        ).crs
+
+    def parse_crs_info(self, prefer_wkt=None):
+        """Compatibility wrapper returning both the CRS and its provenance.
+
+        ``parse_crs`` preserves the historical behavior of returning a CRS
+        even when the sources disagree.  This wrapper returns
+        ``(crs, interpretation)`` so a caller can migrate incrementally.
+
+        ``prefer_wkt=None`` (default) applies the version rule.
+        ``prefer_wkt=True`` / ``False`` express the explicit caller
+        preference, matching ``parse_crs``.
+        """
+        from .crs import CrsStatus
+
+        interpretation = self.resolve_crs(prefer_wkt=prefer_wkt)
+        if interpretation.status is CrsStatus.INVALID:
+            return None, interpretation
+        if interpretation.crs is not None:
+            return interpretation.crs, interpretation
+        return interpretation.selected_crs, interpretation
+
+    def transformed_crs(self, target_crs, *, source_xyz, **kwargs):
+        """Transform coordinates only after a successful interpretation.
+
+        This low-level helper is retained for callers that already have the
+        original coordinates. ``source_xyz`` must be the original,
+        not-yet-projected coordinates.
+        """
+        from .crs import _transform_xyz
+
+        interpretation = self.resolve_crs(**kwargs)
+        interpretation.raise_if_not_usable()
+        return _transform_xyz(source_xyz, interpretation.crs, target_crs)
 
     def read_evlrs(self, stream):
         """

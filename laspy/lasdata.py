@@ -491,6 +491,272 @@ class LasData:
             if self.header.version.minor >= 4 and self.evlrs is not None:
                 writer.write_evlrs(self.evlrs)
 
+    @property
+    def crs(self):
+        """The CRS selected by the default version rule, or ``None``.
+
+        This is a convenience shortcut for ``las.header.resolve_crs().crs``.
+        Use :meth:`crs_interpretation` when conflicts must be inspected.
+        """
+        return self.header.resolve_crs().crs
+
+    def crs_candidates(self, include_non_standard: bool = True):
+        """Return every CRS candidate without modifying coordinates."""
+        return self.header.crs_candidates(include_non_standard=include_non_standard)
+
+    def crs_interpretation(
+        self,
+        *,
+        policy=None,
+        prefer_wkt=None,
+        require_agreement: bool = False,
+    ):
+        """Return the CRS provenance/conflict record for this file."""
+        return self.header.resolve_crs(
+            policy=policy,
+            prefer_wkt=prefer_wkt,
+            require_agreement=require_agreement,
+        )
+
+    #: Aliases for ingestion code that uses different vocabulary.
+    crs_info = crs_interpretation
+    crs_resolution = crs_interpretation
+
+    def usable_crs(
+        self,
+        *,
+        policy=None,
+        prefer_wkt=None,
+        require_agreement: bool = False,
+    ):
+        """Return the resolved CRS or ``None`` without raising."""
+        return self.header.resolve_crs(
+            policy=policy,
+            prefer_wkt=prefer_wkt,
+            require_agreement=require_agreement,
+        ).crs
+
+    @property
+    def crs_transform(self):
+        """The record of the last successful CRS transformation, if any."""
+        return getattr(self, "_crs_transform", None)
+
+    def copy(self) -> "LasData":
+        """Return an independent copy of the data and header."""
+        points = record.ScaleAwarePointRecord(
+            self.points.array.copy(),
+            deepcopy(self.points.point_format),
+            scales=self.points.scales.copy(),
+            offsets=self.points.offsets.copy(),
+            waveform_state=self.points._copy_waveform_state(),
+        )
+        copied = LasData(header=self.header.copy(), points=points)
+        transform_record = self.crs_transform
+        if transform_record is not None:
+            from .crs import CrsTransformRecord
+
+            copied._crs_transform = CrsTransformRecord(
+                interpretation=transform_record.interpretation,
+                target_crs=transform_record.target_crs,
+                source_xyz=(
+                    None
+                    if transform_record.source_xyz is None
+                    else transform_record.source_xyz.copy()
+                ),
+                target_xyz=(
+                    None
+                    if transform_record.target_xyz is None
+                    else transform_record.target_xyz.copy()
+                ),
+                affected=(
+                    None
+                    if transform_record.affected is None
+                    else transform_record.affected.copy()
+                ),
+                source_header=(
+                    None
+                    if transform_record.source_header is None
+                    else transform_record.source_header.copy()
+                ),
+                output_header=(
+                    None
+                    if transform_record.output_header is None
+                    else transform_record.output_header.copy()
+                ),
+                header_updated=transform_record.header_updated,
+            )
+        return copied
+
+    def transform_crs(
+        self,
+        target_crs,
+        *,
+        policy=None,
+        prefer_wkt=None,
+        require_agreement: bool = False,
+        inplace: bool = False,
+        update_crs: bool = True,
+        keep_source_xyz: bool = True,
+        mask=None,
+    ):
+        """Transform point coordinates into ``target_crs``.
+
+        The source CRS is resolved and recorded *before* any coordinate is
+        changed.  If the file's metadata conflicts or cannot be resolved,
+        :class:`laspy.errors.CrsConflictError` /
+        :class:`laspy.errors.CrsUnresolvedError` is raised and the original
+        coordinates are left untouched.
+
+        When ``inplace`` is false (default) a transformed copy is returned,
+        leaving this object unchanged.  The copy carries a
+        :class:`laspy.crs.CrsTransformRecord` with the retained source
+        coordinates so :meth:`recompute_crs` can replay the operation after
+        a CRS record is corrected.
+
+        Parameters
+        ----------
+        target_crs:
+            Anything accepted by ``pyproj.CRS.from_user_input``.
+        policy, prefer_wkt, require_agreement:
+            Passed to :meth:`LasHeader.resolve_crs`.
+        inplace:
+            Modify this object instead of returning a transformed copy.
+        update_crs:
+            Rewrite the target file's CRS VLRs after a successful transform.
+        keep_source_xyz:
+            Retain original coordinates in the transform record. Required by
+            :meth:`recompute_crs`.
+        mask:
+            Optional boolean mask selecting the points to transform.
+        """
+        from .crs import transform_crs
+
+        return transform_crs(
+            self,
+            target_crs,
+            policy=policy,
+            prefer_wkt=prefer_wkt,
+            require_agreement=require_agreement,
+            inplace=inplace,
+            update_crs=update_crs,
+            keep_source_xyz=keep_source_xyz,
+            mask=mask,
+        )
+
+    def recompute_crs(
+        self,
+        *,
+        source_header=None,
+        policy=None,
+        prefer_wkt=None,
+        require_agreement: bool = False,
+        update_crs: bool = True,
+        inplace: bool = False,
+    ):
+        """Replay the last CRS transformation from its original coordinates.
+
+        Use this after correcting one CRS record: the source coordinates are
+        re-read from the transform record instead of being taken from the
+        currently projected coordinates.  Only the points recorded as affected
+        are recomputed; all other points keep their current values.
+
+        ``source_header`` may be a copy of the original header with the
+        corrected CRS record.  When omitted, the header captured at transform
+        time is used.  If the interpretation is still ambiguous or conflicting,
+        the operation is refused and the object is left unchanged.
+
+        When metadata is repaired on an edited copy of the transformed object,
+        pass that copy's header as ``source_header``; it is interpreted before
+        the target CRS is rewritten.
+        """
+        record = self.crs_transform
+        if record is None:
+            raise errors.LaspyException(
+                "no CRS transformation is recorded for this object"
+            )
+        if record.source_xyz is None:
+            raise errors.LaspyException(
+                "the transform record does not retain source coordinates; "
+                "rerun transform_crs(keep_source_xyz=True)"
+            )
+
+        from .crs import CrsPolicy, CrsTransformRecord, _same_crs, _transform_xyz
+
+        if source_header is None:
+            source_header = self.header
+            if record.source_crs is not None:
+                current = self.header.resolve_crs(
+                    policy=CrsPolicy.PREFER_WKT
+                    if self.header.global_encoding.wkt
+                    else CrsPolicy.PREFER_GEOTIFF
+                )
+                if (
+                    current.crs is not None
+                    and _same_crs(current.crs, record.target_crs)
+                ):
+                    source_header = record.source_header
+
+        interpretation = (
+            source_header or record.source_header or self.header
+        ).resolve_crs(
+            policy=policy,
+            prefer_wkt=prefer_wkt,
+            require_agreement=require_agreement,
+        )
+        interpretation.raise_if_not_usable()
+
+        target_xyz = _transform_xyz(
+            record.source_xyz,
+            interpretation.crs,
+            record.target_crs,
+            record.affected,
+        )
+
+        if inplace:
+            work = self
+        else:
+            work = self.copy()
+
+        new_header = None
+        if update_crs:
+            import copy
+
+            new_header = copy.deepcopy(work.header)
+            try:
+                new_header.add_crs(record.target_crs)
+            except Exception as exc:
+                raise errors.LaspyException(
+                    f"could not store target CRS metadata: {exc}"
+                ) from exc
+
+        # Only replace affected points; unrelated coordinates are untouched.
+        affected = record.affected
+        if affected is None:
+            work.xyz = target_xyz
+        else:
+            xyz = np.array(work.xyz, dtype=np.float64, copy=True)
+            xyz[affected] = target_xyz[affected]
+            work.xyz = xyz
+
+        if new_header is not None:
+            work.header = new_header
+
+        work._crs_transform = CrsTransformRecord(
+            interpretation=interpretation,
+            target_crs=record.target_crs,
+            source_xyz=record.source_xyz.copy(),
+            target_xyz=target_xyz.copy(),
+            affected=None if affected is None else affected.copy(),
+            source_header=(
+                source_header.copy()
+                if source_header is not None
+                else record.source_header
+            ),
+            output_header=work.header,
+            header_updated=update_crs,
+        )
+        return work
+
     def change_scaling(self, scales=None, offsets=None) -> None:
         """This changes the scales and/or offset used for the x,y,z
         dimensions.

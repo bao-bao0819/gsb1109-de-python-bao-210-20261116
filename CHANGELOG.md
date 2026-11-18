@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- CRS metadata interpretation for LAS files that carry both GeoTIFF keys and
+  OGC WKT. `LasHeader.resolve_crs()` (and `LasData.crs_interpretation()`)
+  returns an immutable record containing every candidate, the selected CRS,
+  the version rule or caller convention used, and any conflict diagnostics.
+- `LasHeader.crs_candidates()` and `LasData.crs_candidates()` for read-only
+  inspection of all WKT/GeoTIFF records, including non-standard libLAS copies.
+- `LasData.transform_crs()` resolves and records the source CRS before any
+  coordinate operation. Conflicting or missing metadata raises a typed error
+  and leaves the original coordinates untouched.
+- `LasData.recompute_crs()` replays a transformation from retained source
+  coordinates after a CRS VLR is corrected, updating only affected points.
+- `laspy.crs` exposes `CrsPolicy` (`version`, `prefer_wkt`, `prefer_geotiff`,
+  `require_agreement`) and the provenance record `CrsInterpretation`.
+- CRS errors (`CrsMissingError`, `CrsUnresolvedError`, `CrsConflictError`,
+  `CrsTransformError`).
+
+### Changed
+
+- `add_crs` now clears the WKT global-encoding bit when it writes GeoTIFF keys,
+  so stale flags cannot contradict the actual VLR family.
+- `LasData.copy()` returns an independent copy without relying on
+  `copy.deepcopy`, which previously recursed through the point record.
+
 ## Version 2.7.0 (14/01/2026)
 
 ### Added

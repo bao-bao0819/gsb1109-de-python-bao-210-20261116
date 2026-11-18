@@ -4,6 +4,25 @@ import logging
 
 from . import errors, file, vlrs
 from .copc import Bounds, CopcReader
+from .crs import (
+    CRSCandidate,
+    CRSInterpretation,
+    CRSPolicy,
+    CRSSource,
+    CRSStatus,
+    CRSTransformRecord,
+    CrsCandidate,
+    CrsInterpretation,
+    CrsPolicy,
+    CrsResolver,
+    CrsSource,
+    CrsStatus,
+    CrsTransformRecord,
+    collect_crs_candidates,
+    interpret_crs,
+    resolve_crs,
+    transform_crs,
+)
 from .errors import LaspyException
 from .header import LasHeader
 from .lasdata import LasData

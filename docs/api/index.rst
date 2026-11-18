@@ -50,6 +50,7 @@ Submodules
 
    laspy.lib
    laspy.header
+   laspy.crs
    laspy.lasreader
    laspy.lasdata
    laspy.copc

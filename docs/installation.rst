@@ -86,8 +86,44 @@ _________
 
 LAS files allows to define the CRS / SRS in which the points coordinates are.
 When `pyproj`_ is installed, you can use the :meth:`.LasHeader.add_crs` to add
-CRS information to a file, or you can use :meth:`.LasHeader.parse_crs` to get 
+CRS information to a file, or you can use :meth:`.LasHeader.parse_crs` to get
 `pyproj.CRS`.
+
+A LAS file may contain both GeoTIFF keys and an OGC WKT record, and the two
+may disagree.  :meth:`.LasHeader.parse_crs` keeps its historical behavior of
+preferring one source.  For ingestion and coordinate operations, use
+:meth:`.LasHeader.resolve_crs`, which records the candidates and applies an
+explicit rule instead of silently choosing:
+
+.. code-block:: python
+
+    interpretation = las.header.resolve_crs()
+    if interpretation.is_conflict:
+        print(interpretation.candidates)  # both values are retained
+    else:
+        print(interpretation.crs, interpretation.rule)
+
+The default ``policy="version"`` follows the LAS specification (GeoTIFF for
+LAS <= 1.3 and point formats < 6, WKT for LAS 1.4 point formats >= 6 or when
+the WKT global-encoding bit is set).  ``policy="prefer_wkt"``,
+``policy="prefer_geotiff"`` and ``policy="require_agreement"`` express caller
+conventions.  A conflict is reported as ``status == "conflict"``; no
+coordinate is transformed in that state.
+
+When the metadata is usable, :meth:`.LasData.transform_crs` transforms a copy
+and records where the source coordinates came from.  After repairing a CRS
+VLR, :meth:`.LasData.recompute_crs` replays the transformation from the
+retained source coordinates, touching only the affected points:
+
+.. code-block:: python
+
+    projected = las.transform_crs(4326, policy="prefer_wkt")
+    projected.crs_transform.to_dict()  # provenance record
+
+    fixed_header = projected.crs_transform.source_header.copy()
+    # ... repair the relevant VLR ...
+    projected = projected.recompute_crs(source_header=fixed_header,
+                                        policy="prefer_wkt")
 
 .. _pyproj: https://pypi.org/project/pyproj/
 

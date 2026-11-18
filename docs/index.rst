@@ -72,6 +72,35 @@ Detailed refernce
 -----------------
 The best place to start is :py:mod:`pygtfs.schedule`
 
+Service days and actual stop times
+----------------------------------
+GTFS times in ``stop_times.txt`` are offsets from the start of a service day,
+not wall-clock times.  The service day begins at noon minus twelve hours in
+the agency timezone, which keeps its identity across midnight and across
+daylight-saving transitions.
+
+::
+
+    >>> sched.stop_times_for_trip("NIGHT", "20240309")[-1]
+    ResolvedStopTime(trip_id='NIGHT', service_date=datetime.date(2024, 3, 9),
+                     stop_id='S2', arrival_gtfs_time='25:10:00',
+                     arrival_datetime=datetime.datetime(2024, 3, 10, 1, 10,
+                                                        tzinfo=...))
+
+The original ``25:10:00`` value and the service date are both retained, while
+``arrival_datetime`` is the actual timezone-aware instant.  To query by actual
+time, use ``actual_stop_times(start=..., end=...)``.  To persist results for
+SQL access, use ``export_actual_stop_times(...)``: rows are stored in the
+``actual_stop_times`` table with ``service_date``, the original
+``arrival_gtfs_time``/``departure_gtfs_time`` strings, UTC instants, and local
+ISO 8601 timestamps.  ``write_actual_stop_times(path, ...)`` writes the same
+data as CSV.
+
+The ``gtfs-actual-stop-times`` command wraps the export::
+
+    gtfs-actual-stop-times gtfs.sqlite --service-date 20240309 \
+        --trip NIGHT --csv night.csv
+
 
 Contents:
 ---------

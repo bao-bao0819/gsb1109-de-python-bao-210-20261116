@@ -42,6 +42,39 @@ Documentation
 -------------
 Hosted on https://pygtfs.readthedocs.org/
 
+Service days and actual stop times
+----------------------------------
+GTFS times are offsets from the start of a service day (noon minus twelve
+hours in the agency timezone), so ``25:10:00`` belongs to the previous
+operating day even though its actual clock time falls after midnight.
+
+```python
+import pygtfs
+
+sched = pygtfs.Schedule("gtfs.sqlite")
+records = sched.stop_times_for_trip("NIGHT", "20240309")
+records[-1].service_date                 # datetime.date(2024, 3, 9)
+records[-1].arrival_gtfs_time            # "25:10:00"
+records[-1].arrival_datetime             # 2024-03-10 01:10-05:00
+
+# Query by actual instant; the operating trip is preserved.
+sched.actual_stop_times(start="2024-03-10T00:30:00-05:00",
+                        end="2024-03-10T02:00:00-05:00")
+
+# Persist for SQL access, or write CSV with both representations.
+sched.export_actual_stop_times(trip="NIGHT", service_date="20240309")
+sched.write_actual_stop_times("night.csv", trip="NIGHT",
+                              service_date="20240309")
+```
+
+The ``gtfs-actual-stop-times`` command exposes the same export:
+``gtfs-actual-stop-times gtfs.sqlite --service-date 20240309 --trip NIGHT``.
+
+Daylight-saving transitions follow the same rule: the service-day start is
+computed from local noon, so spring-forward days start an hour earlier and
+fall-back days an hour later than usual.  Times are never reduced modulo 24
+hours.
+
 TODO
 -----
 

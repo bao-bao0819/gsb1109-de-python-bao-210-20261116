@@ -11,10 +11,11 @@ import datetime
 from sqlalchemy import Column, ForeignKey, ForeignKeyConstraint, and_, Table, Index
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship, validates, synonym, foreign
-from sqlalchemy.types import (Unicode, Integer, Float, Boolean, Date, Interval,
-                              Numeric)
+from sqlalchemy.types import (Unicode, Integer, Float, Boolean, Date, DateTime,
+                              Interval, Numeric)
 
-from .exceptions import PygtfsValidationError
+from . import service_time
+from .exceptions import PygtfsValidationError, PygtfsTimezoneError
 
 Base = declarative_base()
 
@@ -112,6 +113,8 @@ class Feed(Base):
     transfers = relationship("Transfer", backref=("feed"), cascade="all, delete-orphan")
     feedinfo = relationship("FeedInfo", backref=("feed"), cascade="all, delete-orphan")
     translations = relationship("Translation", backref=("feed"), cascade="all, delete-orphan")
+    actual_stop_time_rows = relationship("ActualStopTime", backref=("feed"),
+                                         cascade="all, delete-orphan")
 
     def __repr__(self):
         return '<Feed %s: %s>' % (self.feed_id, self.feed_name)
@@ -388,6 +391,79 @@ class StopTime(Base):
 
     def __repr__(self):
         return '<StopTime %s: %d>' % (self.trip_id, self.stop_sequence)
+
+    def actual_times(self, service_date, timezone=None):
+        """Resolve this stop time on one service day.
+
+        Returns ``(arrival_datetime, departure_datetime)`` as timezone-aware
+        values.  The original offsets remain available in ``arrival_time`` and
+        ``departure_time``; this method never reduces them modulo 24 hours.
+        """
+        if timezone is None:
+            timezone = self._agency_timezone()
+        return (
+            service_time.service_time(service_date, self.arrival_time, timezone),
+            service_time.service_time(service_date, self.departure_time, timezone),
+        )
+
+    def _agency_timezone(self):
+        trip = self.trip
+        if trip is None:
+            raise PygtfsTimezoneError(
+                "Cannot resolve timezone without a trip for stop time "
+                "{0!r}".format(self))
+        route = trip.route
+        if route is not None and route.agency is not None:
+            name = route.agency.agency_timezone
+            if name:
+                return name
+        raise PygtfsTimezoneError(
+            "No agency timezone found for trip {0!r}".format(trip.trip_id))
+
+
+class ActualStopTime(Base):
+    """A resolved stop time for one trip on one service day.
+
+    Rows are produced by
+    :meth:`pygtfs.schedule.Schedule.export_actual_stop_times` and persisted so
+    callers can query actual instants directly with SQL while still seeing the
+    original service date and the original ``HH:MM:SS`` values (which may be
+    ``25:10:00`` or later).
+
+    ``arrival_utc`` and ``departure_utc`` are stored as timezone-naive UTC so
+    range queries behave consistently across databases.  The local wall-clock
+    forms, including their UTC offsets, are kept in ``arrival_local`` and
+    ``departure_local`` as ISO 8601 strings.
+    """
+
+    __tablename__ = 'actual_stop_times'
+    _plural_name_ = 'exported_stop_times'
+    id = Column(Integer, primary_key=True)
+    feed_id = Column(Integer, ForeignKey('_feed.feed_id'), index=True)
+    trip_id = Column(Unicode, index=True)
+    service_id = Column(Unicode)
+    service_date = Column(Date, index=True)
+    stop_sequence = Column(Integer)
+    stop_id = Column(Unicode, index=True)
+    arrival_time = Column(Interval)
+    departure_time = Column(Interval)
+    arrival_gtfs_time = Column(Unicode)
+    departure_gtfs_time = Column(Unicode)
+    arrival_utc = Column(DateTime, index=True)
+    departure_utc = Column(DateTime, index=True)
+    arrival_local = Column(Unicode)
+    departure_local = Column(Unicode)
+    timezone = Column(Unicode)
+
+    __table_args__ = (
+        Index('idx_actual_stop_times_trip_date', 'feed_id', 'trip_id',
+              'service_date'),
+        Index('idx_actual_stop_times_window', 'service_date', 'arrival_utc'),
+    )
+
+    def __repr__(self):
+        return '<ActualStopTime %s %s %s>' % (self.trip_id, self.service_date,
+                                             self.stop_id)
 
 
 class Fare(Base):

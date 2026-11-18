@@ -9,3 +9,7 @@ class PygtfsValidationError(PygtfsException, ValueError):
 class PygtfsConversionError(PygtfsException):
     """ Failed conversion, e.g. float(value) failed """
     pass
+
+class PygtfsTimezoneError(PygtfsException, ValueError):
+    """ Missing or invalid timezone information """
+    pass

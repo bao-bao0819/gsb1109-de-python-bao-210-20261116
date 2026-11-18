@@ -25,7 +25,10 @@ setup(
     test_suite='nose.collector',
     setup_requires=['setuptools_scm'],
     use_scm_version={'write_to': os.path.join('pygtfs', '_version.py')},
-    entry_points={'console_scripts': ['gtfs2db = pygtfs.gtfs2db:main']},
+    entry_points={'console_scripts': [
+        'gtfs2db = pygtfs.gtfs2db:main',
+        'gtfs-actual-stop-times = pygtfs.actual_stop_times:main',
+    ]},
     classifiers=[
         "Operating System :: OS Independent",
         "License :: OSI Approved :: MIT License",

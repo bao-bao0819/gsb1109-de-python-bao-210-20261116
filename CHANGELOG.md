@@ -1,4 +1,9 @@
 ## [Unreleased]
+### Added
+- `pygtfs.interpolation` derives missing `StopTime` arrivals and departures
+  from timepoint anchors and `shape_dist_traveled`, exporting exact times,
+  point estimates and inclusive ranges while leaving unsupported stops
+  unknown.
 ### Changed
 - input validation errors now raise ValueError, instead of AssertionError
 - Allow more values in `Stop.location_type` and in `Fare.transfers` (#27)

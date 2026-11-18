@@ -43,3 +43,11 @@ v3.6.0, 2022-02-02
 
 v3.6.1, 2022-02-15
   Fix issue with v8 format when the dataset has no long labels.
+
+v3.7.0, 2026-11-18
+  Add ``xport.views`` for deriving independent row-and-column views of a
+  dataset, carrying over variable labels, formats, informats, widths,
+  types, and SAS special missing values.  Views merge back by field
+  identity, reporting conflicts and returning compatible contributions
+  and the original branch contributions without mutating the source or
+  idle branches.

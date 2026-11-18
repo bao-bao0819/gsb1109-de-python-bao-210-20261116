@@ -25,6 +25,13 @@ __all__ = [
     'Library',
     'Member',
     'NaN',
+    'Conflict',
+    'Contribution',
+    'MergeResult',
+    'derive_view',
+    'merge_views',
+    'set_metadata',
+    'sync_metadata',
 ]
 
 
@@ -862,3 +869,16 @@ class DictReader(Reader):
     def __iter__(self):
         for row in super().__iter__():
             yield row._asdict()
+
+
+# Imported last to avoid a circular import; ``xport.views`` references the
+# classes defined above through the package namespace.
+from xport.views import (  # noqa: E402
+    Conflict,
+    Contribution,
+    MergeResult,
+    derive_view,
+    merge_views,
+    set_metadata,
+    sync_metadata,
+)

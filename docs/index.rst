@@ -9,6 +9,7 @@
    :caption: Contents:
 
    xport/xport
+   xport/views
    xport/cli
 
 

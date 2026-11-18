@@ -151,6 +151,7 @@ setup_info = {
         'hwp5.plat',
         'hwp5.plat._uno',
         'hwp5.proc',
+        'hwp5.revision',
         'hwp5.storage',
         'hwp5.transforms',
     ],
@@ -185,6 +186,7 @@ setup_info = {
             'hwp5txt=hwp5.hwp5txt:main',
             'hwp5html=hwp5.hwp5html:main',
             'hwp5view=hwp5.hwp5view:main',
+            'hwp5diff=hwp5.hwp5diff:main',
         ]
     },
 

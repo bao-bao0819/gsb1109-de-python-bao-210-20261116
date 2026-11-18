@@ -250,3 +250,33 @@ Decode a distribute document stream.
    :func: main_argparser
    :prog: hwp5proc
    :path: diststream
+
+diff
+----
+
+Compare two revisions of .hwp files.
+
+The report separates three kinds of change:
+
+- resource reordering in ``DocInfo`` (ids move, meaning stays the same),
+- resource content changes in ``DocInfo`` (a font/style definition was edited),
+- body changes (paragraph text or its own direct references were edited).
+
+Resources are matched by content and identity, never by numeric id.  Duplicate
+resources are kept as an equivalence class and are not paired one-to-one by
+position.  Paragraphs are only re-indexed when the comparison proves they were
+affected; all other paragraphs keep the old language/style index.
+
+.. argparse::
+   :module: hwp5.hwp5proc
+   :func: main_argparser
+   :prog: hwp5proc
+   :path: diff
+
+Example::
+
+    $ hwp5proc diff old.hwp new.hwp
+    resources: reordered=3 content-changed=1 dependency-changed=2 reorder-caused=2
+    body: changed=0 reorder-affected=2 affected-paragraphs=4
+
+    $ hwp5proc diff --format json --indices old.hwp new.hwp

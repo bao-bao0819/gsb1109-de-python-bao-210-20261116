@@ -2,7 +2,7 @@
 
    $ hwp5proc --help
    usage: hwp5proc [-h] [--loglevel LOGLEVEL] [--logfile LOGFILE]
-                   {version,header,summaryinfo,ls,cat,unpack,records,models,find,xml,rawunz,diststream}
+                   {version,header,summaryinfo,ls,cat,unpack,records,models,find,xml,rawunz,diststream,diff}
                    ...
    
    Do various operations on HWPv5 files.
@@ -15,7 +15,7 @@
    subcommands:
      valid subcommands
    
-     {version,header,summaryinfo,ls,cat,unpack,records,models,find,xml,rawunz,diststream}
+     {version,header,summaryinfo,ls,cat,unpack,records,models,find,xml,rawunz,diststream,diff}
        version             Print the file format version of .hwp files.
        header              Print file headers of .hwp files.
        summaryinfo         Print summary informations of .hwp files.
@@ -31,6 +31,7 @@
        xml                 Transform .hwp files into an XML.
        rawunz              Deflate an headerless zlib-compressed stream
        diststream          Decode a distribute document stream.
+       diff                Compare two revisions of .hwp files.
 
 hwp5proc 은 여러 하위 명령으로 이루어져 있다.
 
@@ -356,6 +357,41 @@ diststream 명령
    75d6750ad7ad45edc9c1abae2060b8d1c404f6df  Section0
    $ hwp5proc diststream --sha1 < Section0.zraw.aes128ecb  #=> --regex ^8cb2237d0679ca88db6464eac60da96345513964$
    $ hwp5proc diststream --key < Section0.zraw.aes128ecb   #=> --regex ^38004300420032003200330037004400$
+
+
+diff 명령
+---------
+
+   $ hwp5proc diff --help
+   usage: hwp5proc diff [-h] [--loglevel LOGLEVEL] [--logfile LOGFILE]
+                        [--output <file>] [--format {json,text}] [--indices]
+                        [--verbose]
+                        <old-hwp5file> <new-hwp5file>
+
+   Compare <old-hwp5file> and <new-hwp5file>, separating DocInfo resource
+   reordering, resource content changes, and body text changes.
+
+   positional arguments:
+     <old-hwp5file>        Old revision (.hwp).
+     <new-hwp5file>        New revision (.hwp).
+
+   optional arguments:
+     -h, --help            show this help message and exit
+     --loglevel LOGLEVEL   Set log level.
+     --logfile LOGFILE     Set log file.
+     --output <file>       Output filename (default: standard output).
+     --format {json,text}  Output format.
+     --indices             Include rebuilt language/style indices per
+                           paragraph.
+     --verbose             Include unchanged and remapped paragraphs in text
+                           output.
+
+   $ hwp5proc diff samples/sample-5017.hwp samples/sample-5017.hwp
+   resources: reordered=0 content-changed=0 dependency-changed=0 reorder-caused=0
+   body: changed=0 reorder-affected=0 affected-paragraphs=0
+
+   $ hwp5proc diff --format json samples/sample-5017.hwp samples/sample-5017.hwp | grep '"resource_reorder"' | head -n 1
+     "resource_reorder": [],
 
 records 명령
 ------------

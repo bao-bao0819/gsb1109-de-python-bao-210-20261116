@@ -4,6 +4,15 @@ CHANGES
 0.1b16 (unreleased)
 -------------------
 
+- New ``hwp5diff`` command and ``hwp5proc diff`` subcommand: compare two
+  revisions of an HWPv5 document.
+- The comparison resolves DocInfo resource identity and usage instead of
+  comparing numeric ids.  It separates resource reordering, resource content
+  changes (including changes inherited through references), and body
+  changes.  Duplicated resources are kept as equivalence classes and are not
+  paired by position; only paragraphs proven to be affected rebuild their
+  language/style indices.
+- New ``hwp5.revision`` package exposing the same API.
 - [CVE-2023-0286] Depends on cryptography >= 40.0.1
 - [CVE-2022-2309] Depends on lxml >= 4.9,2
 

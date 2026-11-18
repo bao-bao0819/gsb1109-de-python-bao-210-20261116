@@ -36,6 +36,11 @@ module :mod:`hwp5.dataio`
 .. automodule:: hwp5.dataio
    :members:
 
+module :mod:`hwp5.revision`
+===========================
+.. automodule:: hwp5.revision
+   :members:
+
 module :mod:`hwp5.tagids`
 =========================
 .. automodule:: hwp5.tagids

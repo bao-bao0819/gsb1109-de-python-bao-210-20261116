@@ -24,6 +24,9 @@ import pandas as pd
 
 # Xport Modules
 import xport
+import xport.encoding as _encoding_module
+from xport.encoding import encode_character as _encode_character
+from xport.encoding import truncate_bytes as _truncate_bytes
 
 __all__ = [
     'load',
@@ -31,7 +34,62 @@ __all__ = [
     'dump',
     'dumps',
     '_encoding',
+    'analyze_encoding',
+    'encoding_report',
+    'encode_character',
+    'preview_encoding',
+    'truncate_bytes',
 ]
+
+
+def encoding_report(
+    values,
+    encoding=None,
+    width=None,
+    source_encoding=None,
+    errors='strict',
+    **kwds,
+):
+    """
+    Preview encoding a character field with this module's text encoding.
+
+    ``source_encoding`` defaults to the module's current ``TEXT_DATA_ENCODING``
+    and ``encoding`` defaults to the same value.
+    """
+    if source_encoding is None:
+        source_encoding = TEXT_DATA_ENCODING
+    if encoding is None:
+        encoding = TEXT_DATA_ENCODING
+    return _encoding_module.encoding_report(
+        values,
+        encoding=encoding,
+        width=width,
+        source_encoding=source_encoding,
+        errors=errors,
+        **kwds,
+    )
+
+
+def encode_character(value, width, encoding=None, errors='strict'):
+    """
+    Encode one value to a fixed-width character field.
+    """
+    if encoding is None:
+        encoding = TEXT_DATA_ENCODING
+    return _encode_character(value, width, encoding, errors=errors)
+
+
+def truncate_bytes(bytestring, width, encoding=None):
+    """
+    Truncate bytes at a character boundary for this module's encoding.
+    """
+    if encoding is None:
+        encoding = TEXT_DATA_ENCODING
+    return _truncate_bytes(bytestring, width, encoding)
+
+
+analyze_encoding = encoding_report
+preview_encoding = encoding_report
 
 LOG = logging.getLogger(__name__)
 
@@ -545,10 +603,7 @@ class Observations(Iterator):
         def character_encoder(length):
 
             def encoder(s):
-                try:
-                    return s.encode(TEXT_DATA_ENCODING).ljust(length)
-                except AttributeError:
-                    return b' '
+                return encode_character(s, length, TEXT_DATA_ENCODING)
                 # If handling errors from None, NAType, etc. is a
                 # bottleneck, we should ``fillna`` before creating the
                 # values iterator.
@@ -581,6 +636,30 @@ class Member(xport.Dataset):
     """
     Dataset from a SAS Version 5 or 6 Transport (XPORT) file.
     """
+
+    def encoding_report(
+        self,
+        encoding=None,
+        widths=None,
+        source_encoding=None,
+        errors='strict',
+        include_numeric=False,
+    ):
+        """
+        Preview encoding this dataset's character fields.
+        """
+        if source_encoding is None:
+            source_encoding = TEXT_DATA_ENCODING
+        if encoding is None:
+            encoding = TEXT_DATA_ENCODING
+        return _encoding_module.dataset_encoding_report(
+            self,
+            encoding=encoding,
+            widths=widths,
+            source_encoding=source_encoding,
+            errors=errors,
+            include_numeric=include_numeric,
+        )
 
     @classmethod
     def from_header(cls, header):
@@ -764,6 +843,30 @@ SAS     SAS     SASLIB  \
             b'modified': strftime(self.modified if self.modified else datetime.now()),
             b'members': b''.join(bytes(Member(member)) for member in self.values()),
         }
+
+    def encoding_report(
+        self,
+        encoding=None,
+        widths=None,
+        source_encoding=None,
+        errors='strict',
+        include_numeric=False,
+    ):
+        """
+        Preview encoding every character field in this library.
+        """
+        if source_encoding is None:
+            source_encoding = TEXT_DATA_ENCODING
+        if encoding is None:
+            encoding = TEXT_DATA_ENCODING
+        return _encoding_module.library_encoding_report(
+            self,
+            encoding=encoding,
+            widths=widths,
+            source_encoding=source_encoding,
+            errors=errors,
+            include_numeric=include_numeric,
+        )
 
 
 def text_encode(obj, name, n):

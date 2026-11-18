@@ -18,6 +18,24 @@ from io import StringIO
 import pandas as pd
 
 from .__about__ import __version__  # noqa: F401 module imported but unused
+from .encoding import (
+    Collision,
+    DatasetEncodingReport,
+    EncodingReport,
+    LibraryEncodingReport,
+    ValueEncodingReport,
+    analyze_encoding,
+    audit_encoding,
+    check_encoding,
+    dataset_encoding_report,
+    encoding_report,
+    library_encoding_report,
+    preflight_encoding,
+    preview_encoding,
+    report_encoding,
+    transcode_report,
+    truncate_bytes,
+)
 
 LOG = logging.getLogger(__name__)
 
@@ -25,6 +43,22 @@ __all__ = [
     'Library',
     'Member',
     'NaN',
+    'Collision',
+    'DatasetEncodingReport',
+    'EncodingReport',
+    'LibraryEncodingReport',
+    'ValueEncodingReport',
+    'analyze_encoding',
+    'audit_encoding',
+    'check_encoding',
+    'dataset_encoding_report',
+    'encoding_report',
+    'library_encoding_report',
+    'preflight_encoding',
+    'preview_encoding',
+    'report_encoding',
+    'transcode_report',
+    'truncate_bytes',
 ]
 
 
@@ -423,6 +457,20 @@ class Variable(pd.Series):
         elif self.informat and (self.informat.name or self.informat.decimals):
             self.vtype = VariableType.NUMERIC
 
+    def encoding_report(self, encoding=None, width=None, source_encoding=None, errors='strict'):
+        """
+        Preview encoding this variable to a fixed-width byte field.
+        """
+        if width is None:
+            width = self.width
+        return encoding_report(
+            self,
+            encoding=encoding,
+            width=width,
+            source_encoding=source_encoding,
+            errors=errors,
+        )
+
 
 class Dataset(pd.DataFrame):
     """
@@ -563,6 +611,18 @@ class Dataset(pd.DataFrame):
             if k != key:
                 self[k].copy_metadata(v)
 
+    def encoding_report(self, encoding=None, widths=None, source_encoding=None, errors='strict'):
+        """
+        Preview encoding the character fields to fixed-width byte fields.
+        """
+        return dataset_encoding_report(
+            self,
+            encoding=encoding,
+            widths=widths,
+            source_encoding=source_encoding,
+            errors=errors,
+        )
+
     @property
     def _constructor(self):
         """
@@ -682,6 +742,26 @@ class Library(MutableMapping):
         Remove a member datset.
         """
         del self._members[name]
+
+    def encoding_report(
+        self,
+        encoding=None,
+        widths=None,
+        source_encoding=None,
+        errors='strict',
+        include_numeric=False,
+    ):
+        """
+        Preview encoding every character field in the library.
+        """
+        return library_encoding_report(
+            self,
+            encoding=encoding,
+            widths=widths,
+            source_encoding=source_encoding,
+            errors=errors,
+            include_numeric=include_numeric,
+        )
 
     def __iter__(self):
         """

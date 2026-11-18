@@ -19,7 +19,15 @@ from datetime import datetime
 
 # Xport Modules
 import xport.v56
-from xport.v56 import _encoding, strftime, text_encode
+from xport.encoding import encode_character, truncate_bytes
+from xport.v56 import (
+    _encoding,
+    analyze_encoding,
+    encoding_report,
+    preview_encoding,
+    strftime,
+    text_encode,
+)
 
 __all__ = [
     'load',
@@ -27,6 +35,11 @@ __all__ = [
     'dump',
     'dumps',
     '_encoding',
+    'analyze_encoding',
+    'encoding_report',
+    'encode_character',
+    'preview_encoding',
+    'truncate_bytes',
 ]
 
 LOG = logging.getLogger(__name__)
@@ -237,18 +250,24 @@ class Namestr(xport.v56.Namestr):
         fmt = self.fmts[140]
 
         longname = text_encode(self, 'name', 32)
-        shortname = longname[:8]
+        shortname = truncate_bytes(longname, 8, xport.v56.TEXT_METADATA_ENCODING).ljust(8)
 
         longlabel = (self.label if self.label is not None else '').encode(
             xport.v56.TEXT_METADATA_ENCODING
         )
         if len(longlabel) > 256:
-            raise ValueError('ASCII-encoded label {longlabel} exceeds 256 characters')
-        shortlabel = longlabel[:40].ljust(40)
+            raise ValueError(f'Encoded label {longlabel} exceeds 256 characters')
+        shortlabel = truncate_bytes(
+            longlabel, 40, xport.v56.TEXT_METADATA_ENCODING
+        ).ljust(40)
 
         # TODO: What's the right way to handle long format names for v9?
-        format_name = self.format.name.encode('ascii')[:8]
-        informat_name = self.informat.name.encode('ascii')[:8]
+        format_name = truncate_bytes(
+            self.format.name.encode('ascii'), 8, 'ascii'
+        )
+        informat_name = truncate_bytes(
+            self.informat.name.encode('ascii'), 8, 'ascii'
+        )
 
         if self.number is None:
             raise ValueError('Variable number not assigned')

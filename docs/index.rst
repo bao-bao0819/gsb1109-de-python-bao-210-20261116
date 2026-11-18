@@ -10,6 +10,7 @@
 
    xport/xport
    xport/cli
+   xport/encoding
 
 
 .. include:: ../README.rst

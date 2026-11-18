@@ -43,3 +43,7 @@ v3.6.0, 2022-02-02
 
 v3.6.1, 2022-02-15
   Fix issue with v8 format when the dataset has no long labels.
+
+Unreleased
+  Add character-field encoding previews with per-value representability,
+  boundary-safe truncation, original-byte retention, and collision reporting.

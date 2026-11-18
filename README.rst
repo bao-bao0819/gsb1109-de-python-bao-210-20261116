@@ -102,6 +102,45 @@ executable is a friendly alias for ``python -m xport``. Caution: if this command
     $ xport example.xpt > example.csv
 
 
+Encoding character data
+=======================
+
+XPT character fields have a fixed width measured in bytes, not characters.
+Re-encoding a field can therefore overflow the target width even when the
+number of characters is unchanged.  Use ``encoding_report`` before writing to
+see, for every value, whether the target codec can represent it and what
+truncation would remove.
+
+.. code:: python
+
+    import xport
+
+    values = ['ab', 'éé', 'ééé']
+    report = xport.encoding_report(values, encoding='utf-8', width=4)
+    print(report)
+
+The report keeps each original byte string, the source and target encodings,
+and the bytes that would be written.  Truncation stops at a character
+boundary; a multibyte character is never split.  Distinct values that would
+converge on the same stored value are listed as collisions.
+
+.. code:: python
+
+    report = xport.encoding_report(['abcdX', 'abcdY'], encoding='utf-8', width=4)
+    assert report.collisions[0].values == ('abcdX', 'abcdY')
+    assert report.collisions[0].target_value == 'abcd'
+
+``Dataset.encoding_report`` and ``Variable.encoding_report`` provide the same
+preview for the character columns of a dataset, using each variable's ``width``
+unless overridden.  ``Library.encoding_report`` covers every dataset in a
+library.  ``report.require()`` raises ``ValueError`` when a conversion would
+truncate, lose representability, or create collisions.
+
+When writing, character values are encoded with the module's data encoding and
+truncated at a character boundary, so the bytes packed into each observation
+are always a valid text prefix.
+
+
 Writing XPT
 ===========
 

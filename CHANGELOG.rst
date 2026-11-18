@@ -1,6 +1,14 @@
 Change Log
 ==========
 
+v3.7.0, 2026-11-18
+  Add ``xport.plan`` for building ingestion plans from library members.
+  Plans preserve the identity of same-named members from different
+  releases, resolve caller dependencies to concrete member references,
+  block publication of an association unit when a detail is incomplete,
+  and allow a complete standalone code table to be verified and accepted
+  on its own.
+
 v0.1.0, 2012-05-02
   Initial release.
 

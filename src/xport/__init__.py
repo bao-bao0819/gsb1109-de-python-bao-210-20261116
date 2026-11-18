@@ -17,6 +17,16 @@ from io import StringIO
 # Community Packages
 import pandas as pd
 
+# Xport Modules
+from .plan import (
+    Dependency,
+    MemberManifest,
+    MemberRef,
+    Plan,
+    PublicationUnit,
+    build_plan,
+)
+
 from .__about__ import __version__  # noqa: F401 module imported but unused
 
 LOG = logging.getLogger(__name__)
@@ -25,6 +35,12 @@ __all__ = [
     'Library',
     'Member',
     'NaN',
+    'Dependency',
+    'MemberManifest',
+    'MemberRef',
+    'Plan',
+    'PublicationUnit',
+    'build_plan',
 ]
 
 

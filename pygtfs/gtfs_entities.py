@@ -264,6 +264,13 @@ class Service(Base):
                                          'sunday')
     _validate_dates = _validate_date('start_date', 'end_date')
 
+    def service_dates(self, exceptions=None):
+        """A list of :py:class:`pygtfs.service_dates.ServiceDateFact`,
+        combining the regular weekly pattern with the service exceptions.
+        """
+        from .service_dates import service_dates
+        return service_dates(self, exceptions)
+
     def __repr__(self):
         dayofweek = ''
         if self.monday: dayofweek += 'M'
@@ -287,6 +294,12 @@ class ServiceException(Base):
 
     _validate_exception_type = _validate_int_choice([1, 2], 'exception_type')
     _validate_dates = _validate_date('date')
+
+    # The service_id references to calendar, but a feed may provide
+    # calendar_dates without calendar, so no plain foreign key is used.
+    service = relationship(Service, backref='exceptions',
+              primaryjoin=and_(foreign(service_id) == Service.service_id,
+                               feed_id == Service.feed_id))
 
     def __repr__(self):
         return '<ServiceException %s: %s>' % (self.service_id, self.date)

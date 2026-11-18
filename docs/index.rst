@@ -82,6 +82,7 @@ Contents:
    schedule
    loader
    gtfs_entities
+   service_dates
    gtfs2db
    internal
 

@@ -28,6 +28,14 @@ GSGR
 	:exclude-members: __enter__, __exit__, _read_until_zero, close
 
 
+Indexed gzip verification
+-------------------------
+
+.. automodule:: pymzml.utils.verify
+	:members:
+	:exclude-members: VerificationFinding
+
+
 .. Creating a custom Filehandler
 .. ------------------------------
 

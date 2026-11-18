@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 import logging
 import sys
 
@@ -16,18 +16,67 @@ logger = logging.getLogger(__name__)
 def list_feeds(schedule):
     for (i, a_feed) in enumerate(schedule.feeds):
         print("{0}. id {1.feed_id}, name {1.feed_name}, "
+              "version {1.feed_version}, "
+              "valid {1.feed_start_date} to {1.feed_end_date}, "
               "loaded on {1.feed_append_date}".format(i, a_feed))
 
 
-def delete_feed(schedule, feed_filename, interactive=False):
+def _parse_gtfs_date(value):
+    if not value:
+        return None
+    return datetime.strptime(value, '%Y%m%d').date()
+
+
+def feed_publication_info(fd):
+    """Read the publication version and service validity of a feed.
+
+    Returns a dict with ``feed_version``, ``feed_start_date`` and
+    ``feed_end_date`` taken from the first row of feed_info.txt. Values are
+    None when the feed does not declare them.
+    """
+    info = {'feed_version': None, 'feed_start_date': None,
+            'feed_end_date': None}
+    try:
+        table = fd.read_table('feed_info.txt', set(info))
+    except (KeyError, IOError):
+        return info
+    for record in table:
+        if not record:
+            # Empty row.
+            continue
+        info['feed_version'] = getattr(record, 'feed_version', None)
+        info['feed_start_date'] = _parse_gtfs_date(
+            getattr(record, 'feed_start_date', None))
+        info['feed_end_date'] = _parse_gtfs_date(
+            getattr(record, 'feed_end_date', None))
+        break
+    return info
+
+
+def find_feed_revision(schedule, feed_name, feed_version):
+    """The already imported revision of a feed, or None."""
+    return schedule.session.query(Feed).filter(
+        Feed.feed_name == feed_name,
+        Feed.feed_version == feed_version).first()
+
+
+_ALL_REVISIONS = object()
+
+
+def delete_feed(schedule, feed_filename, interactive=False,
+                feed_version=_ALL_REVISIONS):
 
     feed_name = feed.derive_feed_name(feed_filename)
-    feeds_with_name = schedule.session.query(Feed).filter(Feed.feed_name == feed_name).all()
+    feeds_with_name = schedule.session.query(Feed).filter(Feed.feed_name == feed_name)
+    if feed_version is not _ALL_REVISIONS:
+        # only delete the given revision, keep the other ones
+        feeds_with_name = feeds_with_name.filter(Feed.feed_version == feed_version)
+    feeds_with_name = feeds_with_name.all()
     delete_all = not interactive
     for matching_feed in feeds_with_name:
         if not delete_all:
-            print("Found feed ({0.feed_id}) named {0.feed_name} loaded on {0.feed_append_date}".format(matching_feed))
-            logger.info("Found feed ({0.feed_id}) named {0.feed_name} loaded on {0.feed_append_date}".format(matching_feed))
+            print("Found feed ({0.feed_id}) named {0.feed_name} version {0.feed_version} loaded on {0.feed_append_date}".format(matching_feed))
+            logger.info("Found feed ({0.feed_id}) named {0.feed_name} version {0.feed_version} loaded on {0.feed_append_date}".format(matching_feed))
             ans = ""
             while ans not in ("K", "O", "A"):
                 ans = input("(K)eep / (O)verwrite / overwrite (A)ll ? ").upper()
@@ -41,14 +90,35 @@ def delete_feed(schedule, feed_filename, interactive=False):
 
 def overwrite_feed(schedule, feed_filename, *args, **kwargs):
     interactive = kwargs.pop('interactive', False)
-    delete_feed(schedule, feed_filename, interactive=interactive)
+    fd = feed.Feed(feed_filename)
+    publication = feed_publication_info(fd)
+    # Only replace the very same revision of the feed. Revisions published
+    # at other times are kept, so that the state of the data as published
+    # at any point in time can still be queried.
+    delete_feed(schedule, feed_filename, interactive=interactive,
+                feed_version=publication['feed_version'])
     append_feed(schedule, feed_filename, *args, **kwargs)
 
 
 def append_feed(schedule, feed_filename, strip_fields=True,
-                chunk_size=5000, agency_id_override=None, ignore_files=()):
+                chunk_size=5000, agency_id_override=None, ignore_files=(),
+                append_date=None):
 
     fd = feed.Feed(feed_filename, strip_fields)
+    publication = feed_publication_info(fd)
+
+    existing = find_feed_revision(schedule, fd.feed_name,
+                                  publication['feed_version'])
+    if existing is not None:
+        # Re-importing the same revision must not create a second set of
+        # entities; the feed is already there, so there is nothing to do.
+        print('Feed %s version %s was already imported on %s, skipping.' %
+              (fd.feed_name, publication['feed_version'],
+               existing.feed_append_date))
+        logger.info('Feed %s version %s was already imported on %s, skipping.',
+                    fd.feed_name, publication['feed_version'],
+                    existing.feed_append_date)
+        return schedule
 
     gtfs_tables = {}
     for gtfs_class in gtfs_all:
@@ -75,7 +145,11 @@ def append_feed(schedule, feed_filename, strip_fields=True,
 
 
     # create new feed
-    feed_entry = Feed(feed_name=fd.feed_name, feed_append_date=date.today())
+    feed_entry = Feed(feed_name=fd.feed_name,
+                      feed_append_date=append_date or date.today(),
+                      feed_version=publication['feed_version'],
+                      feed_start_date=publication['feed_start_date'],
+                      feed_end_date=publication['feed_end_date'])
     schedule.session.add(feed_entry)
     schedule.session.flush()
     feed_id = feed_entry.feed_id

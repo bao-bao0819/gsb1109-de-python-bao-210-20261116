@@ -94,6 +94,10 @@ class Feed(Base):
     id = synonym('feed_id')
     feed_name = Column(Unicode)
     feed_append_date = Column(Date, nullable=True)
+    # publication version and service validity, taken from feed_info.txt
+    feed_version = Column(Unicode, nullable=True)
+    feed_start_date = Column(Date, nullable=True)
+    feed_end_date = Column(Date, nullable=True)
 
     # these relationships will allow us to delete entire feeds at once
     # by deleting a feed (because of 'cascading')
@@ -114,7 +118,8 @@ class Feed(Base):
     translations = relationship("Translation", backref=("feed"), cascade="all, delete-orphan")
 
     def __repr__(self):
-        return '<Feed %s: %s>' % (self.feed_id, self.feed_name)
+        return '<Feed %s: %s (version %s)>' % (self.feed_id, self.feed_name,
+                                               self.feed_version)
 
 
 class Agency(Base):

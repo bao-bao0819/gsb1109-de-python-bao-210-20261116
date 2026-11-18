@@ -2,11 +2,13 @@
 
 import datetime
 import os.path
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
 from zipfile import ZipFile
 
+from pygtfs import append_feed
 from pygtfs import overwrite_feed
 from pygtfs import Schedule
 from pygtfs.feed import Feed, derive_feed_name
@@ -169,6 +171,97 @@ class TestPathInputs(unittest.TestCase):
 
         self.assertEqual(feed.feed_name, "sample_feed")
         self.assertEqual(next(agency_rows)[0], "agency_id")
+
+
+class TestFeedVersions(unittest.TestCase):
+    def setUp(self):
+        self.schedule = Schedule(":memory:")
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        # keep the original directory name, so that every import is seen as
+        # another revision of the same feed
+        self.feed_dir = os.path.join(self.tmpdir.name, "sample_feed")
+        shutil.copytree(os.path.join(os.path.dirname(__file__),
+                                     "data", "sample_feed"),
+                        self.feed_dir)
+
+    def publish(self, version, start_date, end_date):
+        with open(os.path.join(self.feed_dir, "feed_info.txt"), "w") as fh:
+            fh.write("feed_publisher_name,feed_publisher_url,feed_lang,"
+                     "feed_start_date,feed_end_date,feed_version\n")
+            fh.write("the feeder,transit.example.com,en,{0},{1},{2}\n"
+                     .format(start_date, end_date, version))
+
+    def test_version_and_validity_are_stored(self):
+        self.publish("2026-w45", "20261102", "20261129")
+        append_feed(self.schedule, self.feed_dir,
+                    append_date=datetime.date(2026, 11, 2))
+        feed = self.schedule.feeds[0]
+        self.assertEqual(feed.feed_version, "2026-w45")
+        self.assertEqual(feed.feed_start_date, datetime.date(2026, 11, 2))
+        self.assertEqual(feed.feed_end_date, datetime.date(2026, 11, 29))
+        self.assertEqual(feed.feed_append_date, datetime.date(2026, 11, 2))
+
+    def test_reimporting_same_revision_is_idempotent(self):
+        self.publish("2026-w45", "20261102", "20261129")
+        append_feed(self.schedule, self.feed_dir)
+        trip_count = len(self.schedule.trips)
+        append_feed(self.schedule, self.feed_dir)
+        self.assertEqual(len(self.schedule.feeds), 1)
+        self.assertEqual(len(self.schedule.trips), trip_count)
+
+    def test_overwrite_same_revision_replaces_without_duplicates(self):
+        self.publish("2026-w45", "20261102", "20261129")
+        overwrite_feed(self.schedule, self.feed_dir)
+        trip_count = len(self.schedule.trips)
+        overwrite_feed(self.schedule, self.feed_dir)
+        self.assertEqual(len(self.schedule.feeds), 1)
+        self.assertEqual(len(self.schedule.trips), trip_count)
+
+    def test_late_correction_does_not_erase_previous_version(self):
+        self.publish("2026-w45", "20261102", "20261129")
+        overwrite_feed(self.schedule, self.feed_dir,
+                       append_date=datetime.date(2026, 11, 2))
+        trip_count = len(self.schedule.trips)
+        self.publish("2026-w46", "20261109", "20261206")
+        overwrite_feed(self.schedule, self.feed_dir,
+                       append_date=datetime.date(2026, 11, 9))
+        self.assertEqual(len(self.schedule.feeds), 2)
+        self.assertEqual(len(self.schedule.trips), 2 * trip_count)
+        self.assertEqual(sorted(f.feed_version for f in self.schedule.feeds),
+                         ["2026-w45", "2026-w46"])
+
+    def test_feed_as_of(self):
+        self.publish("2026-w45", "20261102", "20261129")
+        append_feed(self.schedule, self.feed_dir,
+                    append_date=datetime.date(2026, 11, 2))
+        self.publish("2026-w46", "20261109", "20261206")
+        append_feed(self.schedule, self.feed_dir,
+                    append_date=datetime.date(2026, 11, 9))
+        self.assertIsNone(self.schedule.feed_as_of(datetime.date(2026, 11, 1)))
+        self.assertEqual(self.schedule.feed_as_of(datetime.date(2026, 11, 2)).feed_version,
+                         "2026-w45")
+        self.assertEqual(self.schedule.feed_as_of(datetime.date(2026, 11, 8)).feed_version,
+                         "2026-w45")
+        self.assertEqual(self.schedule.feed_as_of(datetime.date(2026, 11, 9)).feed_version,
+                         "2026-w46")
+        self.assertEqual(self.schedule.feed_as_of("2026-11-19").feed_version,
+                         "2026-w46")
+        self.assertEqual(self.schedule.feed_as_of("2026-11-19", feed_name="sample_feed").feed_version,
+                         "2026-w46")
+        self.assertIsNone(self.schedule.feed_as_of("2026-11-19", feed_name="other_feed"))
+
+    def test_feed_as_of_gives_access_to_the_data_published_then(self):
+        self.publish("2026-w45", "20261102", "20261129")
+        append_feed(self.schedule, self.feed_dir,
+                    append_date=datetime.date(2026, 11, 2))
+        self.publish("2026-w46", "20261109", "20261206")
+        append_feed(self.schedule, self.feed_dir,
+                    append_date=datetime.date(2026, 11, 9))
+        feed = self.schedule.feed_as_of(datetime.date(2026, 11, 5))
+        route_ab = [rt for rt in feed.routes if rt.route_id == 'AB'][0]
+        self.assertEqual([tr.trip_id for tr in route_ab.trips],
+                         ['AB1', 'AB2'])
 
 
 if __name__ == '__main__':

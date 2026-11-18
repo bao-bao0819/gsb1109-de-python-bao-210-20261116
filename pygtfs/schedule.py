@@ -1,3 +1,5 @@
+import datetime
+
 import sqlalchemy
 import sqlalchemy.orm
 
@@ -41,6 +43,30 @@ class Schedule:
         feed = self.session.query(Feed).get(feed_id)
         self.session.delete(feed)
         self.session.commit()
+
+    def feed_as_of(self, when, feed_name=None):
+        """The feed revision that was current at a given publication date.
+
+        Returns the :py:class:`pygtfs.gtfs_entities.Feed` with the most
+        recent ``feed_append_date`` on or before ``when``, or None if no
+        feed had been imported yet at that point in time. Since every gtfs
+        entity belongs to a feed, the returned feed gives access to the
+        data exactly as it was published then (e.g. ``feed.trips``).
+
+        :param when: a ``datetime.date``, ``datetime.datetime`` or a
+            ``'YYYY-MM-DD'`` string.
+        :param feed_name: optionally restrict the lookup to feeds with
+            this name.
+        """
+        if isinstance(when, datetime.datetime):
+            when = when.date()
+        elif isinstance(when, str):
+            when = datetime.datetime.strptime(when, '%Y-%m-%d').date()
+        query = self.session.query(Feed).filter(Feed.feed_append_date <= when)
+        if feed_name is not None:
+            query = query.filter(Feed.feed_name == feed_name)
+        return query.order_by(Feed.feed_append_date.desc(),
+                              Feed.feed_id.desc()).first()
 
 
 def _meta_query_all(entity, docstring=None):

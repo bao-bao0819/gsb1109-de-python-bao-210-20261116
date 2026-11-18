@@ -26,9 +26,14 @@ This is a script to manage the database. Here is its help message::
 			 database connection.
 
     Commands:
-      append            appends the gtfs feed to the database
-      overwrite         delete any existing feeds which had the same original
-			filename as the new file, and then append the new file.
+      append            appends the gtfs feed to the database. If the same
+			revision (same filename and feed version) was already
+			imported, it is skipped instead of duplicated.
+      overwrite         delete any existing feed which had the same original
+			filename and the same feed version as the new file, and
+			then append the new file. Revisions published at other
+			times are kept, so the data as published at any point
+			in time can still be queried.
       delete            delete from the database any feeds with the name supplied.
       list              list existing feeds in the database. 
 

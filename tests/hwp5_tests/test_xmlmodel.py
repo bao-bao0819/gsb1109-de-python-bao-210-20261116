@@ -7,6 +7,7 @@ from unittest import TestCase
 from xml.etree import ElementTree
 import base64
 import io
+import struct
 
 from hwp5 import binmodel
 from hwp5 import xmlmodel
@@ -17,6 +18,7 @@ from hwp5.binmodel import PageDef
 from hwp5.binmodel import ParaCharShape
 from hwp5.binmodel import ParaLineSeg
 from hwp5.binmodel import ParaText
+from hwp5.binmodel import ParaTextChunks
 from hwp5.binmodel import SectionDef
 from hwp5.tagids import HWPTAG_PARA_LINE_SEG
 from hwp5.treeop import STARTEVENT, ENDEVENT
@@ -203,6 +205,115 @@ class TestShapedText(TestCase):
             ((51, 103), ('B', ('c', None)), 'x' * (103 - 51)),
             ((103, 112), ('C', ('c', None)), 'x' * (112 - 103))], lines)
 
+    def test_split_keeps_surrogate_pair_intact(self):
+        # UTF-16 unit layout: 'a'=0, high surrogate=1, low surrogate=2,
+        # 'b'=3 ; the shape boundary at unit 2 lands inside the pair
+        text = 'a\U0001F4A1b'
+        chunks = [((0, 4), None, text)]
+        charshapes = [(0, 'A'), (2, 'B')]
+        shaped_chunks = list(split_and_shape(iter(chunks),
+                                             make_ranged_shapes(charshapes)))
+        self.assertEqual([
+            ((0, 3), ('A', None), 'a\U0001F4A1'),
+            ((3, 4), ('B', None), 'b')],
+            shaped_chunks)
+        # concatenation restores the full visible text
+        self.assertEqual(text, ''.join(chunk
+                                       for _, _, chunk in shaped_chunks))
+
+    def test_split_with_several_supplementary_characters(self):
+        # unit layout: a0 b1 pair2-3 c4 d5 pair6-7
+        text = 'ab\U0001F4A1cd\U0001F600'
+        chunks = [((0, 8), None, text)]
+
+        shaped = list(split_and_shape(iter(chunks),
+                                      make_ranged_shapes([(0, 'A'),
+                                                          (5, 'B')])))
+        self.assertEqual([
+            ((0, 5), ('A', None), 'ab\U0001F4A1c'),
+            ((5, 8), ('B', None), 'd\U0001F600')],
+            shaped)
+
+        # a boundary inside the second pair (unit 7) cannot split it
+        shaped = list(split_and_shape(iter([((0, 8), None, text)]),
+                                      make_ranged_shapes([(0, 'A'),
+                                                          (7, 'B')])))
+        self.assertEqual([((0, 8), ('A', None), text)], shaped)
+
+    def test_control_marker_is_never_split(self):
+        # an extended control marker occupies 8 UTF-16 code units but
+        # renders no visible glyph; a shape boundary inside its span must
+        # not split (or slice) the marker mapping
+        marker = dict(code=2, chid='secd', param=b'')
+        chunks = [((0, 8), None, marker), ((8, 10), None, 'xy')]
+        charshapes = [(0, 'A'), (4, 'B')]
+        shaped_chunks = list(split_and_shape(iter(chunks),
+                                             make_ranged_shapes(charshapes)))
+        self.assertEqual([
+            ((0, 8), ('A', None), marker),
+            ((8, 10), ('B', None), 'xy')],
+            shaped_chunks)
+
+    def test_control_marker_kept_alongside_surrogate_text(self):
+        # units: marker 0..8, 'x'=8, pair 9..10, 'y'=11
+        marker = dict(code=9,
+                      param=dict(width=1, unknown0=0, unknown1=0,
+                                 unknown2=b''))
+        chunks = [((0, 8), None, marker),
+                  ((8, 12), None, 'x\U0001F4A1y')]
+        charshapes = [(0, 'S0'), (6, 'S1'), (10, 'S2')]
+        shaped_chunks = list(split_and_shape(iter(chunks),
+                                             make_ranged_shapes(charshapes)))
+        self.assertEqual([
+            ((0, 8), ('S0', None), marker),
+            ((8, 11), ('S1', None), 'x\U0001F4A1'),
+            ((11, 12), ('S2', None), 'y')],
+            shaped_chunks)
+        # the visible text is fully recoverable; markers are excluded
+        visible = ''.join(chunk for _, _, chunk in shaped_chunks
+                          if not isinstance(chunk, dict))
+        self.assertEqual('x\U0001F4A1y', visible)
+
+    def test_paratext_chunks_with_surrogate_and_extended_control(self):
+        # UTF-16LE payload: 'a'(0) + U+1F4A1 pair(1..2) +
+        # FIELD_START extended marker(3..10) + 'b'(11)
+        marker = struct.pack('<H', 0x03) + b'\x00' * 14
+        payload = (
+            'a'.encode('utf-16-le') +
+            '\U0001F4A1'.encode('utf-16-le') +
+            marker +
+            'b'.encode('utf-16-le')
+        )
+        chunks = list(ParaTextChunks.parse_chunks(payload))
+
+        text_range, text = chunks[0]
+        self.assertEqual((0, 3), text_range)
+        self.assertEqual('a\U0001F4A1', text)
+
+        control_range, control = chunks[1]
+        self.assertEqual((3, 11), control_range)
+        self.assertEqual(0x03, control['code'])
+        self.assertTrue(isinstance(control, dict))
+
+        self.assertEqual(((11, 12), 'b'), chunks[2])
+
+        # shape boundary at unit 2 cuts through the surrogate pair and
+        # another sits between the marker and the final visible character
+        charshapes = [(0, 'A'), (2, 'B'), (11, 'C')]
+        shaped_chunks = list(split_and_shape(
+            iter((range, None, chunk) for range, chunk in chunks),
+            make_ranged_shapes(charshapes)))
+
+        self.assertEqual('a\U0001F4A1', shaped_chunks[0][2])
+        self.assertEqual((0, 3), shaped_chunks[0][0])
+        self.assertEqual((3, 11), shaped_chunks[1][0])
+        self.assertEqual(0x03, shaped_chunks[1][2]['code'])
+        self.assertEqual(((11, 12), ('C', None), 'b'), shaped_chunks[2])
+
+        visible = ''.join(chunk for _, _, chunk in shaped_chunks
+                          if not isinstance(chunk, dict))
+        self.assertEqual('a\U0001F4A1b', visible)
+
 
 class TestLineSeg(TestCase):
     def test_line_segmented(self):
@@ -217,6 +328,28 @@ class TestLineSeg(TestCase):
                           ('C', [((6, 9), None, 'ccc'),
                                  ((9, 10), None, 'd')]),
                           ('D', [((10, 12), None, 'dd')])], lines)
+
+    def test_line_segmented_keeps_surrogate_pair_on_one_line(self):
+        # unit layout: a0 b1 pair2-3 c4 d5 ; the line boundary at unit 3
+        # lands inside the surrogate pair, so the pair stays on the first
+        # line together with its char-shape attribution
+        text = 'ab\U0001F4A1cd'
+        chunks = [((0, 6), None, text)]
+        shaped = split_and_shape(iter(chunks),
+                                 make_ranged_shapes([(0, 'A'), (4, 'B')]))
+        lines = list(line_segmented(iter(shaped),
+                                    make_ranged_shapes([(0, 'L0'),
+                                                        (3, 'L1')])))
+        line0_text = ''.join(chunk for _, _, chunk in lines[0][1]
+                             if not isinstance(chunk, dict))
+        line1_text = ''.join(chunk for _, _, chunk in lines[1][1]
+                             if not isinstance(chunk, dict))
+        self.assertEqual('ab\U0001F4A1', line0_text)
+        self.assertEqual('cd', line1_text)
+        joined = ''.join(chunk for _, items in lines
+                         for _, _, chunk in items
+                         if not isinstance(chunk, dict))
+        self.assertEqual(text, joined)
 
 
 class TestDistributionBodyText(TestBase):

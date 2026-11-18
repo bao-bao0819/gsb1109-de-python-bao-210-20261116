@@ -55,6 +55,8 @@ from .treeop import prefix_event
 from .treeop import build_subtree
 from .treeop import tree_events
 from .treeop import tree_events_multi
+from .textrange import split_utf16
+from .textrange import utf16_len
 from .xmlformat import startelement
 from .xmlformat import xmlevents_to_bytechunks
 
@@ -101,6 +103,19 @@ def make_ranged_shapes(shapes):
 
 
 def split_and_shape(chunks, ranged_shapes):
+    ''' assign shapes to text/control chunks and split at shape boundaries
+
+    ``chunks`` emit ``((start, end), attr, chunk)`` triples where ``start``
+    and ``end`` are positions in UTF-16 code units and ``chunk`` is either a
+    visible-text string or a control-marker mapping. Both the chunk ranges
+    and the shape ranges are counted in UTF-16 code units, while python
+    strings are indexed by unicode code points, so text is split with
+    :func:`hwp5.textrange.split_utf16` to keep surrogate pairs intact.
+    Control markers occupy code-unit positions but render no visible glyph,
+    so they are never split: the whole marker is assigned to the shape whose
+    range covers its start position.
+    '''
+    chunks = iter(chunks)
     try:
         (chunk_start, chunk_end), chunk_attr, chunk = next(chunks)
     except StopIteration:
@@ -121,23 +136,28 @@ def split_and_shape(chunks, ranged_shapes):
 
             assert chunk_start < shape_end      # by (1)
             assert shape_start <= chunk_start
-            # case 2: chunk has left intersection
-            #         vvvv
-            #         ..----
-            if shape_end < chunk_end:           # (2)
-                prev = ((chunk_start, shape_end),
-                        chunk[:shape_end - chunk_start])
-                nexT = ((shape_end, chunk_end),
-                        chunk[shape_end - chunk_start:])
-                (chunk_start, chunk_end), chunk = prev
-            else:
-                nexT = None
 
-            assert chunk_end <= shape_end       # by (2)
-            yield (chunk_start, chunk_end), (shape, chunk_attr), chunk
+            nexT = None
+            if isinstance(chunk, dict):
+                # case 2a: a control marker spans one or more code units
+                # without producing a visible glyph; keep it atomic and
+                # attribute the whole marker to this shape
+                split_pos = chunk_end
+            elif shape_end < chunk_end:
+                # case 2b: visible text crosses the shape boundary; split
+                # in UTF-16 code units so surrogate pairs stay whole
+                head, tail = split_utf16(chunk, shape_end - chunk_start)
+                split_pos = chunk_start + utf16_len(head)
+                if split_pos < chunk_end:
+                    nexT = ((split_pos, chunk_end), chunk_attr, tail)
+                chunk = head
+            else:
+                split_pos = chunk_end
+
+            yield (chunk_start, split_pos), (shape, chunk_attr), chunk
 
             if nexT is not None:
-                (chunk_start, chunk_end), chunk = nexT
+                (chunk_start, chunk_end), chunk_attr, chunk = nexT
                 continue
 
             try:

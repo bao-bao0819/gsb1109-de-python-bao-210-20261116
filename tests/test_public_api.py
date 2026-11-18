@@ -61,3 +61,20 @@ def test_from_reader():
 
 def test_from_writer():
     assert vcfpy.Writer
+
+
+def test_from_haplotype():
+    assert vcfpy.reconstruct_haplotypes
+    assert vcfpy.HaplotypeFragment
+    assert vcfpy.SampleHaplotypes
+    assert vcfpy.Provenance
+    assert vcfpy.CrossBlockAnchor
+    assert vcfpy.HaplotypeConflict
+    assert vcfpy.HaplotypeConflictError
+    assert vcfpy.UnknownRegion
+    assert vcfpy.PhaseBlock
+    assert vcfpy.UNKNOWN_SLOT
+    assert vcfpy.OP_MATCH
+    assert vcfpy.OP_SUBST
+    assert vcfpy.OP_INS
+    assert vcfpy.OP_DEL

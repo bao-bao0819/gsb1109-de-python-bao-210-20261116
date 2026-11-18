@@ -14,6 +14,7 @@ Welcome to VCFPy's documentation!
     api_io
     api_exceptions
     api_record
+    api_haplotype
     api_parser
     api_bgzf
     api_tabix

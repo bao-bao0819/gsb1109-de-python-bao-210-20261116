@@ -6,6 +6,7 @@ pymzML module content
 
     pymzml_run
     pymzml_spec
+    pymzml_peak_merger
     pymzml_utils
     plot
     file_handlers

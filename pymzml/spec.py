@@ -69,6 +69,7 @@ except (ImportError, ModuleNotFoundError) as e:
 from . import regex_patterns
 from .decoder import MSDecoder
 from .obo import OboTranslator
+from .peak_merger import build_peak_groups, merge_peaks
 
 PROTON = 1.00727646677
 ISOTOPE_AVERAGE_DIFFERENCE = 1.002
@@ -1606,6 +1607,81 @@ class Spectrum(MsData):
             if temp and len(temp) > 1:
                 return True
         return False
+
+    def build_peak_groups(
+        self, ppm=None, abs_tolerance=0.0, peak_type="centroided"
+    ):
+        """
+        Group neighboring peaks which mutually satisfy the tolerance rules.
+
+        Groups neighboring peaks based on the combined ppm and absolute m/z
+        tolerance. A group is only accepted if every member pair satisfies the
+        tolerance, so peaks connected through neighboring pairs whose first and
+        last members exceed the tolerance are reported as ambiguous instead of
+        being chained into one group. The groups are deterministic and
+        independent of the order in which the peaks are stored.
+
+        Keyword Arguments:
+            ppm (float): allowed error in ppm, defaults to the spectrum
+                ``measured_precision`` expressed in ppm
+            abs_tolerance (float): allowed absolute m/z error
+            peak_type (str): peak type to build the groups from
+
+        Returns:
+            list: list of :class:`pymzml.peak_merger.PeakGroup` objects ordered
+                by ascending m/z
+
+        Raises:
+            pymzml.peak_merger.AmbiguousPeakGroupError: if the peaks do not
+                admit a unique grouping
+        """
+        if ppm is None:
+            ppm = self.measured_precision * 1e6
+        peaks = self.peaks(peak_type)
+        return build_peak_groups(
+            peaks, ppm=ppm, abs_tolerance=abs_tolerance
+        )
+
+    def merge_neighboring_peaks(
+        self,
+        ppm=None,
+        abs_tolerance=0.0,
+        peak_type="centroided",
+        in_place=False,
+    ):
+        """
+        Merge neighboring peaks within the ppm and absolute tolerance.
+
+        Each merged peak keeps the original peaks as contributors, so both the
+        summed intensity and the individual contributions remain traceable.
+        When ``in_place`` is ``True``, the spectrum peaks are replaced by the
+        merged peaks; otherwise the merged peaks are returned without changing
+        the spectrum.
+
+        Keyword Arguments:
+            ppm (float): allowed error in ppm, defaults to the spectrum
+                ``measured_precision`` expressed in ppm
+            abs_tolerance (float): allowed absolute m/z error
+            peak_type (str): peak type to merge
+            in_place (bool): replace the spectrum peaks when ``True``
+
+        Returns:
+            list: list of :class:`pymzml.peak_merger.MergedPeak` objects
+                ordered by ascending m/z
+
+        Raises:
+            pymzml.peak_merger.AmbiguousPeakGroupError: if the peaks do not
+                admit a unique grouping
+        """
+        if ppm is None:
+            ppm = self.measured_precision * 1e6
+        peaks = self.peaks(peak_type)
+        merged = merge_peaks(peaks, ppm=ppm, abs_tolerance=abs_tolerance)
+        if in_place:
+            self.set_peaks(
+                [peak.as_peak() for peak in merged], peak_type
+            )
+        return merged
 
     def similarity_to(self, spec2, round_precision=0):
         """

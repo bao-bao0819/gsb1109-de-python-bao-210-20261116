@@ -20,5 +20,12 @@ from .point.format import lost_dimensions
 from .point.record import PackedPointRecord, ScaleAwarePointRecord
 from .vlrs import VLR
 from .waveform.mode import WaveformMode
+from .waveform.samples import (
+    WaveformSampleIssue,
+    WaveformSampleIssueKind,
+    WaveformSampleTable,
+    build_waveform_sample_table,
+    read_waveform_sample_table,
+)
 
 logging.getLogger(__name__).addHandler(logging.NullHandler())

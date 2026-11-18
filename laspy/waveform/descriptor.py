@@ -29,6 +29,21 @@ class WaveformPacketDescriptor:
     digitizer_gain: float
     digitizer_offset: float
 
+    @property
+    def sample_size_bytes(self) -> int | None:
+        """Number of bytes used by one raw waveform sample, if byte-aligned."""
+        if self.bits_per_sample % 8 != 0:
+            return None
+        return self.bits_per_sample // 8
+
+    @property
+    def packet_size_bytes(self) -> int | None:
+        """Number of bytes a complete waveform packet occupies."""
+        sample_size = self.sample_size_bytes
+        if sample_size is None:
+            return None
+        return sample_size * self.number_of_samples
+
     def ensure_supported(self) -> None:
         if self.waveform_compression_type != 0:
             raise NotImplementedError(
@@ -70,7 +85,23 @@ class WaveformPacketDescriptorRegistry(
     temporal_sample_spacing: int
 
     @classmethod
-    def from_vlrs(cls, vlrs: Iterable[VLR]) -> "WaveformPacketDescriptorRegistry":
+    def from_vlrs(
+        cls,
+        vlrs: Iterable[VLR],
+        *,
+        require_supported: bool = True,
+    ) -> "WaveformPacketDescriptorRegistry":
+        """Build a registry from waveform packet VLRs.
+
+        With the default ``require_supported=True`` the historical strict
+        behaviour is kept: the first unsupported descriptor or incompatible
+        layout raises.
+
+        Pass ``require_supported=False`` to keep descriptors laspy cannot
+        decode (unknown compression, non byte-aligned samples) and mixed
+        layouts, so callers can report per-point problems instead of failing
+        the whole file.
+        """
         registry = cls()
         waveform_vlrs: list[WaveformPacketVlr] = [
             cast(WaveformPacketVlr, vlr)
@@ -96,15 +127,23 @@ class WaveformPacketDescriptorRegistry(
                 digitizer_gain=raw.digitizer_gain,
                 digitizer_offset=raw.digitizer_offset,
             )
-            descriptor.ensure_supported()
+            if require_supported:
+                descriptor.ensure_supported()
             record_id = WavePacketDescriptorRecordId(vlr.record_id)
             registry.data[record_id] = descriptor
-        bits_per_sample, number_of_samples, temporal_sample_spacing = (
-            registry.ensure_supported()
-        )
-        registry.bits_per_sample = bits_per_sample
-        registry.number_of_samples = number_of_samples
-        registry.temporal_sample_spacing = temporal_sample_spacing
+
+        if registry.data:
+            first = next(iter(registry.data.values()))
+            if require_supported:
+                (
+                    registry.bits_per_sample,
+                    registry.number_of_samples,
+                    registry.temporal_sample_spacing,
+                ) = registry.ensure_supported()
+            else:
+                registry.bits_per_sample = first.bits_per_sample
+                registry.number_of_samples = first.number_of_samples
+                registry.temporal_sample_spacing = first.temporal_sample_spacing
         return registry
 
     def ensure_supported(self) -> tuple[int, int, int]:
@@ -136,6 +175,22 @@ class WaveformPacketDescriptorRegistry(
             bits_per_sample_set.pop(),
             number_of_samples_set.pop(),
             temporal_sample_spacing_set.pop(),
+        )
+
+    def descriptor_for_index(
+        self, descriptor_index: int
+    ) -> WaveformPacketDescriptor | None:
+        """Return the descriptor referenced by a point's ``wavepacket_index``.
+
+        ``wavepacket_index`` 0 means that the point has no waveform packet and
+        therefore has no descriptor.
+        """
+        if descriptor_index == 0:
+            return None
+        return self.data.get(
+            WavePacketDescriptorRecordId.from_index(
+                WavePacketDescriptorIndex(descriptor_index)
+            )
         )
 
     def dtype(self) -> np.dtype | None:

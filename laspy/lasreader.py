@@ -22,6 +22,12 @@ from .waveform.descriptor import (
 )
 from .waveform.mode import WaveformMode
 from .waveform.record import IWaveformReader
+from .waveform.samples import (
+    LAS_WAVEFORM_TIME_UNIT,
+    WaveformSampleTable,
+    build_waveform_sample_table,
+    waveform_source_for_header,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -259,6 +265,42 @@ class LasReader:
         )
         return points
 
+    def waveform_samples(
+        self,
+        *,
+        time_unit: str = LAS_WAVEFORM_TIME_UNIT,
+    ) -> WaveformSampleTable:
+        return self.read_waveform_samples(time_unit=time_unit)
+
+    def read_waveform_samples(
+        self,
+        *,
+        time_unit: str = LAS_WAVEFORM_TIME_UNIT,
+    ) -> WaveformSampleTable:
+        """Read the remaining points and expand their waveform packets.
+
+        Unlike :meth:`read_points`, this returns the per-sample table rather
+        than the raw amplitude array.  Unresolvable points are reported in
+        :attr:`WaveformSampleTable.issues` rather than raising, so a missing
+        ``.wdp``, an internal packet record, or one unknown descriptor does
+        not discard the samples that are known.
+        """
+        points = self.read_points(-1, waveform_mode=WaveformMode.NEVER)
+        registry = WaveformPacketDescriptorRegistry.from_vlrs(
+            self.header.vlrs, require_supported=False
+        )
+        waveform_source = self._waveform_source
+        if waveform_source is None:
+            waveform_source = waveform_source_for_header(
+                self.header, getattr(self._source, "name", None)
+            )
+        return build_waveform_sample_table(
+            points,
+            waveform_source,
+            registry,
+            time_unit=time_unit,
+        )
+
     def read(
         self,
         *,
@@ -277,6 +319,7 @@ class LasReader:
             waveform_mode=waveform_mode,
         )
         las_data = LasData(header=self.header, points=points)
+        las_data.source_path = getattr(self._source, "name", None)
 
         shall_read_evlr = (
             self.header.version.minor >= 4

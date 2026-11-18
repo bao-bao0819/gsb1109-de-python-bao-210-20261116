@@ -16,6 +16,14 @@ from .point.dims import ScaledArrayView, SubFieldView
 from .point.record import DimensionNameValidity
 from .vlrs.vlrlist import VLRList
 from .waveform import WaveformRecord
+from .waveform.descriptor import WaveformPacketDescriptorRegistry
+from .waveform.samples import (
+    LAS_WAVEFORM_TIME_UNIT,
+    WaveformPacketSource,
+    WaveformSampleTable,
+    build_waveform_sample_table,
+    waveform_source_for_header,
+)
 from .waveform.utils import deduplicate_waveform_indices, iter_runs
 
 logger = logging.getLogger(__name__)
@@ -90,6 +98,15 @@ class LasData:
         self.points[("x", "y", "z")] = value
 
     @property
+    def source_path(self) -> Optional[str]:
+        """Path the data was read from, used to resolve waveform packets."""
+        return self.__dict__.get("_source_path")
+
+    @source_path.setter
+    def source_path(self, value: Optional[str]) -> None:
+        self.__dict__["_source_path"] = value
+
+    @property
     def points(self) -> record.PackedPointRecord:
         """Returns the point record"""
         return self._points
@@ -120,6 +137,60 @@ class LasData:
     @evlrs.setter
     def evlrs(self, evlrs: VLRList) -> None:
         self.header.evlrs = evlrs
+
+    def waveform_sample_table(
+        self,
+        *,
+        time_unit: str = LAS_WAVEFORM_TIME_UNIT,
+        source: Any = None,
+        payload_offset: int = 0,
+    ) -> WaveformSampleTable:
+        return self.waveform_samples(
+            time_unit=time_unit,
+            source=source,
+            payload_offset=payload_offset,
+        )
+
+    def waveform_samples(
+        self,
+        *,
+        time_unit: str = LAS_WAVEFORM_TIME_UNIT,
+        source: Any = None,
+        payload_offset: int = 0,
+    ) -> WaveformSampleTable:
+        """Return one row per decoded waveform sample, with coordinates.
+
+        The table interprets each packet through the descriptor referenced by
+        its point, converts the raw samples with that descriptor's digitizer
+        gain and offset, and calculates each sample's position from the
+        point's coordinates, ``return_point_wave_location`` and direction
+        vector.  Unresolvable points are reported in
+        :attr:`WaveformSampleTable.issues` rather than dropped silently.
+
+        ``source`` may override where packet bytes are read from (a path, an
+        open stream, or a :class:`laspy.waveform.samples.WaveformPacketSource`).
+        """
+        registry = WaveformPacketDescriptorRegistry.from_vlrs(
+            self.header.vlrs, require_supported=False
+        )
+        waveform_source = self.points._waveform_state
+        if waveform_source is None and source is not None:
+            if hasattr(source, "read_packet"):
+                waveform_source = source
+            else:
+                waveform_source = WaveformPacketSource(
+                    source, payload_offset=payload_offset
+                )
+        if waveform_source is None:
+            waveform_source = waveform_source_for_header(
+                self.header, self.source_path
+            )
+        return build_waveform_sample_table(
+            self.points,
+            waveform_source,
+            registry,
+            time_unit=time_unit,
+        )
 
     def add_extra_dim(self, params: ExtraBytesParams) -> None:
         """Adds a new extra dimension to the point record

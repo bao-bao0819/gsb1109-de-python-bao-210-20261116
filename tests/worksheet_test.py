@@ -2,8 +2,10 @@ import itertools
 import pickle  # nosec
 import random
 import re
+import unittest
 from inspect import signature
 from typing import Generator
+from unittest.mock import MagicMock
 
 import pytest
 from pytest import FixtureRequest
@@ -12,6 +14,7 @@ import gspread
 from gspread import utils
 from gspread.client import Client
 from gspread.exceptions import APIError, GSpreadException
+from gspread.http_client import HTTPClient
 from gspread.spreadsheet import Spreadsheet
 from gspread.worksheet import Worksheet
 
@@ -2074,3 +2077,163 @@ class WorksheetTest(GspreadTest):
         # Further ensure we are able to access the exception's properties after pickling
         reloaded_exception = pickle.loads(pickle.dumps(ex.exception))  # nosec
         self.assertEqual(reloaded_exception.args[0]["status"], "INVALID_ARGUMENT")
+
+
+class UndoImportRoundTest(unittest.TestCase):
+    """Offline tests for Worksheet.snapshot and Worksheet.undo_import_round."""
+
+    def setUp(self):
+        self.client = MagicMock(spec=HTTPClient)
+        self.spreadsheet = Spreadsheet(
+            self.client, {"id": "spreadsheet-id", "title": "Test"}
+        )
+        self.sheet = Worksheet(
+            self.spreadsheet,
+            {"title": "Sheet1", "sheetId": 0},
+            spreadsheet_id="spreadsheet-id",
+            client=self.client,
+        )
+
+    def test_undo_reverts_only_safe_cells(self):
+        before = {"A1": {"value": 1}, "A2": {"value": 10}, "A3": {"note": "old"}}
+        after = {"A1": {"value": 2}, "A2": {"value": 20}, "A3": {"note": "imported"}}
+        current = {
+            "A1": {"value": 2},
+            "A2": {"value": 999},  # edited after the round: conflict
+            "A3": {"note": "imported"},
+        }
+
+        plan = self.sheet.undo_import_round(before, after, current)
+
+        # only the safe cell A1 is restored, A2 is a conflict and untouched
+        self.assertEqual(plan.values, {"A1": 1})
+        self.assertEqual(sorted(plan.conflicts), ["A2"])
+
+        self.client.values_batch_update.assert_called_once()
+        args, kwargs = self.client.values_batch_update.call_args
+        self.assertEqual(args[0], "spreadsheet-id")
+        self.assertEqual(
+            kwargs["body"]["data"],
+            [{"range": "'Sheet1'!A1", "values": [[1]]}],
+        )
+        self.assertEqual(
+            kwargs["body"]["valueInputOption"], utils.ValueInputOption.user_entered
+        )
+
+        # the note restore goes through a batchUpdate updateCells request
+        self.client.batch_update.assert_called_once()
+        args, _ = self.client.batch_update.call_args
+        requests = args[1]["requests"]
+        self.assertEqual(len(requests), 1)
+        request = requests[0]["updateCells"]
+        self.assertEqual(request["fields"], "note")
+        self.assertEqual(request["rows"][0]["values"][0]["note"], "old")
+
+    def test_undo_formats_and_cleared_formats(self):
+        before = {
+            "A1": {"format": {"textFormat": {"bold": True}}},
+            "B1": {},
+        }
+        after = {
+            "A1": {"format": {"textFormat": {"bold": False}}},
+            "B1": {"format": {"textFormat": {"italic": True}}},
+        }
+        current = {
+            "A1": {"format": {"textFormat": {"bold": False}}},
+            "B1": {"format": {"textFormat": {"italic": True}}},
+        }
+
+        plan = self.sheet.undo_import_round(before, after, current)
+
+        self.assertEqual(plan.formats, {"A1": {"textFormat": {"bold": True}}})
+        self.assertEqual(plan.cleared_formats, ["B1"])
+
+        self.client.batch_update.assert_called_once()
+        args, _ = self.client.batch_update.call_args
+        requests = args[1]["requests"]
+        self.assertEqual(len(requests), 2)
+
+        restore = requests[0]["repeatCell"]
+        self.assertEqual(
+            restore["cell"], {"userEnteredFormat": {"textFormat": {"bold": True}}}
+        )
+        self.assertEqual(restore["fields"], "userEnteredFormat(textFormat)")
+
+        clear = requests[1]["repeatCell"]
+        self.assertEqual(clear["cell"], {})
+        self.assertEqual(clear["fields"], "userEnteredFormat")
+
+        self.client.values_batch_update.assert_not_called()
+
+    def test_undo_dry_run_makes_no_requests(self):
+        before = {"A1": {"value": 1}}
+        after = {"A1": {"value": 2}}
+        current = {"A1": {"value": 2}}
+
+        plan = self.sheet.undo_import_round(before, after, current, dry_run=True)
+
+        self.assertEqual(plan.values, {"A1": 1})
+        self.client.values_batch_update.assert_not_called()
+        self.client.batch_update.assert_not_called()
+
+    def test_undo_fetches_current_state_when_not_provided(self):
+        self.client.values_get.return_value = {"values": [[2]]}
+        empty_row_data = {"sheets": [{"data": [{"rowData": []}]}]}
+        self.client.spreadsheets_get.side_effect = [empty_row_data, empty_row_data]
+
+        before = {"A1": {"value": 1}}
+        after = {"A1": {"value": 2}}
+
+        plan = self.sheet.undo_import_round(before, after, dry_run=True)
+
+        self.assertEqual(plan.values, {"A1": 1})
+        self.assertFalse(plan.has_conflicts)
+
+        # current state was fetched only for the involved cells
+        args, _ = self.client.values_get.call_args
+        self.assertEqual(args[1], "'Sheet1'!A1:A1")
+
+    def test_snapshot(self):
+        self.client.values_get.return_value = {
+            "values": [["=B1*2", ""], ["", 5]],
+        }
+        notes_response = {
+            "sheets": [{"data": [{"rowData": [{"values": [{"note": "hello"}, {}]}]}]}]
+        }
+        formats_response = {
+            "sheets": [
+                {
+                    "data": [
+                        {
+                            "rowData": [
+                                {
+                                    "values": [
+                                        {
+                                            "userEnteredFormat": {
+                                                "textFormat": {"bold": True}
+                                            }
+                                        },
+                                        {},
+                                    ]
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }
+        self.client.spreadsheets_get.side_effect = [notes_response, formats_response]
+
+        snapshot = self.sheet.snapshot("A1:B2")
+
+        self.assertEqual(
+            snapshot,
+            {
+                "A1": {
+                    "value": "=B1*2",
+                    "note": "hello",
+                    "format": {"textFormat": {"bold": True}},
+                },
+                "B2": {"value": 5},
+            },
+        )

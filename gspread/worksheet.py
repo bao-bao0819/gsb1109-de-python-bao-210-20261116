@@ -43,6 +43,7 @@ from .utils import (
     PasteType,
     T,
     TableDirection,
+    UndoPlan,
     ValidationConditionType,
     ValueInputOption,
     ValueRenderOption,
@@ -60,6 +61,7 @@ from .utils import (
     get_a1_from_absolute_range,
     is_full_a1_notation,
     numericise_all,
+    plan_safe_undo,
     rowcol_to_a1,
     to_records,
 )
@@ -156,6 +158,24 @@ class ValueRange(list):
             return self[0][0]
         except IndexError:
             return default
+
+
+def _fill_snapshot_dimension(
+    snapshot: Dict[str, Dict[str, Any]],
+    matrix: Iterable[Iterable[Any]],
+    dimension: str,
+    start_row: int,
+    start_col: int,
+    empty_value: Any,
+) -> None:
+    """Store the non-empty cells of ``matrix`` into ``snapshot`` under
+    the given dimension key, using A1 labels offset by ``start_row`` and
+    ``start_col`` (both 0-based)."""
+    for row, row_values in enumerate(matrix):
+        for col, value in enumerate(row_values):
+            if value != empty_value:
+                label = rowcol_to_a1(start_row + row + 1, start_col + col + 1)
+                snapshot.setdefault(label, {})[dimension] = value
 
 
 class Worksheet:
@@ -3058,6 +3078,160 @@ class Worksheet:
         """
         # set the note to <empty string> will clear it
         self.update_notes({cell: ""})
+
+    def snapshot(self, range_name: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
+        """Capture the current state of the cells in the given range.
+
+        The result maps the A1 label of every non-empty cell to a dict
+        holding any of the keys:
+
+        * ``"value"``: the cell content, formulas included (a string
+          starting with ``=``), as returned by ``ValueRenderOption.formula``
+        * ``"format"``: the cell ``userEnteredFormat`` dict
+        * ``"note"``: the cell note text
+
+        Empty cells, default formats and missing notes are omitted.
+
+        Such snapshots can be taken before and after a write round (e.g. a
+        price import) and later passed to
+        :meth:`~gspread.worksheet.Worksheet.undo_import_round` as evidence
+        in order to safely revert that round.
+
+        :param str range_name: (optional) Range in A1 notation,
+            e.g. ``'A1:D10'``. Defaults to the whole sheet.
+        :rtype: dict
+
+        .. versionadded:: 6.3.0
+        """
+        if range_name is not None:
+            grid_range = a1_range_to_grid_range(get_a1_from_absolute_range(range_name))
+            start_row = grid_range.get("startRowIndex", 0)
+            start_col = grid_range.get("startColumnIndex", 0)
+        else:
+            start_row = 0
+            start_col = 0
+
+        values = self.get(
+            range_name,
+            value_render_option=ValueRenderOption.formula,
+            return_type=GridRangeType.ListOfLists,
+        )
+        notes = self.get_notes(grid_range=range_name)
+
+        params: ParamsType = {
+            "fields": "sheets.data.rowData.values.userEnteredFormat",
+            "ranges": absolute_range_name(self.title, range_name),
+        }
+        res = self.client.spreadsheets_get(self.spreadsheet_id, params)
+        row_data = res["sheets"][0]["data"][0].get("rowData", [])
+        formats = [
+            [cell.get("userEnteredFormat", {}) for cell in row.get("values", [])]
+            for row in row_data
+        ]
+
+        snapshot: Dict[str, Dict[str, Any]] = {}
+        _fill_snapshot_dimension(snapshot, values, "value", start_row, start_col, "")
+        _fill_snapshot_dimension(snapshot, notes, "note", start_row, start_col, "")
+        _fill_snapshot_dimension(snapshot, formats, "format", start_row, start_col, {})
+
+        return snapshot
+
+    def undo_import_round(
+        self,
+        before: Mapping[str, Mapping[str, Any]],
+        after: Mapping[str, Mapping[str, Any]],
+        current: Optional[Mapping[str, Mapping[str, Any]]] = None,
+        *,
+        dry_run: bool = False,
+        value_input_option: ValueInputOption = ValueInputOption.user_entered,
+    ) -> UndoPlan:
+        """Safely revert a single write round (e.g. a price import).
+
+        Computes a :class:`~gspread.utils.UndoPlan` from the ``before`` and
+        ``after`` snapshots of the round (see
+        :meth:`~gspread.worksheet.Worksheet.snapshot`) and the current live
+        state, then applies it:
+
+        * cells whose current state still matches the round's post-write
+          state are reverted to their pre-write state;
+        * cells whose current state has deviated from the round's
+          post-write state (i.e. they were edited afterwards) are kept
+          untouched and reported as conflicts in the returned plan.
+
+        Values (formulas included), formats and notes are each reverted
+        only over the actual modification scope of the round: dimensions
+        the round did not change are never touched, and the sheet as a
+        whole is never overwritten.
+
+        :param before: snapshot taken before the write round.
+        :param after: snapshot taken right after the write round.
+        :param current: (optional) snapshot of the current state. If not
+            provided, it is fetched from the sheet, limited to the
+            bounding range of the cells involved in the round.
+        :param bool dry_run: (optional) if ``True``, only compute and
+            return the plan without modifying the sheet.
+        :param value_input_option: (optional) how the restored values are
+            interpreted. Defaults to ``ValueInputOption.user_entered`` so
+            that restored formulas become formulas again.
+        :type value_input_option: :class:`~gspread.utils.ValueInputOption`
+        :rtype: :class:`~gspread.utils.UndoPlan`
+
+        .. versionadded:: 6.3.0
+        """
+        if current is None:
+            labels = set(before) | set(after)
+            if labels:
+                rows, cols = zip(*(a1_to_rowcol(label) for label in labels))
+                range_name = "{}:{}".format(
+                    rowcol_to_a1(min(rows), min(cols)),
+                    rowcol_to_a1(max(rows), max(cols)),
+                )
+                current = self.snapshot(range_name)
+            else:
+                current = {}
+
+        plan = plan_safe_undo(before, after, current)
+
+        if dry_run or plan.is_empty:
+            return plan
+
+        if plan.values:
+            data = [
+                {"range": label, "values": [[value]]}
+                for label, value in plan.values.items()
+            ]
+            self.batch_update(data, value_input_option=value_input_option)
+
+        if plan.formats or plan.cleared_formats:
+            requests = []
+            for label, cell_format in plan.formats.items():
+                requests.append(
+                    {
+                        "repeatCell": {
+                            "range": a1_range_to_grid_range(label, self.id),
+                            "cell": {"userEnteredFormat": cell_format},
+                            "fields": "userEnteredFormat(%s)"
+                            % ",".join(cell_format.keys()),
+                        }
+                    }
+                )
+            for label in plan.cleared_formats:
+                requests.append(
+                    {
+                        "repeatCell": {
+                            "range": a1_range_to_grid_range(label, self.id),
+                            "cell": {},
+                            "fields": "userEnteredFormat",
+                        }
+                    }
+                )
+            self.client.batch_update(self.spreadsheet_id, {"requests": requests})
+
+        if plan.notes:
+            # an empty note content clears the note
+            self.update_notes(plan.notes)
+
+        return plan
 
     @cast_to_a1_notation
     def define_named_range(self, name: str, range_name: str) -> JSONResponse:

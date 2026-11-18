@@ -1125,6 +1125,181 @@ def find_table(
     return result
 
 
+# Snapshot dimension names tracked by the safe-undo planner.
+# A snapshot maps an A1 cell label to a dict holding any of these keys:
+#
+# * ``"value"``: the cell content, formulas included (a string starting
+#   with ``=``), as returned by ``ValueRenderOption.formula``
+# * ``"format"``: the cell ``userEnteredFormat`` dict
+# * ``"note"``: the cell note text
+SNAPSHOT_DIMENSIONS: Tuple[str, str, str] = ("value", "format", "note")
+
+Snapshot = Mapping[str, Mapping[str, Any]]
+
+
+def _snapshot_dimension_default(dimension: str) -> Any:
+    if dimension == "format":
+        return {}
+    return ""
+
+
+class UndoPlan:
+    """The result of :func:`~gspread.utils.plan_safe_undo`.
+
+    Describes how to revert a single write round (e.g. a price import)
+    without touching cells that were modified afterwards.
+
+    Attributes:
+
+    * ``values``: ``{A1 label: value}`` map of cell values/formulas to restore.
+    * ``formats``: ``{A1 label: userEnteredFormat}`` map of cell formats
+      to restore.
+    * ``cleared_formats``: list of A1 labels whose format must be reset
+      to the default (the cell had no explicit format before the round).
+    * ``notes``: ``{A1 label: note}`` map of notes to restore. An empty
+      string means the note must be cleared.
+    * ``conflicts``: ``{A1 label: {dimension: {"before": ..., "after": ...,
+      "current": ...}}}`` map of cells whose current state has deviated
+      from the round's post-write state. These are left untouched.
+
+    .. versionadded:: 6.3.0
+    """
+
+    def __init__(
+        self,
+        values: Optional[Dict[str, Any]] = None,
+        formats: Optional[Dict[str, Mapping[str, Any]]] = None,
+        cleared_formats: Optional[List[str]] = None,
+        notes: Optional[Dict[str, str]] = None,
+        conflicts: Optional[Dict[str, Dict[str, Dict[str, Any]]]] = None,
+    ) -> None:
+        self.values = values if values is not None else {}
+        self.formats = formats if formats is not None else {}
+        self.cleared_formats = cleared_formats if cleared_formats is not None else []
+        self.notes = notes if notes is not None else {}
+        self.conflicts = conflicts if conflicts is not None else {}
+
+    @property
+    def has_conflicts(self) -> bool:
+        """``True`` if some cells could not be safely reverted."""
+        return bool(self.conflicts)
+
+    @property
+    def is_empty(self) -> bool:
+        """``True`` if there is nothing to revert."""
+        return not (self.values or self.formats or self.cleared_formats or self.notes)
+
+    def __eq__(self, other: Any) -> bool:
+        if not isinstance(other, UndoPlan):
+            return NotImplemented
+        return (
+            self.values == other.values
+            and self.formats == other.formats
+            and self.cleared_formats == other.cleared_formats
+            and self.notes == other.notes
+            and self.conflicts == other.conflicts
+        )
+
+    def __repr__(self) -> str:
+        return "<{} values:{} formats:{} cleared:{} notes:{} conflicts:{}>".format(
+            self.__class__.__name__,
+            sorted(self.values),
+            sorted(self.formats),
+            sorted(self.cleared_formats),
+            sorted(self.notes),
+            sorted(self.conflicts),
+        )
+
+
+def plan_safe_undo(
+    before: Snapshot,
+    after: Snapshot,
+    current: Snapshot,
+) -> UndoPlan:
+    """Compute the set of cells that can be safely reverted to their
+    pre-write state, given the evidence of a single write round.
+
+    The three snapshots map A1 cell labels to cell states. Each cell state
+    is a dict that may hold the keys ``"value"`` (cell content or formula),
+    ``"format"`` (``userEnteredFormat`` dict) and ``"note"`` (note text).
+    Missing labels or missing keys are treated as empty cells.
+
+    Each dimension of each cell is considered independently:
+
+    * the round did not modify the dimension (``after == before``):
+      the cell is out of scope and left untouched;
+    * the current state still matches the round's post-write state
+      (``current == after != before``): the dimension is safely reverted
+      to its pre-write value;
+    * the current state has deviated from the round's post-write state
+      (``current != after``): the cell is recorded as a conflict and
+      left untouched.
+
+    This way only the actual modification scope of the round is rolled
+    back, and later edits are never overwritten.
+
+    :param before: snapshot taken before the write round.
+    :param after: snapshot taken right after the write round.
+    :param current: snapshot of the current live state.
+    :rtype: :class:`~gspread.utils.UndoPlan`
+
+    .. versionadded:: 6.3.0
+    """
+    values: Dict[str, Any] = {}
+    formats: Dict[str, Mapping[str, Any]] = {}
+    cleared_formats: List[str] = []
+    notes: Dict[str, str] = {}
+    conflicts: Dict[str, Dict[str, Dict[str, Any]]] = {}
+
+    labels = set(before) | set(after) | set(current)
+
+    def sort_key(label: str) -> Tuple[int, int]:
+        # validates the label at the same time, raises IncorrectCellLabel
+        return a1_to_rowcol(label)
+
+    for label in sorted(labels, key=sort_key):
+        before_cell = before.get(label, {})
+        after_cell = after.get(label, {})
+        current_cell = current.get(label, {})
+
+        for dimension in SNAPSHOT_DIMENSIONS:
+            default = _snapshot_dimension_default(dimension)
+            before_value = before_cell.get(dimension, default)
+            after_value = after_cell.get(dimension, default)
+            current_value = current_cell.get(dimension, default)
+
+            if after_value == before_value:
+                # the round did not touch this dimension
+                continue
+
+            if current_value != after_value:
+                # the cell was modified again after the round: conflict
+                conflicts.setdefault(label, {})[dimension] = {
+                    "before": before_value,
+                    "after": after_value,
+                    "current": current_value,
+                }
+                continue
+
+            if dimension == "value":
+                values[label] = before_value
+            elif dimension == "format":
+                if before_value:
+                    formats[label] = before_value
+                else:
+                    cleared_formats.append(label)
+            else:
+                notes[label] = before_value
+
+    return UndoPlan(
+        values=values,
+        formats=formats,
+        cleared_formats=cleared_formats,
+        notes=notes,
+        conflicts=conflicts,
+    )
+
+
 # SHOULD NOT BE NEEDED UNTIL NEXT MAJOR VERSION
 # DEPRECATION_WARNING_TEMPLATE = (
 #     "[Deprecated][in version {v_deprecated}]: {msg_deprecated}"

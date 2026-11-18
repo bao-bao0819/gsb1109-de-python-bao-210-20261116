@@ -690,3 +690,138 @@ class UtilsTest(unittest.TestCase):
         table = utils.find_table(values, "A1", utils.TableDirection.table)
 
         self.assertListEqual(table, [], "resulting table should be empty")
+
+
+class SafeUndoTest(unittest.TestCase):
+    """Tests for gspread.utils.plan_safe_undo and gspread.utils.UndoPlan."""
+
+    def test_safe_revert_all_dimensions(self):
+        before = {
+            "B2": {
+                "value": 10,
+                "format": {"textFormat": {"bold": False}},
+                "note": "old note",
+            },
+        }
+        after = {
+            "B2": {
+                "value": 99,
+                "format": {"textFormat": {"bold": True}},
+                "note": "imported",
+            },
+        }
+        current = {
+            "B2": {
+                "value": 99,
+                "format": {"textFormat": {"bold": True}},
+                "note": "imported",
+            },
+        }
+
+        plan = utils.plan_safe_undo(before, after, current)
+
+        self.assertEqual(plan.values, {"B2": 10})
+        self.assertEqual(plan.formats, {"B2": {"textFormat": {"bold": False}}})
+        self.assertEqual(plan.notes, {"B2": "old note"})
+        self.assertEqual(plan.cleared_formats, [])
+        self.assertEqual(plan.conflicts, {})
+        self.assertFalse(plan.has_conflicts)
+        self.assertFalse(plan.is_empty)
+
+    def test_conflict_when_current_deviates(self):
+        before = {"B3": {"value": 20}}
+        after = {"B3": {"value": 88}}
+        current = {"B3": {"value": 123}}  # edited after the round
+
+        plan = utils.plan_safe_undo(before, after, current)
+
+        self.assertEqual(plan.values, {})
+        self.assertTrue(plan.has_conflicts)
+        self.assertEqual(
+            plan.conflicts,
+            {"B3": {"value": {"before": 20, "after": 88, "current": 123}}},
+        )
+
+    def test_untouched_cells_are_out_of_scope(self):
+        before = {"B4": {"note": "keep"}, "C1": {"value": 5}}
+        after = {"B4": {"note": "keep"}, "C1": {"value": 5}}
+        current = {"B4": {"note": "changed later"}, "C1": {"value": 42}}
+
+        plan = utils.plan_safe_undo(before, after, current)
+
+        # the round did not modify these cells: nothing to revert, no conflict
+        self.assertTrue(plan.is_empty)
+        self.assertFalse(plan.has_conflicts)
+
+    def test_dimensions_are_independent(self):
+        before = {"B2": {"value": 1, "note": "old"}}
+        after = {"B2": {"value": 2, "note": "imported"}}
+        current = {"B2": {"value": 3, "note": "imported"}}  # only value deviates
+
+        plan = utils.plan_safe_undo(before, after, current)
+
+        self.assertEqual(plan.values, {})
+        self.assertEqual(plan.notes, {"B2": "old"})
+        self.assertEqual(
+            plan.conflicts,
+            {"B2": {"value": {"before": 1, "after": 2, "current": 3}}},
+        )
+
+    def test_format_added_by_round_is_cleared(self):
+        before = {"B5": {"value": 1}}
+        after = {"B5": {"value": 1, "format": {"textFormat": {"italic": True}}}}
+        current = {"B5": {"value": 1, "format": {"textFormat": {"italic": True}}}}
+
+        plan = utils.plan_safe_undo(before, after, current)
+
+        self.assertEqual(plan.formats, {})
+        self.assertEqual(plan.cleared_formats, ["B5"])
+
+    def test_note_added_by_round_is_cleared(self):
+        before = {"B5": {}}
+        after = {"B5": {"note": "imported note"}}
+        current = {"B5": {"note": "imported note"}}
+
+        plan = utils.plan_safe_undo(before, after, current)
+
+        self.assertEqual(plan.notes, {"B5": ""})
+
+    def test_value_added_by_round_is_cleared(self):
+        before = {}
+        after = {"B5": {"value": "=B2*2"}}
+        current = {"B5": {"value": "=B2*2"}}
+
+        plan = utils.plan_safe_undo(before, after, current)
+
+        self.assertEqual(plan.values, {"B5": ""})
+
+    def test_formula_values_are_plain_values(self):
+        before = {"A1": {"value": "=SUM(B1:B5)"}}
+        after = {"A1": {"value": "=SUM(C1:C5)"}}
+        current = {"A1": {"value": "=SUM(C1:C5)"}}
+
+        plan = utils.plan_safe_undo(before, after, current)
+
+        self.assertEqual(plan.values, {"A1": "=SUM(B1:B5)"})
+
+    def test_empty_snapshots(self):
+        plan = utils.plan_safe_undo({}, {}, {})
+
+        self.assertTrue(plan.is_empty)
+        self.assertFalse(plan.has_conflicts)
+
+    def test_invalid_label_raises(self):
+        with self.assertRaises(gspread.exceptions.IncorrectCellLabel):
+            utils.plan_safe_undo({"not a cell": {"value": 1}}, {}, {})
+
+    def test_plan_equality_and_repr(self):
+        before = {"A1": {"value": 1}}
+        after = {"A1": {"value": 2}}
+        current = {"A1": {"value": 2}}
+
+        plan1 = utils.plan_safe_undo(before, after, current)
+        plan2 = utils.plan_safe_undo(before, after, current)
+
+        self.assertEqual(plan1, plan2)
+        self.assertNotEqual(plan1, utils.UndoPlan())
+        self.assertIn("A1", repr(plan1))

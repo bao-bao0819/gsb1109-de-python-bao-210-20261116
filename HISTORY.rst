@@ -1,6 +1,17 @@
 Release History
 ===============
 
+Unreleased
+----------
+
+* Add safe undo of a single write round (e.g. a price import): new
+  ``gspread.utils.plan_safe_undo`` and ``gspread.utils.UndoPlan`` compute the
+  cells that can be reverted from before/after snapshots without touching
+  later edits, and new ``Worksheet.snapshot`` /
+  ``Worksheet.undo_import_round`` capture cell state (values, formulas,
+  formats, notes) and apply the rollback only over the round's actual
+  modification scope.
+
 6.2.1 (2025-05-14)
 ------------------
 

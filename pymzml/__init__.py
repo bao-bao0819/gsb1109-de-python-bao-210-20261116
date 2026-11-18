@@ -25,7 +25,7 @@ Copyright (C) 2010-2019 M. Kösters, C. Fufezan
     SOFTWARE.
 """
 
-__all__ = ["run", "spec", "chromatogram", "obo", "minimum", "plot", "file_classes"]
+__all__ = ["run", "spec", "chromatogram", "obo", "minimum", "plot", "file_classes", "peak_view"]
 
 import sys
 
@@ -45,4 +45,5 @@ from pymzml.spec import MSDecoder
 from pymzml.chromatogram import Chromatogram
 import pymzml.obo
 import pymzml.plot
+import pymzml.peak_view
 import pymzml.utils

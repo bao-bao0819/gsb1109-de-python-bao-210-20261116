@@ -69,6 +69,7 @@ except (ImportError, ModuleNotFoundError) as e:
 from . import regex_patterns
 from .decoder import MSDecoder
 from .obo import OboTranslator
+from .peak_view import Calibration, PeakView, VersionedPeakViews
 
 PROTON = 1.00727646677
 ISOTOPE_AVERAGE_DIFFERENCE = 1.002
@@ -489,6 +490,8 @@ class Spectrum(MsData):
         self._decode = self._decode_to_numpy
         self._array = np.array
         self._ms_deisotop_warning_printed = False
+        self._peak_views = None
+        self._active_peak_view = None
 
     def __del__(self):
         """
@@ -724,6 +727,14 @@ class Spectrum(MsData):
     def measured_precision(self, value):
         self._measured_precision = value
         self.internal_precision = int(round(50000.0 / (value * 1e6)))
+        # Precision-dependent lookup caches must not survive a precision change.
+        self._t_mz_set = None
+        self._transformed_mz_with_error = None
+        self._transformed_mass_with_error = None
+        self._transformed_peaks = None
+        # Peak views are immutable precision snapshots and keep their own
+        # query indexes, so they are deliberately not rebuilt here.  Only the
+        # spectrum's legacy precision caches are discarded.
         return
 
     @property
@@ -1098,7 +1109,7 @@ class Spectrum(MsData):
     def i(self, intensity_list):
         self._i = intensity_list
 
-    def peaks(self, peak_type):
+    def peaks(self, peak_type, version=None, *, calibration_version=None, view=None, **kwargs):
         """
         Decode and return a list of mz/i tuples.
 
@@ -1106,9 +1117,18 @@ class Spectrum(MsData):
             peak_type(str): currently supported types are:
                 raw, centroided and reprofiled
 
+        Keyword Args:
+            version(str): optional calibrated peak view.  When given, the
+                view's peak snapshot is returned instead of the spectrum's
+                own peaks.  The spectrum data is never modified.
+
         Returns:
             peaks (list or ndarray): list or numpy array of mz/i tuples or arrays
         """
+        if version is None:
+            version = calibration_version if calibration_version is not None else view
+        if version is not None:
+            return self._resolve_peak_view(version).peaks
         if self._peak_dict[peak_type] is None:
             if self._peak_dict["raw"] is None:
                 mz_params = self._get_encoding_parameters("m/z array")
@@ -1204,6 +1224,15 @@ class Spectrum(MsData):
         # reset after changing peaks
         self._transformed_mass_with_error = None
         self._transformed_mz_with_error = None
+        self._transformed_peaks = None
+        self._t_mz_set = None
+        self._t_mass_set = None
+        self._centroided_peaks_sorted_by_i = None
+        self._extreme_values = None
+        # Peak views are immutable snapshots; changing the underlying peaks
+        # makes the collection stale and it is rebuilt on next access.
+        self._peak_views = None
+        self._active_peak_view = None
         if peak_type == "raw":
             # if not isinstance(peaks, np.ndarray):
             #     peaks = np.array(peaks)
@@ -1489,6 +1518,234 @@ class Spectrum(MsData):
             ]
         return self._centroided_peaks_sorted_by_i[-n:]
 
+    # ------------------------------------------------------------------
+    # Versioned peak views and calibration
+    # ------------------------------------------------------------------
+    def _ensure_peak_views(self):
+        if self._peak_views is None:
+            self._peak_views = VersionedPeakViews(
+                self, peak_type="centroided", measured_precision=self.measured_precision
+            )
+        return self._peak_views
+
+    @property
+    def peak_views(self):
+        """
+        Versioned calibrated peak views of this spectrum.
+
+        The collection always starts with an uncalibrated ``original`` view.
+        Adding another calibration creates a new immutable view; the original
+        view and all existing peak identities stay untouched.
+        """
+        return self._ensure_peak_views()
+
+    @property
+    def versioned_peaks(self):
+        return self.peak_views
+
+    def add_peak_view(
+        self,
+        version,
+        calibration=None,
+        *,
+        mapping=None,
+        measured_precision=None,
+        precision=None,
+        peaks=None,
+        source_version=None,
+        replace=False,
+        activate=False,
+        **kwargs,
+    ):
+        """
+        Add a named calibrated peak view derived from this spectrum.
+
+        Keyword Args:
+            activate (bool): make the new view the default for version-less
+                ``has_peak``/``has_overlapping_peak`` calls.  Existing view
+                objects and explicit versions are unaffected.
+        """
+        view = self.peak_views.add(
+            version,
+            calibration,
+            mapping=mapping,
+            measured_precision=measured_precision,
+            precision=precision,
+            peaks=peaks,
+            source_version=source_version,
+            replace=replace,
+            **kwargs,
+        )
+        if activate:
+            self.activate_peak_view(view.version)
+        return view
+
+    add_calibration = add_peak_view
+    add_peak_view_version = add_peak_view
+    add_calibration_version = add_peak_view
+
+    def get_peak_view(self, version=None):
+        """Return a peak view by version name (``None`` means the active one)."""
+        return self.peak_views.view(version)
+
+    peak_view = get_peak_view
+    view = get_peak_view
+    select_peak_view = get_peak_view
+
+    def activate_peak_view(self, version):
+        """Select the default view used by :meth:`peaks_in_view` and friends."""
+        view = self.peak_views.activate(version)
+        self._active_peak_view = view.version
+        return view
+
+    def set_active_peak_view(self, version):
+        return self.activate_peak_view(version)
+
+    @property
+    def active_peak_view(self):
+        if self._active_peak_view is None:
+            return self.peak_views.original
+        return self.peak_views.view(self._active_peak_view)
+
+    def peaks_in_view(self, version=None):
+        """Peaks of one view as an ``(n, 2)`` calibrated array."""
+        return self._resolve_peak_view(version).peaks
+
+    def find_peaks(
+        self,
+        mz,
+        error_window=None,
+        ppm=None,
+        *,
+        version=None,
+        **kwargs,
+    ):
+        """
+        Find calibrated peaks in an explicit error window.
+
+        ``error_window`` is an absolute m/z window; ``ppm`` is a relative
+        window (5e-6 == 5 ppm).  If neither is given, the selected view's
+        measured precision is used.  The version is selected explicitly so
+        interleaved lookups cannot silently use another calibration's cache.
+        """
+        return self._resolve_peak_view(version).find_peaks(
+            mz, error_window=error_window, ppm=ppm, **kwargs
+        )
+
+    def find_peaks_in_version(self, version, mz, error_window=None, ppm=None, **kwargs):
+        return self.find_peaks(
+            mz,
+            error_window=error_window,
+            ppm=ppm,
+            version=version,
+            **kwargs,
+        )
+
+    def has_peak_in_view(self, mz, error_window=None, ppm=None, *, version=None, **kwargs):
+        return [
+            record.as_tuple()
+            for record in self.find_peaks(
+                mz,
+                error_window=error_window,
+                ppm=ppm,
+                version=version,
+                **kwargs,
+            )
+        ]
+
+    def has_peak_in_version(self, version, mz, error_window=None, ppm=None, **kwargs):
+        return self.has_peak_in_view(
+            mz,
+            error_window=error_window,
+            ppm=ppm,
+            version=version,
+            **kwargs,
+        )
+
+    def reverse_peak_lookup_in_version(
+        self, version, mz, error_window=None, ppm=None, **kwargs
+    ):
+        return self.reverse_peak_lookup(
+            mz,
+            error_window=error_window,
+            ppm=ppm,
+            version=version,
+            **kwargs,
+        )
+
+    def reverse_peak_lookup(
+        self, mz, error_window=None, ppm=None, *, version=None, **kwargs
+    ):
+        """Reverse lookup with explicit uniqueness reporting."""
+        return self._resolve_peak_view(version).reverse_lookup(
+            mz, error_window=error_window, ppm=ppm, **kwargs
+        )
+
+    def explain_reverse_peak_lookup(
+        self, mz, error_window=None, ppm=None, *, version=None, **kwargs
+    ):
+        return self.reverse_peak_lookup(
+            mz,
+            error_window=error_window,
+            ppm=ppm,
+            version=version,
+            **kwargs,
+        ).explain()
+
+    find_peak = find_peaks
+    query_peak_view = find_peaks
+
+    @property
+    def calibration_versions(self):
+        """Names of all registered peak view versions."""
+        return self.peak_views.versions
+
+    @property
+    def peak_view_versions(self):
+        return self.peak_views.versions
+
+    def list_peak_views(self):
+        return self.peak_views.versions
+
+    def with_calibration(
+        self,
+        calibration=None,
+        version=None,
+        measured_precision=None,
+        **kwargs,
+    ):
+        """
+        Return a calibrated :class:`PeakView` without modifying this spectrum.
+
+        This is a non-mutating shortcut for ``add_peak_view`` followed by
+        ``get_peak_view``; the returned view owns an independent snapshot.
+        """
+        if version is None:
+            version = "calibrated"
+        activate = kwargs.pop("activate", False)
+        view = self.peak_views.add(
+            version,
+            calibration,
+            measured_precision=measured_precision,
+            replace=kwargs.pop("replace", True),
+            **kwargs,
+        )
+        if activate:
+            self.activate_peak_view(view.version)
+        return view
+
+    calibrate = with_calibration
+
+    @property
+    def original_peaks(self):
+        """Original (uncalibrated) peaks of the active view."""
+        return self.peak_views.original.peaks
+
+    def _resolve_peak_view(self, version=None):
+        if isinstance(version, PeakView):
+            return version
+        return self.peak_views.view(version)
+
     def ppm2abs(self, value, ppm_value, direction=1, factor=1):
         """
         Returns the value plus (or minus, dependent on direction) the
@@ -1551,7 +1808,7 @@ class Spectrum(MsData):
             self._extreme_values[key] = ()
         return self._extreme_values[key]
 
-    def has_peak(self, mz2find):
+    def has_peak(self, mz2find, error_window=None, ppm=None, version=None, **kwargs):
         """
         Checks if a Spectrum has a certain peak.
         Requires a m/z value as input and returns a list of peaks if the m/z
@@ -1563,6 +1820,14 @@ class Spectrum(MsData):
 
         Arguments:
             mz2find (float): m/z value which should be found
+
+        Keyword Arguments:
+            error_window (float): explicit absolute m/z window.  When set, the
+                lookup uses the selected peak view rather than the spectrum's
+                global precision cache.
+            ppm (float): explicit relative window (5e-6 == 5 ppm).
+            version (str): peak view version to search.  Without a version the
+                active view is used (``original`` by default).
 
         Returns:
             peaks (list): list of m/z, i tuples
@@ -1585,10 +1850,24 @@ class Spectrum(MsData):
         [(1016.5404, 19141.735187697403)]
 
         """
+        if (
+            version is not None
+            or error_window is not None
+            or ppm is not None
+            or self._active_peak_view is not None
+        ):
+            view = self._resolve_peak_view(version)
+            if error_window is None and ppm is None and not kwargs:
+                return view.has_peak(mz2find)
+            return view.has_peak(
+                mz2find, error_window=error_window, ppm=ppm, **kwargs
+            )
         value = self.transform_mz(mz2find)
         return self.transformed_mz_with_error[value]
 
-    def has_overlapping_peak(self, mz):
+    def has_overlapping_peak(
+        self, mz, error_window=None, ppm=None, version=None, **kwargs
+    ):
         """
         Checks if a spectrum has more than one peak for a given m/z value
         and within the measured precision
@@ -1600,6 +1879,15 @@ class Spectrum(MsData):
             Boolean (bool): Returns ``True`` if a nearby peak is detected,
             otherwise ``False``
         """
+        if (
+            version is not None
+            or error_window is not None
+            or ppm is not None
+            or self._active_peak_view is not None
+        ):
+            return self._resolve_peak_view(version).has_overlapping_peak(
+                mz, error_window=error_window, ppm=ppm, **kwargs
+            )
         for minus_or_plus in [-1, 1]:
             target = self.ppm2abs(mz, self.measured_precision, minus_or_plus, 1)
             temp = self.has_peak(self.ppm2abs(mz, self.measured_precision))

@@ -56,3 +56,9 @@ Say for example you have an index as in the example file Manuels_customs_ids.mzM
 
 The regular expression has to contain a group called ID and a group called offset.
 Also be aware that your regex need to be a byte string.
+
+
+Keeping multiple calibrations of one spectrum
+---------------------------------------------
+
+.. include:: code_inc/peak_views.inc

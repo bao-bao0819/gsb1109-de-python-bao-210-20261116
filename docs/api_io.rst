@@ -12,6 +12,12 @@ vcfpy.Reader
 .. autoclass:: vcfpy.Reader
     :members:
 
+vcfpy.IntervalHit
+-----------------
+
+.. autoclass:: vcfpy.IntervalHit
+    :members:
+
 vcfpy.Writer
 ------------
 

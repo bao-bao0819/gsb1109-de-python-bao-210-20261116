@@ -24,7 +24,7 @@ from vcfpy.header import (
     SimpleHeaderLine,
     header_without_lines,
 )
-from vcfpy.reader import Reader
+from vcfpy.reader import Interval, IntervalHit, Reader
 from vcfpy.record import (
     BND,
     DEL,
@@ -75,6 +75,8 @@ __all__ = [
     "SamplesInfos",
     "header_without_lines",
     "Reader",
+    "Interval",
+    "IntervalHit",
     "HeaderLine",
     "Writer",
     "Record",

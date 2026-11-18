@@ -20,6 +20,21 @@ vcfpy.tabix.TabixFileIter
 .. autoclass:: vcfpy.tabix.TabixFileIter
     :members:
 
+vcfpy.tabix.TabixMultiIter
+--------------------------
+
+.. autoclass:: vcfpy.tabix.TabixMultiIter
+    :members:
+
+vcfpy.tabix.TabixHit
+--------------------
+
+.. autoclass:: vcfpy.tabix.TabixHit
+    :members:
+
+.. autoclass:: vcfpy.tabix.TabixInterval
+    :members:
+
 vcfpy.tabix.TabixIndex
 ----------------------
 
@@ -47,3 +62,7 @@ Tabix Utilities
 .. autofunction:: vcfpy.tabix.read_index
 
 .. autofunction:: vcfpy.tabix.reg2bins
+
+.. autofunction:: vcfpy.tabix.make_interval
+
+.. autofunction:: vcfpy.tabix.interval_key

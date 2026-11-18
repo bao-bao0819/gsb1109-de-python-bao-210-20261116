@@ -46,3 +46,22 @@ The program call looks as follows.
 
 .. literalinclude::  ../examples/fetch_tabix/stdout.txt
     :language: shell
+
+Fetching Multiple Overlapping Intervals
+=======================================
+
+``Reader.fetch_many`` accepts several intervals at once and merges hits by
+source record occurrence.  A record reached through several overlapping
+index chunks or query intervals is returned once, with all matching intervals
+kept on the hit.  Two identical lines in the file remain two occurrences
+because the identity is the line's byte offset, not its content.  Results are
+ordered by source position, so swapping the query intervals does not change
+which occurrence is retained.
+
+.. code-block:: python
+
+    import vcfpy
+
+    with vcfpy.Reader.from_path("input.vcf.gz") as reader:
+        for hit in reader.fetch_many(["20:1,110,000-1,111,000", "20:1,230,000-1,235,000"]):
+            print(hit.POS, hit.intervals)

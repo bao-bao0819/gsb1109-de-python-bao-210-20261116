@@ -3,8 +3,10 @@
 import dataclasses
 import enum
 import gzip
+import os
 import pathlib
 import struct
+from typing import Iterable
 
 from vcfpy.bgzf import BgzfReader
 
@@ -48,6 +50,122 @@ class SequenceIndex:
     bins: list[Bin]
     #: Linear index intervals.
     offsets: list[int]
+
+
+class TabixHit(str):
+    """A data line that also carries its source identity and matched intervals."""
+
+    def __new__(
+        cls,
+        line: str,
+        virtual_offset: int,
+        intervals: tuple[object, ...] = (),
+    ) -> "TabixHit":
+        obj = super().__new__(cls, line)
+        obj.virtual_offset = virtual_offset
+        obj.intervals = tuple(intervals)
+        return obj
+
+    @property
+    def line(self) -> str:
+        """The line contents without the trailing line break."""
+        return str(self)
+
+    def __repr__(self) -> str:
+        return f"TabixHit({str(self)!r}, virtual_offset={self.virtual_offset!r}, intervals={self.intervals!r})"
+
+
+@dataclasses.dataclass(frozen=True)
+class TabixInterval:
+    """A normalized interval accepted by multi-interval queries."""
+
+    #: Reference sequence name.
+    reference: str
+    #: Start coordinate passed to tabix (1-based, inclusive) or ``None``.
+    begin: int | None = None
+    #: End coordinate passed to tabix (1-based, inclusive) or ``None``.
+    end: int | None = None
+    #: Original object supplied by the caller, reported back on each hit.
+    spec: object = None
+
+    @classmethod
+    def make(cls, spec: object) -> "TabixInterval":
+        """Normalize a region string, tuple, mapping, or interval instance."""
+        return make_interval(spec)
+
+    def key(self) -> tuple:
+        """Return a deterministic ordering key for this interval."""
+        return interval_key(self)
+
+
+def _parse_region(region: str) -> TabixInterval:
+    """Parse a samtools-style region string into an interval."""
+    if ":" not in region:
+        return TabixInterval(reference=region, spec=region)
+    reference, pos = region.split(":", 1)
+    if "-" not in pos:
+        return TabixInterval(reference=reference, begin=int(pos.replace(",", "")), spec=region)
+    start_str, end_str = pos.split("-", 1)
+    return TabixInterval(
+        reference=reference,
+        begin=int(start_str.replace(",", "")),
+        end=int(end_str.replace(",", "")),
+        spec=region,
+    )
+
+
+def _freeze_spec(spec: object) -> tuple:
+    """Return a hashable, order-independent representation of an interval spec."""
+    if isinstance(spec, TabixInterval):
+        return ("interval", spec.reference, spec.begin, spec.end, _freeze_spec(spec.spec))
+    if isinstance(spec, dict):
+        return ("dict", tuple(sorted((str(key), _freeze_spec(value)) for key, value in spec.items())))
+    if isinstance(spec, (tuple, list)):
+        return (type(spec).__name__, tuple(_freeze_spec(value) for value in spec))
+    return (type(spec).__name__, repr(spec))
+
+
+def make_interval(spec: object) -> TabixInterval:
+    """Normalize a region string, tuple, mapping, interval object, or hit."""
+    if isinstance(spec, TabixInterval):
+        return spec if spec.spec is not None else dataclasses.replace(spec, spec=spec)
+    if isinstance(spec, str):
+        return _parse_region(spec)
+    if isinstance(spec, dict):
+        reference = spec.get("reference", spec.get("chrom", spec.get("seq")))
+        begin = spec.get("begin", spec.get("start"))
+        end = spec.get("end")
+        if reference is None and "region" in spec:
+            nested = make_interval(spec["region"])
+            return dataclasses.replace(nested, spec=spec)
+        if reference is None:
+            raise ValueError(f"Interval mapping lacks reference/chrom/seq: {spec!r}")
+        return TabixInterval(reference=str(reference), begin=begin, end=end, spec=spec)
+    if isinstance(spec, (tuple, list)):
+        if len(spec) == 1:
+            nested = make_interval(spec[0])
+            return dataclasses.replace(nested, spec=spec)
+        if len(spec) == 2:
+            reference, rest = spec
+            if isinstance(rest, str):
+                nested = _parse_region(rest)
+                return TabixInterval(reference=str(reference), begin=nested.begin, end=nested.end, spec=spec)
+            return TabixInterval(reference=str(reference), begin=rest, spec=spec)
+        if len(spec) == 3:
+            reference, begin, end = spec
+            return TabixInterval(reference=str(reference), begin=begin, end=end, spec=spec)
+    # Duck-typed interval objects (for example gene interval records).
+    reference = getattr(spec, "reference", getattr(spec, "chrom", getattr(spec, "seq", None)))
+    if reference is not None:
+        begin = getattr(spec, "begin", getattr(spec, "start", None))
+        end = getattr(spec, "end", getattr(spec, "stop", None))
+        return TabixInterval(reference=str(reference), begin=begin, end=end, spec=spec)
+    raise ValueError(f"Unsupported interval specification: {spec!r}")
+
+
+def interval_key(interval: TabixInterval) -> tuple:
+    """Return the deterministic identity of an interval, including its label."""
+    return (interval.reference, interval.begin, interval.end, _freeze_spec(interval.spec))
 
 
 @dataclasses.dataclass
@@ -206,8 +324,16 @@ class TabixFile:
         start: int | None = None,
         end: int | None = None,
         region: str | None = None,
-    ) -> "TabixFileIter":
-        """Fetch iterator for given region."""
+    ) -> "TabixFileIter | TabixMultiIter":
+        """Fetch iterator for given region.
+
+        Passing a collection as ``reference`` without ``region``/``start``/
+        ``end`` is delegated to :py:meth:`fetch_many`.
+        """
+        if reference is not None and not isinstance(reference, (str, os.PathLike)):
+            if region is not None or start is not None or end is not None:
+                raise ValueError("Cannot combine an interval collection with region/start/end")
+            return self.fetch_many(reference)
         if region and reference is not None:
             raise ValueError("Cannot specify both region and reference/start/end")
         if (start is not None or end is not None) and reference is None:
@@ -244,6 +370,22 @@ class TabixFile:
             end=end,
             bgzf_file=self.file,
         )
+
+    def fetch_many(self, intervals: "Iterable[object]") -> "TabixMultiIter":
+        """Fetch several intervals while merging hits by source occurrence.
+
+        The same physical line may be reached through multiple chunks and
+        intervals.  Hits are merged on the BGZF virtual offset of the line,
+        so two byte-identical lines in the file remain two distinct hits.
+        Results are returned in source order, independent of the order in
+        which the intervals are supplied, and each hit lists every interval
+        that selected it.
+
+        :param intervals: iterable of region strings, ``(reference, start,
+            end)`` tuples, or mappings with ``reference``/``chrom``,
+            optional ``start``/``begin`` and ``end``.
+        """
+        return TabixMultiIter(tabix_file=self, intervals=intervals)
 
     def close(self) -> None:
         """Close the TabixFile."""
@@ -295,9 +437,11 @@ class TabixFileIter:
         # Initialize iteration state
         self._chunks: list[Chunk] = []
         self._current_chunk_idx = 0
-        self._current_lines: list[str] = []
+        self._current_lines: list[tuple[str, int]] = []
         self._current_line_idx = 0
         self._finished = False
+        # Virtual offsets already returned; guards against overlapping chunks.
+        self._seen_offsets: set[int] = set()
 
         # Find relevant chunks for the region
         self._find_chunks()
@@ -406,15 +550,16 @@ class TabixFileIter:
         self.bgzf_file.seek(chunk.beg)
 
         lines = []
-        current_offset = chunk.beg
 
-        while current_offset < chunk.end:
+        while True:
+            line_offset = self.bgzf_file.tell()
+            if line_offset >= chunk.end:
+                break
             line = self.bgzf_file.readline()
             if not line:  # pragma: no cover
                 break
 
-            lines.append(line.rstrip("\n\r"))
-            current_offset = self.bgzf_file.tell()
+            lines.append((line.rstrip("\n\r"), line_offset))
 
         self._current_lines = lines
         self._current_line_idx = 0
@@ -478,6 +623,10 @@ class TabixFileIter:
 
     def __next__(self) -> str:
         """Return the next record."""
+        return self.next_hit()
+
+    def next_hit(self) -> TabixHit:
+        """Return the next matching line with its source identity."""
         if self._finished:  # pragma: no cover
             raise StopIteration
 
@@ -492,16 +641,21 @@ class TabixFileIter:
 
             # Check remaining lines in current batch
             while self._current_line_idx < len(self._current_lines):
-                line = self._current_lines[self._current_line_idx]
+                line, line_offset = self._current_lines[self._current_line_idx]
                 self._current_line_idx += 1
 
                 # Skip header/comment lines
                 if line.startswith("#"):  # pragma: no cover
                     continue
 
+                # A line can be read again when chunks overlap; return it once.
+                if line_offset in self._seen_offsets:
+                    continue
+
                 # Check if line matches our region
                 if self._line_matches_region(line):
-                    return line
+                    self._seen_offsets.add(line_offset)
+                    return TabixHit(line=line, virtual_offset=line_offset)
 
                 # Check if we've gone past our region
                 try:
@@ -527,3 +681,81 @@ class TabixFileIter:
                     continue
 
             # Processed all lines in current batch, loop to load next chunk
+
+
+class TabixMultiIter:
+    """Iterate over the merged hits of several intervals."""
+
+    def __init__(self, *, tabix_file: TabixFile, intervals: Iterable[object]):
+        self.tabix_file = tabix_file
+        # Intervals with the same coordinates but different labels (for
+        # example two genes sharing a span) share one query, but every label
+        # is reported on every hit.
+        spans: dict[tuple[str, int | None, int | None], list[object]] = {}
+        for spec in intervals:
+            interval = make_interval(spec)
+            span = (interval.reference, interval.begin, interval.end)
+            specs = spans.setdefault(span, [])
+            if interval.spec not in specs:
+                specs.append(interval.spec)
+        ordered = sorted(
+            spans.items(),
+            key=lambda item: (
+                item[0][0],
+                item[0][1] is None,
+                item[0][1] or 0,
+                item[0][2] is None,
+                item[0][2] or 0,
+            ),
+        )
+        self.intervals = [
+            (TabixInterval(reference=ref, begin=begin, end=end), specs) for (ref, begin, end), specs in ordered
+        ]
+        self._hits: list[TabixHit] | None = None
+        self._hit_idx = 0
+
+    def _fetch(self, interval: TabixInterval) -> TabixFileIter:
+        """Return the iterator for one normalized interval."""
+        if interval.begin is None and interval.end is None:
+            return self.tabix_file.fetch(region=interval.reference)
+        if interval.end is None:
+            return self.tabix_file.fetch(reference=interval.reference, start=interval.begin)
+        return self.tabix_file.fetch(reference=interval.reference, start=interval.begin, end=interval.end)
+
+    def _collect(self) -> list[TabixHit]:
+        """Collect hits, merging equal source offsets."""
+        merged: dict[int, TabixHit] = {}
+        for interval, specs in self.intervals:
+            if interval.reference not in self.tabix_file.index_file.indices:
+                raise ValueError(f"Reference {interval.reference} not found in index")
+            iter_ = self._fetch(interval)
+            while True:
+                try:
+                    hit = iter_.next_hit()
+                except StopIteration:
+                    break
+                existing = merged.get(hit.virtual_offset)
+                if existing is None:
+                    merged[hit.virtual_offset] = TabixHit(
+                        line=hit.line, virtual_offset=hit.virtual_offset, intervals=tuple(specs)
+                    )
+                else:
+                    combined = existing.intervals + tuple(spec for spec in specs if spec not in existing.intervals)
+                    merged[hit.virtual_offset] = TabixHit(
+                        line=existing.line,
+                        virtual_offset=existing.virtual_offset,
+                        intervals=combined,
+                    )
+        return [merged[offset] for offset in sorted(merged)]
+
+    def __iter__(self) -> "TabixMultiIter":
+        return self
+
+    def __next__(self) -> TabixHit:
+        if self._hits is None:
+            self._hits = self._collect()
+        if self._hit_idx >= len(self._hits):
+            raise StopIteration
+        hit = self._hits[self._hit_idx]
+        self._hit_idx += 1
+        return hit

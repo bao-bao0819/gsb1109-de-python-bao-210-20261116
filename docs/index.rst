@@ -82,6 +82,7 @@ Contents:
    schedule
    loader
    gtfs_entities
+   direction
    gtfs2db
    internal
 

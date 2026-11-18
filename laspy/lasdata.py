@@ -16,6 +16,7 @@ from .point.dims import ScaledArrayView, SubFieldView
 from .point.record import DimensionNameValidity
 from .vlrs.vlrlist import VLRList
 from .waveform import WaveformRecord
+from .waveform.record import MISSING_WAVEFORM_INDEX, _read_n_waveforms_or_none
 from .waveform.utils import deduplicate_waveform_indices, iter_runs
 
 logger = logging.getLogger(__name__)
@@ -319,11 +320,13 @@ class LasData:
         has_waveform_mask = np.asarray(
             self.points.array["wavepacket_index"] != 0, dtype=bool
         )
+        if isinstance(self.points._waveform_state, record.EagerWaveformState):
+            eager_state = self.points._waveform_state
+            has_waveform_mask &= eager_state.points_waveform_index >= 0
         offsets = np.zeros(point_count, dtype=np.uint64)
         sizes = np.zeros(point_count, dtype=self.points.array["wavepacket_size"].dtype)
         if not has_waveform_mask.any():
-            self.points.array["wavepacket_offset"] = offsets
-            self.points.array["wavepacket_size"] = sizes
+            self._clear_waveform_references(has_waveform_mask)
             self._set_waveform_storage_flags(False)
             return
 
@@ -347,6 +350,15 @@ class LasData:
                     "Internal error: _write_waveforms called without waveform state"
                 )
 
+    def _clear_waveform_references(
+        self, has_waveform_mask: NDArray[np.bool]
+    ) -> None:
+        """Clear point fields that do not reference a usable waveform packet."""
+        missing_mask = ~has_waveform_mask
+        self.points.array["wavepacket_index"][missing_mask] = 0
+        self.points.array["wavepacket_offset"][missing_mask] = 0
+        self.points.array["wavepacket_size"][missing_mask] = 0
+
     def _write_wdp_eager(
         self,
         destination_path: pathlib.Path,
@@ -356,17 +368,28 @@ class LasData:
     ) -> None:
         waveforms = eager_state.waveforms
         points_waveform_index = eager_state.points_waveform_index
+        kept_waveform_indices = points_waveform_index[has_waveform_mask]
+        unique_waveform_indices = np.unique(kept_waveform_indices)
+        kept_waveform_order = np.searchsorted(
+            unique_waveform_indices, kept_waveform_indices
+        )
 
         point_count = len(self.points)
         wave_size_bytes = waveforms.wave_size
         offsets = np.zeros(point_count, dtype=np.uint64)
         offsets[has_waveform_mask] = (
-            np.asarray(points_waveform_index[has_waveform_mask], dtype=np.uint64)
-            * wave_size_bytes
+            kept_waveform_order.astype(np.uint64) * wave_size_bytes
         )
         self.points.array["wavepacket_offset"] = offsets
         self._finalize_waveform_write(has_waveform_mask, wave_size_bytes)
-        self._write_wdp(destination_path.with_suffix(".wdp"), waveforms)
+        self.points.array["wavepacket_index"][~has_waveform_mask] = 0
+        self._write_wdp(
+            destination_path.with_suffix(".wdp"),
+            WaveformRecord(
+                waveforms.samples[unique_waveform_indices],
+                waveforms.sample_spacing_ps,
+            ),
+        )
 
     @staticmethod
     def _write_wdp(path: pathlib.Path, waveforms: WaveformRecord | None) -> None:
@@ -395,14 +418,14 @@ class LasData:
         points_per_chunk = self._points_per_chunk(waveform_size, chunksize)
 
         wdp_path = destination.with_suffix(".wdp")
-        self._write_wdp_lazy_dedup(
+        usable_waveform_mask = self._write_wdp_lazy_dedup(
             wdp_path,
             lazy_state.reader,
             has_waveform_mask,
             waveform_size,
             points_per_chunk,
         )
-        self._finalize_waveform_write(has_waveform_mask, waveform_size)
+        self._finalize_waveform_write(usable_waveform_mask, waveform_size)
 
     def _validate_waveform_sizes(
         self,
@@ -431,29 +454,83 @@ class LasData:
         has_waveform_mask: NDArray[np.bool],
         waveform_size: int,
         points_per_chunk: int,
-    ) -> None:
+    ) -> NDArray[np.bool]:
         point_count = len(self.points)
         offsets = np.asarray(self.points.array["wavepacket_offset"], dtype=np.uint64)
         unique_indices, inverse_indices = deduplicate_waveform_indices(
             offsets, has_waveform_mask, waveform_size
         )
+        unique_packet_indices = np.full(
+            len(unique_indices), MISSING_WAVEFORM_INDEX, dtype=np.int64
+        )
+        next_waveform_index = 0
 
         with wdp_path.open("wb") as dst:
             for run_start, run_end in iter_runs(unique_indices):
                 count = int(run_end - run_start + 1)
+                positions_start, positions_end = np.searchsorted(
+                    unique_indices,
+                    np.asarray([run_start, run_end], dtype=unique_indices.dtype),
+                )
+                positions_end += 1
+                run_output_start = dst.tell()
                 waveform_reader.seek(run_start)
-                while count > 0:
-                    chunk_count = min(points_per_chunk, count)
-                    dst.write(waveform_reader.read_n_waveforms(int(chunk_count)))
-                    count -= chunk_count
+                copied_packets = 0
+                while copied_packets < count:
+                    chunk_count = min(points_per_chunk, count - copied_packets)
+                    data = _read_n_waveforms_or_none(
+                        waveform_reader, int(chunk_count)
+                    )
+                    if data is None or len(data) != int(chunk_count) * waveform_size:
+                        break
+                    dst.write(data)
+                    copied_packets += chunk_count
+
+                if copied_packets == count:
+                    unique_packet_indices[
+                        positions_start:positions_end
+                    ] = np.arange(
+                        next_waveform_index,
+                        next_waveform_index + count,
+                        dtype=np.int64,
+                    )
+                    next_waveform_index += count
+                    continue
+
+                # The run was not fully available. Drop any part of the run
+                # that was already copied, then copy the existing packets one
+                # by one so only points referencing a missing packet are
+                # invalidated.
+                dst.seek(run_output_start)
+                dst.truncate(run_output_start)
+                for position, packet_index in zip(
+                    range(int(positions_start), int(positions_end)),
+                    range(int(run_start), int(run_end) + 1),
+                ):
+                    waveform_reader.seek(packet_index)
+                    packet = _read_n_waveforms_or_none(waveform_reader, 1)
+                    if packet is None or len(packet) != waveform_size:
+                        continue
+                    dst.write(packet)
+                    unique_packet_indices[position] = next_waveform_index
+                    next_waveform_index += 1
+
+        valid_mask = unique_packet_indices[inverse_indices] != MISSING_WAVEFORM_INDEX
+        has_usable_waveform = np.zeros(point_count, dtype=bool)
+        usable_point_positions = np.flatnonzero(has_waveform_mask)
+        has_usable_waveform[usable_point_positions[valid_mask]] = True
 
         offset_dtype = self.points.array["wavepacket_offset"].dtype
         new_offsets = np.zeros(point_count, dtype=offset_dtype)
-        if has_waveform_mask.any():
-            new_offsets[has_waveform_mask] = (
-                inverse_indices.astype(np.uint64) * waveform_size
+        if has_usable_waveform.any():
+            kept_indices = unique_packet_indices[inverse_indices[valid_mask]]
+            new_offsets[has_usable_waveform] = (
+                kept_indices.astype(np.uint64) * waveform_size
             ).astype(offset_dtype, copy=False)
         self.points.array["wavepacket_offset"] = new_offsets
+        self.points.array["wavepacket_index"][~has_usable_waveform] = 0
+        self.points.array["wavepacket_size"][~has_usable_waveform] = 0
+        return has_usable_waveform
 
     def _finalize_waveform_write(
         self,
@@ -464,6 +541,7 @@ class LasData:
         sizes = np.zeros(len(self.points), dtype=size_dtype)
         sizes[has_waveform_mask] = waveform_size
         self.points.array["wavepacket_size"] = sizes
+        self.points.array["wavepacket_index"][~has_waveform_mask] = 0
 
         self._set_waveform_storage_flags(bool(has_waveform_mask.any()))
 

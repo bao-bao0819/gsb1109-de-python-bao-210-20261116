@@ -34,15 +34,17 @@ class WaveformPacketDescriptor:
             raise NotImplementedError(
                 "Only uncompressed waveform packets (compression_type=0) are supported"
             )
-        if self.bits_per_sample % 8 != 0:
+        if self.bits_per_sample == 0 or self.bits_per_sample % 8 != 0:
             raise NotImplementedError(
-                "Waveform sample size must be a multiple of 8 bits"
+                "Waveform sample size must be a non-zero multiple of 8 bits"
             )
+        if self.number_of_samples == 0:
+            raise ValueError("Waveform packet descriptor has zero samples")
 
     def dtype(self) -> np.dtype:
-        if self.bits_per_sample % 8 != 0:
+        if self.bits_per_sample == 0 or self.bits_per_sample % 8 != 0:
             raise NotImplementedError(
-                "Waveform sample size must be a multiple of 8 bits"
+                "Waveform sample size must be a non-zero multiple of 8 bits"
             )
         match self.bits_per_sample:
             case 8:
@@ -58,6 +60,10 @@ class WaveformPacketDescriptor:
                     f"Unsupported waveform sample width: {self.bits_per_sample} bits"
                 )
         return np.dtype([("waveform", (base_dtype, (self.number_of_samples,)))])
+
+    @property
+    def packet_size_bytes(self) -> int:
+        return (self.bits_per_sample // 8) * self.number_of_samples
 
 
 class WaveformPacketDescriptorRegistry(

@@ -353,3 +353,139 @@ def test_ensure_points_have_valid_waveform_descriptors_reports_invalid_nonzero_i
                 reader._ensure_points_have_valid_waveform_descriptors(points)
 
     assert not caught
+
+
+def test_ensure_points_have_valid_waveform_packet_sizes_accepts_fixed_remainder(
+    fullwave_path: Path,
+) -> None:
+    with laspy.open(fullwave_path, fullwave="lazy") as reader:
+        points = reader.read_points(8)
+        registry = reader._waveform_descriptors_registry
+        descriptor = next(iter(registry.data.values()))
+        points.array["wavepacket_offset"] += descriptor.packet_size_bytes
+        reader._ensure_points_have_valid_waveform_packet_sizes(points)
+
+
+def test_ensure_points_have_valid_waveform_packet_sizes_rejects_per_descriptor_mismatch(
+    fullwave_path: Path,
+) -> None:
+    with laspy.open(fullwave_path, fullwave="lazy") as reader:
+        points = reader.read_points(8)
+        points.array["wavepacket_size"][0] += 1
+
+        with pytest.raises(ValueError, match="Inconsistent waveform sizes"):
+            reader._ensure_points_have_valid_waveform_packet_sizes(points)
+
+
+def test_ensure_points_have_valid_waveform_packet_sizes_rejects_unaligned_offsets(
+    fullwave_path: Path,
+) -> None:
+    with laspy.open(fullwave_path, fullwave="lazy") as reader:
+        points = reader.read_points(8)
+        points.array["wavepacket_offset"][0] += 1
+        points.array["wavepacket_offset"][1] += 2
+
+        with pytest.raises(NotImplementedError, match="byte-offset remainder"):
+            reader._ensure_points_have_valid_waveform_packet_sizes(points)
+
+
+def test_lazy_waveform_read_marks_truncated_packets_without_losing_geometry(
+    fullwave_path: Path, tmp_path: Path
+) -> None:
+    # Keep only the first two packets of the external waveform file.
+    wdp_bytes = FULLWAVE_WDP_PATH.read_bytes()
+    with laspy.open(fullwave_path, fullwave="lazy") as reader:
+        registry = WaveformPacketDescriptorRegistry.from_vlrs(reader.header.vlrs)
+        descriptor = next(iter(registry.data.values()))
+        packet_size = descriptor.packet_size_bytes
+
+    truncated_wdp = tmp_path / "truncated.wdp"
+    truncated_wdp.write_bytes(wdp_bytes[: packet_size * 2])
+    las_path = tmp_path / "truncated.laz"
+    las_path.write_bytes(fullwave_path.read_bytes())
+
+    with laspy.open(las_path, fullwave="eager") as reader:
+        points = reader.read_points(8)
+        waveforms = points["waveform"]
+
+    assert len(points) == 8
+    eager_state = points._waveform_state
+    assert isinstance(eager_state, EagerWaveformState)
+    assert np.any(eager_state.points_waveform_index == -1)
+    assert np.all(waveforms[eager_state.points_waveform_index == -1] == 0)
+
+
+def test_eager_waveform_write_skips_missing_references(
+    fullwave_path: Path, tmp_path: Path
+) -> None:
+    with laspy.open(fullwave_path, fullwave="eager") as reader:
+        las = reader.read()
+
+    # Simulate a point whose packet was missing from the external source.
+    eager_state = las.points._waveform_state
+    assert isinstance(eager_state, EagerWaveformState)
+    eager_state.points_waveform_index[0] = -1
+
+    out_path = tmp_path / "missing_reference.laz"
+    las.write(out_path)
+
+    assert out_path.exists()
+    assert out_path.with_suffix(".wdp").exists()
+    assert las.points.array["wavepacket_index"][0] == 0
+    assert las.points.array["wavepacket_offset"][0] == 0
+    assert las.points.array["wavepacket_size"][0] == 0
+
+    with laspy.open(out_path, fullwave="eager") as reader:
+        roundtrip = reader.read_points(8)
+
+    assert np.array_equal(roundtrip["X"], las.points["X"][:8])
+    assert np.all(roundtrip["waveform"][0] == 0)
+
+
+def test_las_reader_truncated_wdp_keeps_all_points(tmp_path: Path) -> None:
+    las = laspy.create(point_format=10, file_version="1.4")
+    las.header.global_encoding.waveform_data_packets_external = True
+    las.header.global_encoding.waveform_data_packets_internal = False
+
+    record = WaveformPacketStruct(
+        bits_per_sample=16,
+        waveform_compression_type=0,
+        number_of_samples=2,
+        temporal_sample_spacing=1,
+        digitizer_gain=1.0,
+        digitizer_offset=0.0,
+    )
+    vlr = WaveformPacketVlr(100)
+    vlr.parsed_record = record
+    las.header.vlrs.append(vlr)
+
+    point_count = 4
+    las.points.resize(point_count)
+    las.points.array["X"] = np.arange(point_count)
+    las.points.array["wavepacket_index"] = 1
+    packet_size = 4
+    las.points.array["wavepacket_size"] = packet_size
+    # Points 0 and 1 share one packet; points 2 and 3 use separate packets.
+    las.points.array["wavepacket_offset"] = np.array(
+        [0, 0, packet_size, packet_size * 2], dtype=np.uint64
+    )
+
+    path = tmp_path / "truncated.las"
+    las.write(path, waveforms=False)
+    # Only the first packet is present.
+    path.with_suffix(".wdp").write_bytes(b"\x01\x00\x02\x00")
+
+    with laspy.open(path, fullwave="eager") as reader:
+        points = reader.read_points(-1)
+        waveforms = points["waveform"]
+
+    assert len(points) == point_count
+    assert np.array_equal(points.array["X"], np.arange(point_count))
+    assert np.array_equal(waveforms[0], waveforms[1])
+    assert np.all(waveforms[2:] == 0)
+    eager_state = points._waveform_state
+    assert isinstance(eager_state, EagerWaveformState)
+    assert np.array_equal(
+        eager_state.points_waveform_index,
+        np.array([0, 0, -1, -1], dtype=np.int64),
+    )

@@ -13,7 +13,11 @@ from typing import Any
 import numpy as np
 
 from ..point import PointFormat
-from ..waveform.record import IWaveformReader, WaveformRecord
+from ..waveform.record import (
+    MISSING_WAVEFORM_INDEX,
+    IWaveformReader,
+    WaveformRecord,
+)
 from . import dims
 from .dims import OLD_LASPY_NAMES, ScaledArrayView
 
@@ -305,10 +309,22 @@ class PackedPointRecord:
                 waveforms=waveforms,
                 points_waveform_index=points_waveform_index,
             ):
-                points_waveform_index_subset = points_waveform_index[point_indexer]
-                unique_waves_indices, inverse_indices = np.unique(
-                    points_waveform_index_subset, return_inverse=True
+                points_waveform_index_subset = np.atleast_1d(
+                    points_waveform_index[point_indexer]
                 )
+                valid_positions = np.flatnonzero(
+                    points_waveform_index_subset != MISSING_WAVEFORM_INDEX
+                )
+                unique_waves_indices, valid_inverse_indices = np.unique(
+                    points_waveform_index_subset[valid_positions],
+                    return_inverse=True,
+                )
+                inverse_indices = np.full(
+                    points_waveform_index_subset.shape,
+                    MISSING_WAVEFORM_INDEX,
+                    dtype=np.int64,
+                )
+                inverse_indices[valid_positions] = valid_inverse_indices
                 waveforms_subset = WaveformRecord(
                     waveforms.samples[unique_waves_indices],
                     waveforms.sample_spacing_ps,
@@ -378,9 +394,9 @@ class PackedPointRecord:
             self._load_waveforms_from_source()
             match self._waveform_state:
                 case EagerWaveformState() as waveform_state:
-                    return waveform_state.waveforms.samples["waveform"][
+                    return waveform_state.waveforms.samples_at(
                         waveform_state.points_waveform_index
-                    ]
+                    )
                 case _:
                     raise RuntimeError(
                         "Internal error: waveforms should be eager after loading"

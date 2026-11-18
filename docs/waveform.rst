@@ -46,6 +46,31 @@ When waveform data is present, writing to a filesystem path will emit a sibling
 
 Writing waveform-enabled data to a file-like object is not supported.
 
+Waveform Objects and Point References
+-------------------------------------
+
+Waveform samples are kept separately from the point records. Each point
+references a waveform packet through its ``wavepacket_offset``; points that
+share the same offset share the same waveform object. Packets are never merged
+because their sample bytes happen to be equal: only the packet reference
+(offset) determines sharing.
+
+The ``wavepacket_index`` field selects the waveform packet descriptor (VLR
+record ID ``100 + index``), and ``wavepacket_size`` must match the packet size
+declared by that descriptor. Packet offsets must form fixed-size records for
+the descriptor.
+
+Missing Packets
+---------------
+
+If the external ``.wdp`` file is truncated or a packet cannot be read, the
+reader keeps the point geometry and only marks the points that reference the
+missing packet. Reading ``points["waveform"]`` for those points returns an
+all-zero sample array, matching the way points without waveform packets are
+represented. Writing the data back clears ``wavepacket_index``,
+``wavepacket_offset`` and ``wavepacket_size`` for those points, so a new
+``.wdp`` file contains only the packets that are actually available.
+
 Current Scope
 -------------
 

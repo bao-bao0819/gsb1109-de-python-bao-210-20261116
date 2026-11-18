@@ -8,8 +8,10 @@ import pytest
 
 import laspy
 from laspy.lasdata import LasData
-from laspy.point.record import LazyWaveformState
+from laspy.point.record import EagerWaveformState, LazyWaveformState
+from laspy.vlrs.known import WaveformPacketStruct, WaveformPacketVlr
 from laspy.waveform.descriptor import WaveformPacketDescriptorRegistry
+from laspy.waveform.record import WaveformRecord
 
 FULLWAVE_LAZ_PATH = Path(__file__).parent / "data" / "fullwave.laz"
 FULLWAVE_WDP_PATH = FULLWAVE_LAZ_PATH.with_suffix(".wdp")
@@ -321,3 +323,149 @@ def test_write_wdp_lazy_empty_points(fullwave_path: Path, tmp_path: Path) -> Non
     out_wdp = out_path.with_suffix(".wdp")
     assert out_wdp.exists()
     assert out_wdp.stat().st_size == 0
+
+
+def test_eager_write_deduplicates_shared_waveform_objects_by_reference(
+    tmp_path: Path,
+) -> None:
+    las = _make_waveform_las()
+    # Points 0 and 1 share one packet object; points 2 and 3 reference two
+    # distinct objects whose sample bytes are identical.
+    eager_state = las.points._waveform_state
+    assert isinstance(eager_state, EagerWaveformState)
+    eager_state.waveforms.samples["waveform"][:] = [
+        [1, 2],
+        [1, 2],
+        [3, 4],
+        [9, 9],
+    ]
+    eager_state.points_waveform_index[:] = np.array([0, 0, 1, 2], dtype=np.int64)
+
+    out_path = tmp_path / "shared_by_reference.las"
+    las.write(out_path)
+
+    assert out_path.with_suffix(".wdp").stat().st_size == 3 * 2
+    assert las.points.array["wavepacket_offset"].tolist() == [0, 0, 2, 4]
+    assert las.points.array["wavepacket_size"].tolist() == [2, 2, 2, 2]
+
+
+def test_eager_write_clears_points_with_missing_packet_reference(
+    tmp_path: Path,
+) -> None:
+    las = _make_waveform_las()
+    eager_state = las.points._waveform_state
+    assert isinstance(eager_state, EagerWaveformState)
+    eager_state.points_waveform_index[1] = -1
+
+    out_path = tmp_path / "missing_ref.las"
+    las.write(out_path)
+
+    assert las.points.array["wavepacket_index"].tolist() == [1, 0, 1, 1]
+    assert las.points.array["wavepacket_offset"].tolist() == [0, 0, 2, 4]
+    assert las.points.array["wavepacket_size"].tolist() == [2, 0, 2, 2]
+    assert out_path.with_suffix(".wdp").stat().st_size == 3 * 2
+
+    with laspy.open(out_path, fullwave="eager") as reader:
+        points = reader.read_points(-1)
+    assert np.array_equal(points.array["X"], las.points.array["X"])
+    assert np.all(points["waveform"][1] == 0)
+
+
+def _make_waveform_las() -> LasData:
+    las = laspy.create(point_format=10, file_version="1.4")
+    las.header.global_encoding.waveform_data_packets_external = True
+    las.header.global_encoding.waveform_data_packets_internal = False
+
+    record = WaveformPacketStruct(
+        bits_per_sample=8,
+        waveform_compression_type=0,
+        number_of_samples=2,
+        temporal_sample_spacing=1,
+        digitizer_gain=1.0,
+        digitizer_offset=0.0,
+    )
+    vlr = WaveformPacketVlr(100)
+    vlr.parsed_record = record
+    las.header.vlrs.append(vlr)
+
+    point_count = 4
+    las.points.resize(point_count)
+    las.points.array["X"] = np.arange(point_count)
+    las.points.array["wavepacket_index"] = 1
+    las.points.array["wavepacket_size"] = 2
+    las.points.array["wavepacket_offset"] = np.array([0, 0, 2, 4], dtype=np.uint64)
+
+    samples = np.zeros(
+        point_count, dtype=np.dtype([("waveform", np.uint8, (2,))])
+    )
+    samples["waveform"] = np.arange(point_count * 2, dtype=np.uint8).reshape(
+        point_count, 2
+    )
+    las.points._set_waveform_state(
+        EagerWaveformState(
+            WaveformRecord(samples, sample_spacing_ps=1),
+            np.array([0, 0, 1, 2], dtype=np.int64),
+        )
+    )
+    return las
+
+
+def test_lazy_write_after_truncated_source_only_drops_missing_references(
+    tmp_path: Path,
+) -> None:
+    las = _make_waveform_las()
+    source_path = tmp_path / "source.las"
+    las.write(source_path)
+    # Truncate the generated waveform file to its first two packets.
+    source_wdp = source_path.with_suffix(".wdp")
+    source_wdp.write_bytes(source_wdp.read_bytes()[:4])
+
+    with laspy.open(source_path, fullwave="lazy") as reader:
+        lazy_las = reader.read()
+
+    out_path = tmp_path / "lazy_truncated_copy.las"
+    lazy_las.write(out_path)
+
+    assert lazy_las.points.array["wavepacket_index"].tolist() == [1, 1, 1, 0]
+    assert lazy_las.points.array["wavepacket_size"].tolist() == [2, 2, 2, 0]
+    assert lazy_las.points.array["wavepacket_offset"].tolist() == [0, 0, 2, 0]
+    assert out_path.with_suffix(".wdp").stat().st_size == 4
+
+    with laspy.open(out_path, fullwave="eager") as reader:
+        points = reader.read_points(-1)
+    assert np.array_equal(points.array["X"], np.arange(4))
+    assert np.all(points["waveform"][3] == 0)
+
+
+def test_lazy_write_rewinds_partially_copied_run_when_source_truncates(
+    tmp_path: Path,
+) -> None:
+    las = _make_waveform_las()
+    # Five packets in one contiguous run. Chunk size covers two packets, so
+    # the first two chunks succeed before the third one hits the truncation.
+    las.points.resize(5)
+    las.points.array["X"] = np.arange(5)
+    las.points.array["wavepacket_index"] = 1
+    las.points.array["wavepacket_size"] = 2
+    las.points.array["wavepacket_offset"] = np.array([0, 2, 4, 6, 8], dtype=np.uint64)
+    state = las.points._waveform_state
+    assert isinstance(state, EagerWaveformState)
+    state.points_waveform_index[:] = np.arange(5, dtype=np.int64)
+
+    source_path = tmp_path / "chunked_source.las"
+    las.write(source_path)
+    source_wdp = source_path.with_suffix(".wdp")
+    # Keep 4 packets out of 5; chunked reads will succeed twice then fail.
+    source_wdp.write_bytes(source_wdp.read_bytes()[:8])
+
+    with laspy.open(source_path, fullwave="lazy") as reader:
+        lazy_las = reader.read()
+
+    out_path = tmp_path / "chunked_copy.las"
+    lazy_las.write(out_path, waveform_chunksize=4)
+
+    assert out_path.with_suffix(".wdp").stat().st_size == 8
+    assert np.array_equal(
+        lazy_las.points.array["wavepacket_offset"], [0, 2, 4, 6, 0]
+    )
+    assert np.array_equal(lazy_las.points.array["wavepacket_size"], [2, 2, 2, 2, 0])

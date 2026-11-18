@@ -18,6 +18,7 @@ from .vlrs.vlrlist import VLRList
 from .waveform import WaveformRecord
 from .waveform.descriptor import (
     WaveformPacketDescriptorRegistry,
+    WavePacketDescriptorIndex,
     WavePacketDescriptorRecordId,
 )
 from .waveform.mode import WaveformMode
@@ -201,6 +202,52 @@ class LasReader:
                 f" Waveform descriptor record ID found: {WavePacketDescriptorRecordId.from_index(missing_descriptor_index)}"
             )
 
+    def _ensure_points_have_valid_waveform_packet_sizes(
+        self, points: record.ScaleAwarePointRecord
+    ) -> None:
+        """Check each point's packet size against its own descriptor.
+
+        This intentionally works per descriptor index instead of assuming a
+        single layout for the whole file. The current waveform reader can only
+        decode a single layout, but the validation of the point records must
+        still use the descriptor actually referenced by each point.
+        """
+        descriptor_indices = np.asarray(
+            points.array["wavepacket_index"], dtype=np.int64
+        )
+        sizes = np.asarray(points.array["wavepacket_size"], dtype=np.uint64)
+        offsets = np.asarray(points.array["wavepacket_offset"], dtype=np.uint64)
+
+        for index in np.unique(descriptor_indices):
+            if index == 0:
+                continue
+            record_id = WavePacketDescriptorRecordId.from_index(
+                WavePacketDescriptorIndex(int(index))
+            )
+            descriptor = self._waveform_descriptors_registry.data[record_id]
+            expected_size = descriptor.packet_size_bytes
+            point_mask = descriptor_indices == index
+            point_sizes = sizes[point_mask]
+            inconsistent = point_sizes != expected_size
+            if np.any(inconsistent):
+                invalid_sizes = set(int(size) for size in np.unique(point_sizes))
+                raise ValueError(
+                    f"Inconsistent waveform sizes in point data for descriptor "
+                    f"{record_id}: {invalid_sizes} but descriptor size is "
+                    f"{expected_size}"
+                )
+
+            point_offsets = offsets[point_mask]
+            offset_remainders = np.remainder(point_offsets, expected_size)
+            if offset_remainders.size and np.any(
+                offset_remainders != offset_remainders[0]
+            ):
+                raise NotImplementedError(
+                    "Unsupported waveform byte offset layout; laspy currently "
+                    "requires a single fixed byte-offset remainder for all "
+                    "waveform packets of a descriptor"
+                )
+
     def read_points(
         self,
         n: int,
@@ -241,6 +288,7 @@ class LasReader:
             return points
 
         self._ensure_points_have_valid_waveform_descriptors(points)
+        self._ensure_points_have_valid_waveform_packet_sizes(points)
 
         if waveform_mode is WaveformMode.LAZY:
             points._set_waveform_state(record.LazyWaveformState(self._waveform_source))
@@ -584,6 +632,28 @@ class WaveReader(IWaveformReader):
                 f"failed to fill whole waveform buffer: requested {total_size} bytes, got {len(data)}"
             )
         return bytearray(data)
+
+    def read_n_waveforms_or_none(self, n: int) -> bytearray | None:
+        self._ensure_open()
+        total_size = n * self.wave_size_bytes
+        remaining = self._remaining_size()
+        if remaining is not None and total_size > remaining:
+            # Avoid asking the file object for an arbitrarily large read when
+            # a corrupt offset points beyond the end of the .wdp file.
+            return None
+        data = self._source.read(total_size)
+        if len(data) != total_size:
+            return None
+        return bytearray(data)
+
+    def _remaining_size(self) -> int | None:
+        try:
+            position = self._source.tell()
+            end = self._source.seek(0, os.SEEK_END)
+            self._source.seek(position, os.SEEK_SET)
+        except (AttributeError, OSError):
+            return None
+        return max(0, end - position)
 
     def seek(self, waveform_index: int) -> None:
         self._ensure_open()

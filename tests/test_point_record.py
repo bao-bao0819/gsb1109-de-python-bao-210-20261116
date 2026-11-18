@@ -445,6 +445,49 @@ def test_lazy_waveform_resize_keeps_lazy_state_until_access() -> None:
     assert isinstance(points._waveform_state, EagerWaveformState)
 
 
+def test_eager_waveform_missing_reference_reads_as_zero_waveform() -> None:
+    points = make_record_with_eager_waveforms()
+    eager_state = points._waveform_state
+    assert isinstance(eager_state, EagerWaveformState)
+    eager_state.points_waveform_index[1] = -1
+
+    waveforms = points["waveform"]
+
+    assert np.array_equal(waveforms[1], np.zeros(2, dtype=np.uint8))
+    assert np.array_equal(waveforms[[0, 2, 3]], [[10, 11], [20, 21], [30, 31]])
+
+
+def test_eager_waveform_subset_keeps_missing_references() -> None:
+    points = make_record_with_eager_waveforms()
+    eager_state = points._waveform_state
+    assert isinstance(eager_state, EagerWaveformState)
+    eager_state.points_waveform_index[2] = -1
+
+    subset = points[[2, 0, 1]]
+
+    subset_state = subset._waveform_state
+    assert isinstance(subset_state, EagerWaveformState)
+    assert np.array_equal(
+        subset_state.points_waveform_index,
+        np.array([-1, 0, 1], dtype=np.int64),
+    )
+    assert len(subset_state.waveforms) == 2
+    assert np.array_equal(subset["waveform"][0], np.zeros(2, dtype=np.uint8))
+    assert np.array_equal(subset["waveform"][1], [10, 11])
+    assert np.array_equal(subset["waveform"][2], [20, 21])
+
+
+def test_single_point_subset_keeps_waveform_index_shape() -> None:
+    points = make_record_with_eager_waveforms()
+
+    subset = points[3]
+
+    subset_state = subset._waveform_state
+    assert isinstance(subset_state, EagerWaveformState)
+    assert subset_state.points_waveform_index.shape == (1,)
+    assert np.array_equal(subset["waveform"], [[30, 31]])
+
+
 # Private API tests
 
 

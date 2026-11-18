@@ -23,10 +23,23 @@ from .exceptions import (
 )
 from .http_client import BackOffHTTPClient, HTTPClient
 from .spreadsheet import Spreadsheet
+from .validation import (
+    A1Range,
+    CellResult,
+    CellRule,
+    CellStatus,
+    OptionCategory,
+    OptionSource,
+    RuleMode,
+    RuleType,
+    ValidationAudit,
+    ValidationBatch,
+)
 from .worksheet import ValueRange, Worksheet
 
 from . import urls as urls
 from . import utils as utils
+from . import validation as validation
 
 __all__ = [
     # from .auth
@@ -54,6 +67,18 @@ __all__ = [
     "Worksheet",
     "ValueRange",
 
+    # from .validation
+    "A1Range",
+    "CellResult",
+    "CellRule",
+    "CellStatus",
+    "OptionCategory",
+    "OptionSource",
+    "RuleMode",
+    "RuleType",
+    "ValidationAudit",
+    "ValidationBatch",
+
     # from .exceptions
     "GSpreadException",
     "IncorrectCellLabel",
@@ -64,4 +89,5 @@ __all__ = [
     # full module imports
     "urls",
     "utils",
+    "validation",
 ]

@@ -437,6 +437,47 @@ Check out the api docs for `DataValidationRule`_ and `CondtionType`_ for more de
 
 .. _DataValidationRule: https://developers.google.com/sheets/api/reference/rest/v4/spreadsheets/cells#DataValidationRule
 
+Auditing validation rules against values
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``add_validation`` writes rules to a worksheet. To audit existing values
+against a locked set of rules and option sources without making API calls, use
+:class:`~gspread.validation.ValidationAudit`:
+
+.. code:: python
+
+   from gspread.validation import (
+       CellRule,
+       OptionSource,
+       RuleMode,
+       ValidationAudit,
+       ValidationBatch,
+   )
+
+   products = OptionSource(
+       "products",
+       categories={
+           "food": {"values": ["Apple", "Bread"], "range": "Options!A2:A3"},
+           "tools": {"values": ["Hammer", "Saw"], "range": "Options!B2:B3"},
+       },
+   )
+   batch = ValidationBatch(
+       [
+           CellRule("D2", source="products", category="food"),
+           CellRule("D3", source="products", category="food", mode=RuleMode.warn),
+       ],
+       [products],
+   )
+   audit = ValidationAudit(batch)
+   results = audit.validate({"D2": "Apple", "D3": "Cake"})
+   report = audit.to_report()
+
+An incomplete option source never produces a rejection: values that cannot be
+confirmed are reported with status ``pending`` ("待核"). List ranges are
+interpreted relative to the cell unless they use ``$`` absolute markers.
+After revising a category, call ``audit.revalidate_changed()``; only cells
+that actually depended on the changed category are re-evaluated.
+
 Extract table
 ~~~~~~~~~~~~~
 

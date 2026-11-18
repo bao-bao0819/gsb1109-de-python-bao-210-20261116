@@ -18,6 +18,7 @@ from io import StringIO
 import pandas as pd
 
 from .__about__ import __version__  # noqa: F401 module imported but unused
+from .value import FormatError, Grouped, IntervalRule, ValueFormat  # noqa: F401
 
 LOG = logging.getLogger(__name__)
 
@@ -25,6 +26,7 @@ __all__ = [
     'Library',
     'Member',
     'NaN',
+    'ValueFormat',
 ]
 
 

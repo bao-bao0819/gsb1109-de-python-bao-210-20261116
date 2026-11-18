@@ -179,6 +179,46 @@ very end of their process.
         xport.v56.dump(library, f)
 
 
+Grouping by SAS value formats
+=============================
+
+SAS ``VALUE`` formats map numeric intervals to labels, such as age groups or
+risk levels.  Endpoints may be open or closed, and special missing values may
+have their own labels.  ``xport.value.ValueFormat`` parses a format definition
+and produces a grouped view that cites the rule behind every result.
+
+.. code:: python
+
+    import xport
+
+    fmt = xport.ValueFormat.parse('''
+        VALUE AGEGRP
+            0  -< 18 = 'Under 18'
+            18 -< 65 = '18 to 64'
+            65 - HIGH = '65 and over'
+            . = 'Unknown'
+            .A = 'Not asked';
+    ''')
+
+    grouped = fmt.group([17, 18, 64, 65], source='AGE')
+    print(grouped.to_frame()[['value', 'label', 'rule_number', 'interval']])
+
+Each row keeps the rule number, the source line, the original rule text, and
+the interval in canonical form.  Rules that share a display label are never
+merged, so ``10 -< 20 = 'Moderate'`` and ``20 -< 30 = 'Moderate'`` remain
+distinct and their boundary evidence is preserved.
+
+Two diagnostics are available.  ``fmt.overlaps()`` returns every pair of rules
+whose intervals share a value, and ``fmt.gaps(bounds)`` returns ranges no rule
+covers.  ``fmt.diagnose(values)`` combines both with the uncovered rows in a
+sample.
+
+After editing one interval, ``grouped.reclassify(new_format)`` re-evaluates only
+the values in the part of the interval that actually changed.  Untouched rows
+are returned unchanged, and ``grouped.reclassified`` lists the positions that
+were re-derived.
+
+
 Feature requests
 ================
 

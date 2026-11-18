@@ -718,7 +718,7 @@
 
     <xsl:apply-templates mode="style:style" select="." />
 
-    <xsl:variable name="paragraph-id" select="@paragraph-id + 1"/>
+    <xsl:variable name="paragraph-id" select="@paragraph-id"/>
     <xsl:for-each select="LineSeg">
       <xsl:variable name="lineseg-pos" select="position()" />
       <xsl:for-each select="Text">
@@ -756,7 +756,7 @@
   </xsl:template>
 
   <xsl:template mode="style:style" match="Paragraph">
-    <xsl:variable name="paragraph-id" select="@paragraph-id + 1"/>
+    <xsl:variable name="paragraph-id" select="@paragraph-id"/>
     <xsl:variable name="style-id" select="@style-id + 1" />
     <xsl:variable name="style" select="//Style[$style-id]"/>
     <xsl:variable name="style-parashape-id" select="$style/@parashape-id + 1"/>
@@ -768,7 +768,7 @@
         <xsl:attribute name="style:class">text</xsl:attribute>
         <xsl:attribute name="style:name">
           <xsl:text>Paragraph-</xsl:text>
-          <xsl:value-of select="@paragraph-id + 1" />
+          <xsl:value-of select="@paragraph-id" />
         </xsl:attribute>
         <xsl:apply-templates mode="style:parent-style-name" select="$style" />
         <xsl:if test="@new-section = '1'">
@@ -880,7 +880,7 @@
         <xsl:variable name="parashape" select="$parashapes[number($parashape-id)]"/>
         <xsl:choose>
           <xsl:when test="$style-parashape-id != $parashape-id or @new-page='1'">
-            <xsl:attribute name="text:style-name">Paragraph-<xsl:value-of select="@paragraph-id + 1"/></xsl:attribute>
+            <xsl:attribute name="text:style-name">Paragraph-<xsl:value-of select="@paragraph-id"/></xsl:attribute>
           </xsl:when>
           <xsl:otherwise>
             <xsl:attribute name="text:style-name">
@@ -907,7 +907,7 @@
     <xsl:param name="paragraph"/>
     <xsl:param name="lineseg-pos"/>
     <xsl:variable name="text-pos" select="position()"/>
-    <xsl:variable name="paragraph-id" select="$paragraph/@paragraph-id + 1" />
+    <xsl:variable name="paragraph-id" select="$paragraph/@paragraph-id" />
     <xsl:variable name="style-id" select="$paragraph/@style-id + 1" />
     <xsl:variable name="style" select="/HwpDoc/DocInfo/IdMappings/Style[$style-id]" />
     <xsl:variable name="style-charshape-id" select="$style/@charshape-id + 1" />
@@ -923,7 +923,7 @@
   <xsl:template match="ControlChar"></xsl:template>
 
   <xsl:template match="TableControl">
-    <xsl:variable name="table-id" select="@table-id + 1" />
+    <xsl:variable name="table-id" select="@table-id" />
     <xsl:element name="table:table">
       <xsl:attribute name="table:style-name">Table-<xsl:value-of select="$table-id"/></xsl:attribute>
       <table:table-column>
@@ -947,7 +947,7 @@
   </xsl:template>
 
   <xsl:template mode="style-style-for-table-cells" match="TableControl">
-    <xsl:variable name="table-id" select="@table-id + 1" />
+    <xsl:variable name="table-id" select="@table-id" />
     <xsl:for-each select="TableBody/TableRow">
       <xsl:variable name="rowidx" select="position()" />
       <xsl:for-each select="TableCell">
@@ -1125,7 +1125,7 @@
 
   <xsl:template mode="style:style" match="TableControl">
     <xsl:element name="style:style">
-      <xsl:attribute name="style:name">Table-<xsl:value-of select="@table-id + 1"/></xsl:attribute>
+      <xsl:attribute name="style:name">Table-<xsl:value-of select="@table-id"/></xsl:attribute>
       <xsl:attribute name="style:family">table</xsl:attribute>
       <!-- 15.8 Table Formatting Properties -->
       <xsl:element name="style:table-properties">
@@ -1376,7 +1376,7 @@
 
   <xsl:template match="ShapeComponent" mode="style:style">
     <xsl:element name="style:style">
-      <xsl:attribute name="style:name">Shape-<xsl:value-of select="@shape-id + 1"/></xsl:attribute>
+      <xsl:attribute name="style:name">Shape-<xsl:value-of select="@shape-id"/></xsl:attribute>
       <xsl:attribute name="style:family">graphic</xsl:attribute>
       <!-- 15.27 Frame Formatting Properties -->
       <xsl:element name="style:graphic-properties">
@@ -1441,7 +1441,7 @@
     <xsl:param name="x" />
     <xsl:param name="y" />
     <xsl:element name="draw:g">
-      <xsl:attribute name="draw:style-name">Shape-<xsl:value-of select="@shape-id + 1"/></xsl:attribute>
+      <xsl:attribute name="draw:style-name">Shape-<xsl:value-of select="@shape-id"/></xsl:attribute>
       <xsl:apply-templates mode="text-anchor-type" select=".." />
       <xsl:apply-templates select="ShapeComponent">
 	<xsl:with-param name="x" select="$x" />
@@ -1457,7 +1457,7 @@
     <!-- 9.3 Frames -->
     <xsl:element name="draw:frame">
       <!-- common-draw-style-name-attlist -->
-      <xsl:attribute name="draw:style-name">Shape-<xsl:value-of select="@shape-id + 1"/></xsl:attribute>
+      <xsl:attribute name="draw:style-name">Shape-<xsl:value-of select="@shape-id"/></xsl:attribute>
       <xsl:apply-templates mode="draw-image-frame-attributes" select="..">
 	<xsl:with-param name="shapecomponent-pict" select="." />
       </xsl:apply-templates>
@@ -1548,7 +1548,7 @@
     <xsl:param name="y" />
 
     <xsl:element name="draw:rect">
-      <xsl:attribute name="draw:style-name">Shape-<xsl:value-of select="@shape-id + 1"/></xsl:attribute>
+      <xsl:attribute name="draw:style-name">Shape-<xsl:value-of select="@shape-id"/></xsl:attribute>
       <xsl:attribute name="svg:x"><xsl:value-of select="round($x div 7200 * 25.4 * 100) div 100"/>mm</xsl:attribute>
       <xsl:attribute name="svg:y"><xsl:value-of select="round($y div 7200 * 25.4 * 100) div 100"/>mm</xsl:attribute>
       <xsl:variable name="width" select="ShapeRectangle/Coord[2]/@x - ShapeRectangle/Coord[1]/@x"/>
@@ -1582,7 +1582,7 @@
       <xsl:attribute name="svg:y1"><xsl:value-of select="round($y1 div 7200 * 25.4 * 100) div 100"/>mm</xsl:attribute>
       <xsl:attribute name="svg:x2"><xsl:value-of select="round($x2 div 7200 * 25.4 * 100) div 100"/>mm</xsl:attribute>
       <xsl:attribute name="svg:y2"><xsl:value-of select="round($y2 div 7200 * 25.4 * 100) div 100"/>mm</xsl:attribute>
-      <xsl:attribute name="draw:style-name">Shape-<xsl:value-of select="@shape-id + 1"/></xsl:attribute>
+      <xsl:attribute name="draw:style-name">Shape-<xsl:value-of select="@shape-id"/></xsl:attribute>
       <xsl:apply-templates mode="text-anchor-type" select=".." />
     </xsl:element>
   </xsl:template>

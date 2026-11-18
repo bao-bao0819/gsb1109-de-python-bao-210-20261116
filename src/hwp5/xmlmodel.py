@@ -30,13 +30,10 @@ import sys
 from . import binmodel
 from . import filestructure
 from .binmodel.controls import SectionDef
-from .binmodel.controls import TableControl
-from .binmodel.controls import GShapeObjectControl
 from .binmodel import BinData
 from .binmodel import ListHeader
 from .binmodel import Paragraph
 from .binmodel import Text
-from .binmodel import ShapeComponent
 from .binmodel import TableBody
 from .binmodel import TableCell
 from .binmodel import ParaText
@@ -50,6 +47,8 @@ from .binmodel import Control
 from .charsets import tokenize_unicode_by_lang
 from .dataio import Struct
 from .filestructure import VERSION
+from .stableid import StableIdAssigner
+from .stableid import give_elements_stable_id
 from .treeop import STARTEVENT, ENDEVENT
 from .treeop import prefix_event
 from .treeop import build_subtree
@@ -68,27 +67,15 @@ if PY3:
 logger = logging.getLogger(__name__)
 
 
-def give_elements_unique_id(event_prefixed_mac):
-    paragraph_id = 0
-    table_id = 0
-    gshape_id = 0
-    shape_id = 0
-    for event, item in event_prefixed_mac:
-        (model, attributes, context) = item
-        if event == STARTEVENT:
-            if model == Paragraph:
-                attributes['paragraph_id'] = paragraph_id
-                paragraph_id += 1
-            elif model == TableControl:
-                attributes['table_id'] = table_id
-                table_id += 1
-            elif model == GShapeObjectControl:
-                attributes['gshape_id'] = gshape_id
-                gshape_id += 1
-            elif model == ShapeComponent:
-                attributes['shape_id'] = shape_id
-                shape_id += 1
-        yield event, item
+def give_elements_unique_id(event_prefixed_mac, assigner=None):
+    ''' Assign evidence-based stable ids to elements.
+
+    Kept under its historical name; ids are no longer generated from
+    the document order but from element evidence, so that inserting
+    content does not renumber unrelated elements.  See
+    :mod:`hwp5.stableid`.
+    '''
+    return give_elements_stable_id(event_prefixed_mac, assigner)
 
 
 def make_ranged_shapes(shapes):
@@ -803,6 +790,12 @@ class Hwp5File(binmodel.Hwp5File, XmlEventsMixin):
         else:
             kwargs.pop('embedbin', None)
 
+        id_assigner = kwargs.pop('id_assigner', None)
+        if id_assigner is None:
+            id_assigner = StableIdAssigner(kwargs.pop('id_baseline', None))
+        else:
+            kwargs.pop('id_baseline', None)
+
         events = chain(self.summaryinfo.events(**kwargs),
                        self.docinfo.events(**kwargs),
                        self.text.events(**kwargs))
@@ -811,6 +804,6 @@ class Hwp5File(binmodel.Hwp5File, XmlEventsMixin):
         events = wrap_modelevents(hwpdoc, events)
 
         # for easy references in styles
-        events = give_elements_unique_id(events)
+        events = give_elements_stable_id(events, id_assigner)
 
         return events

@@ -14,6 +14,15 @@ from .lib import create_las as create
 from .lib import mmap_las as mmap
 from .lib import open_las as open
 from .lib import read_las as read
+from .migration import (
+    BatchMigrationResult,
+    Degradation,
+    DegradationKind,
+    MigrationError,
+    MigrationPlan,
+    MigrationPolicy,
+    plan_batch_migration,
+)
 from .point import DimensionInfo, DimensionKind, ExtraBytesParams, PointFormat
 from .point.dims import supported_point_formats, supported_versions
 from .point.format import lost_dimensions

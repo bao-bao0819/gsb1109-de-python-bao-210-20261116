@@ -49,6 +49,7 @@ Submodules
 .. toctree::
 
    laspy.lib
+   laspy.migration
    laspy.header
    laspy.lasreader
    laspy.lasdata

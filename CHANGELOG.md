@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- New `laspy.migration` module: plan and execute batch migrations of several
+  files to a restricted target version. Given caller-provided degradation
+  schemes and per-field costs, `plan_batch_migration` selects the minimal-loss
+  conversion (one target point format and one consistent interpretation per
+  business field for the whole batch). Points that cannot be migrated are
+  isolated in their original format, and the result reports original codes,
+  actual loss and a write/read-back verification for every field.
+
 ## Version 2.7.0 (14/01/2026)
 
 ### Added

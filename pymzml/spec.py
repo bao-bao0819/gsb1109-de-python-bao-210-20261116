@@ -1588,6 +1588,38 @@ class Spectrum(MsData):
         value = self.transform_mz(mz2find)
         return self.transformed_mz_with_error[value]
 
+    def match_fragments(self, candidates, neutral_losses=None, **kwargs):
+        """
+        Match theoretical fragments of candidate molecules against this
+        spectrum.
+
+        This is a convenience wrapper around
+        :func:`pymzml.fragment.match_fragments`.  See that function for the
+        accepted candidate formats and all matching options.
+
+        Arguments:
+            candidates: One or more candidate molecules with theoretical
+                fragments.
+
+        Keyword Arguments:
+            neutral_losses: Optional neutral losses applied to every
+                candidate.
+            **kwargs: Forwarded to :func:`pymzml.fragment.match_fragments`.
+
+        Returns:
+            MatchResult: Scores, assignments, unmatched peaks and all
+            equally optimal explanations.
+        """
+        from pymzml.fragment import match_fragments
+
+        kwargs.setdefault("spectrum_peak_type", "centroided")
+        return match_fragments(
+            self,
+            candidates,
+            neutral_losses,
+            **kwargs,
+        )
+
     def has_overlapping_peak(self, mz):
         """
         Checks if a spectrum has more than one peak for a given m/z value

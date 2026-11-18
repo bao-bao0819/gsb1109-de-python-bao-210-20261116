@@ -25,7 +25,16 @@ Copyright (C) 2010-2019 M. Kösters, C. Fufezan
     SOFTWARE.
 """
 
-__all__ = ["run", "spec", "chromatogram", "obo", "minimum", "plot", "file_classes"]
+__all__ = [
+    "run",
+    "spec",
+    "chromatogram",
+    "obo",
+    "minimum",
+    "plot",
+    "file_classes",
+    "fragment",
+]
 
 import sys
 
@@ -46,3 +55,5 @@ from pymzml.chromatogram import Chromatogram
 import pymzml.obo
 import pymzml.plot
 import pymzml.utils
+import pymzml.fragment
+from pymzml.fragment import match_fragments

@@ -76,6 +76,14 @@ Find m/z values
 .. include:: code_inc/has_peak.inc
 
 
+Assign isotopic peak groups
+---------------------------
+
+.. autofunction:: isotopic_envelopes.main
+
+.. include:: code_inc/isotopic_envelopes.inc
+
+
 Extract ion chromatogram
 ------------------------
 

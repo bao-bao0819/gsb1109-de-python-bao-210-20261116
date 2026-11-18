@@ -2,23 +2,23 @@
 
 	#!/usr/bin/env python
 	# -*- coding: utf-8 -*-
-
+	
 	import os
-
+	
 	import pymzml
-
-
+	
+	
 	def main():
 	    """
 	    This function shows how to plot a simple spectrum. It can be directly
 	    plotted via this script or using the python console.
-
+	
 	    usage:
-
+	
 	        ./plot_spectrum.py
-
+	
 	    """
-
+	
 	    example_file = os.path.join(
 	        os.path.dirname(__file__), os.pardir, "tests", "data", "example.mzML"
 	    )
@@ -30,10 +30,30 @@
 	        filename = "example_plot_{0}_{1}.html".format(
 	            os.path.basename(example_file), spec.ID
 	        )
-	        p.save(filename=filename)
+	        p.save(
+	            filename=filename,
+	            layout={
+	                "xaxis": {
+	                    "ticks": "outside",
+	                    "ticklen": 2,
+	                    "tickwidth": 0.25,
+	                    "showgrid": False,
+	                    "linecolor": "black",
+	                },
+	                "yaxis": {
+	                    "ticks": "outside",
+	                    "ticklen": 2,
+	                    "tickwidth": 0.25,
+	                    "showgrid": False,
+	                    "linecolor": "black",
+	                },
+	                "plot_bgcolor": "rgba(255, 255, 255, 0)",
+	                "paper_bgcolor": "rgba(255, 255, 255, 0)",
+	            },
+	        )
 	        print("Plotted file: {0}".format(filename))
 	        break
-
-
+	
+	
 	if __name__ == "__main__":
 	    main()

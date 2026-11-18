@@ -1607,6 +1607,51 @@ class Spectrum(MsData):
                 return True
         return False
 
+    def find_isotopic_envelopes(
+        self,
+        charges=(2, 3),
+        mz_tolerance=0.02,
+        max_missing_peaks=1,
+        max_consecutive_missing=1,
+        min_isotopes=2,
+    ):
+        """
+        Enumerate isotopic peak groups in the spectrum and score the competing
+        non-overlapping explanations.
+
+        This is a convenience wrapper around
+        :class:`pymzml.isotopic_envelopes.IsotopicEnvelopeFinder` using the
+        spectrum's centroided peaks. Mutually exclusive envelopes never claim
+        the same peak and equal-scoring charge assignments are all returned.
+
+        Keyword Arguments:
+            charges (iterable): candidate charge states, e.g. ``[2, 3]``.
+            mz_tolerance (float): maximum absolute m/z deviation between an
+                observed peak and the theoretical isotope position.
+            max_missing_peaks (int): maximum number of missing isotope
+                positions allowed within an envelope.
+            max_consecutive_missing (int): maximum number of consecutive
+                missing isotope positions.
+            min_isotopes (int): minimum number of observed peaks an envelope
+                must contain.
+
+        Returns:
+            tuple: ``(envelopes, explanations)`` with the valid
+            :class:`~pymzml.isotopic_envelopes.IsotopicEnvelope` objects and
+            the best :class:`~pymzml.isotopic_envelopes.EnvelopeExplanation`
+            objects.
+        """
+        from pymzml.isotopic_envelopes import IsotopicEnvelopeFinder
+
+        finder = IsotopicEnvelopeFinder(
+            charges=charges,
+            mz_tolerance=mz_tolerance,
+            max_missing_peaks=max_missing_peaks,
+            max_consecutive_missing=max_consecutive_missing,
+            min_isotopes=min_isotopes,
+        )
+        return finder.assign(self.peaks("centroided"))
+
     def similarity_to(self, spec2, round_precision=0):
         """
         Compares two spectra and returns cosine

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- Add `concatenate`, `concatenate_recordings`, `concatenate_edfs`, and `plan_concatenation` for joining EDF/BDF recordings along the time axis. Channels are matched by metadata rather than label alone, convertible units are converted with provenance recorded on the result and as EDF+ annotations, and recordings with incompatible reference schemes are returned as separate outputs instead of being rejected wholesale.
+
 ## [0.4.18] - 2026-10-01
 
 ### Fixed

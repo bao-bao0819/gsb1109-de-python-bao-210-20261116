@@ -105,3 +105,31 @@ edf = read_edf("example.edf")
 edf.anonymize()
 edf.write("example_anonymized.edf")
 ```
+
+## Concatenate recordings with different units and references
+Recordings are matched by channel metadata, not by label alone. Units that can be
+converted (for example `uV` and `mV`) are converted, and the conversion basis is
+recorded on the result and as EDF+ annotations:
+
+```python
+from edfio import UnitConversion, concatenate
+
+result = concatenate(
+    ["recording_1.edf", "recording_2.edf"],
+    unit_conversions=[UnitConversion("mV", "uV", 1000, description="SI prefix")],
+)
+result[0].write("merged.edf")
+```
+
+If the reference scheme cannot be shown to be equivalent, the recordings are
+returned as separate outputs instead of raising an error:
+
+```python
+result = concatenate(["mastoid_ref.edf", "linked_ears_ref.edf"])
+for index, recording in enumerate(result):
+    recording.write(f"part_{index}.edf")
+```
+
+Use `plan_concatenation` to inspect the concatenable ranges and conversion basis
+before writing anything, and `reference_equivalences` to declare references that
+should be treated as equivalent.

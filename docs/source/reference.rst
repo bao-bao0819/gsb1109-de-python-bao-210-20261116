@@ -13,6 +13,13 @@ API reference
    BdfSignal
    Edf
    EdfSignal
+   concatenate
+   plan_concatenation
+   ConcatenationResult
+   UnitConversion
+   ChannelMetadata
+   ConversionRecord
+   ChannelConflict
    EdfAnnotation
    Patient
    Recording

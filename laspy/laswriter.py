@@ -6,7 +6,7 @@ import numpy as np
 
 from ._pointwriter import IPointWriter
 from .compression import LazBackend
-from .errors import LaspyException
+from .errors import DimensionNotLoadedError, LaspyException
 from .header import LasHeader
 from .point import dims
 from .point.record import PackedPointRecord, ScaleAwarePointRecord
@@ -134,6 +134,15 @@ class LasWriter:
                 "can store. Current point count: {}, max point count: {}".format(
                     len(points), self.header.point_count, self.header.max_point_count()
                 )
+            )
+
+        not_loaded = points.not_loaded_dimensions
+        if not_loaded:
+            raise DimensionNotLoadedError(
+                not_loaded,
+                "Cannot write points: the following dimensions were not "
+                f"decompressed and only contain placeholders: {', '.join(not_loaded)}. "
+                "Load them or remove them before writing.",
             )
 
         restore_needed = False

@@ -12,6 +12,7 @@ from typing import Any
 
 import numpy as np
 
+from .. import errors
 from ..point import PointFormat
 from ..waveform.record import IWaveformReader, WaveformRecord
 from . import dims
@@ -84,12 +85,14 @@ class PackedPointRecord:
         point_format: PointFormat,
         *,
         waveform_state: WaveformState | None = None,
+        loaded_dimensions: frozenset[str] | None = None,
     ):
         self.__dict__["array"] = data
         self.__dict__["point_format"] = point_format
         self.__dict__["sub_fields_dict"] = dims.get_sub_fields_dict(point_format.id)
         self.__dict__["_waveform_state"] = None
         self._set_waveform_state(waveform_state)
+        self._set_loaded_dimensions(loaded_dimensions)
 
     @staticmethod
     def _normalize_waveform_state(
@@ -115,6 +118,189 @@ class PackedPointRecord:
         self.__dict__["_waveform_state"] = self._normalize_waveform_state(
             waveform_state
         )
+
+    @property
+    def _stored_field_names(self) -> frozenset[str]:
+        """Names of the fields actually present in the underlying array"""
+        return frozenset(self.array.dtype.names or ())
+
+    def _dimension_names(self) -> tuple[str, ...]:
+        return tuple(self.point_format.dimension_names)
+
+    def _dimension_to_stored_field(self, name: str) -> str:
+        """Maps a dimension name to the name of the field storing it.
+
+        Sub-fields (e.g ``return_number``) are stored inside a composed
+        field (e.g ``bit_fields``), and ``x``/``y``/``z`` are computed
+        from ``X``/``Y``/``Z``.
+        """
+        if name in ("x", "y", "z"):
+            return name.upper()
+        try:
+            composed_dim, _ = self.sub_fields_dict[name]
+            return composed_dim
+        except KeyError:
+            return name
+
+    def _expand_dimension_name(self, name: str) -> set[str]:
+        """Expands a dimension name into the fine grained dimensions it covers.
+
+        ``bit_fields`` covers ``return_number`` and ``number_of_returns``,
+        while ``x`` refers to the ``X`` field.
+        """
+        try:
+            name = OLD_LASPY_NAMES[name]
+        except KeyError:
+            pass
+
+        if name in ("x", "y", "z"):
+            name = name.upper()
+
+        for composed_dim, sub_fields in dims.COMPOSED_FIELDS[
+            self.point_format.id
+        ].items():
+            if name == composed_dim:
+                return {sub_field.name for sub_field in sub_fields}
+
+        return {name}
+
+    def _set_loaded_dimensions(self, loaded_dimensions) -> None:
+        available = set(self._dimension_names())
+        if loaded_dimensions is None:
+            self.__dict__["_loaded_dimensions"] = frozenset(available)
+            return
+
+        normalized = set()
+        for name in loaded_dimensions:
+            for dim_name in self._expand_dimension_name(name):
+                if dim_name in available:
+                    normalized.add(dim_name)
+        self.__dict__["_loaded_dimensions"] = frozenset(normalized)
+
+    def _present_dimension_names(self) -> tuple[str, ...]:
+        """Dimensions whose storage field is actually present in the array"""
+        stored_fields = self._stored_field_names
+        return tuple(
+            dim_name
+            for dim_name in self._dimension_names()
+            if self._dimension_to_stored_field(dim_name) in stored_fields
+        )
+
+    def _copy_loaded_dimensions(self) -> frozenset[str]:
+        return self._load_state()
+
+    def mark_dimensions_as_loaded(self, names) -> None:
+        """Mark dimensions as having real (decompressed) values.
+
+        This is mostly useful for code which fills the values of a
+        dimension that was previously left as an unloaded placeholder.
+        """
+        if isinstance(names, str):
+            names = [names]
+        available = set(self._dimension_names())
+        loaded = set(self._load_state())
+        for name in names:
+            for dim_name in self._expand_dimension_name(name):
+                if dim_name in available:
+                    loaded.add(dim_name)
+        self.__dict__["_loaded_dimensions"] = frozenset(loaded)
+
+    def _load_state(self) -> frozenset[str]:
+        try:
+            return self.__dict__["_loaded_dimensions"]
+        except KeyError:
+            state = frozenset(self._dimension_names())
+            self.__dict__["_loaded_dimensions"] = state
+            return state
+
+    def is_dimension_loaded(self, name: str) -> bool:
+        """Returns whether the given dimension holds real (loaded) values.
+
+        Dimensions that are present in the point format but were not
+        decompressed (because of a restrictive ``DecompressionSelection``)
+        are considered not loaded: their values are placeholders only.
+
+        >>> import laspy
+        >>> las = laspy.read("tests/data/simple.las")
+        >>> las.points.is_dimension_loaded("intensity")
+        True
+        """
+        if self._dimension_to_stored_field(name) not in self._stored_field_names:
+            return False
+        expanded = self._expand_dimension_name(name)
+        available = set(self._present_dimension_names())
+        if not expanded.issubset(available):
+            return False
+        return expanded.issubset(self._load_state())
+
+    @property
+    def loaded_dimensions(self) -> tuple[str, ...]:
+        """Names of the dimensions holding real (loaded) values.
+
+        Unlike :attr:`PointFormat.dimension_names`, this excludes
+        dimensions whose values were skipped during reading and are
+        thus only placeholders.
+        """
+        loaded = self._load_state()
+        return tuple(
+            dim_name
+            for dim_name in self._present_dimension_names()
+            if dim_name in loaded
+        )
+
+    @property
+    def not_loaded_dimensions(self) -> tuple[str, ...]:
+        """Names of the dimensions whose values were not loaded"""
+        loaded = self._load_state()
+        return tuple(
+            dim_name
+            for dim_name in self._present_dimension_names()
+            if dim_name not in loaded
+        )
+
+    def _raise_if_dimension_not_loaded(self, name: str) -> None:
+        if not self.is_dimension_loaded(name):
+            raise errors.DimensionNotLoadedError(name)
+
+    def require_dimensions(self, names) -> None:
+        """Raise if any of the given dimensions was not loaded.
+
+        This makes it possible to check that the dimensions needed by a
+        query are actually available before using them, instead of
+        silently using placeholder values.
+
+        Raises
+        ------
+        DimensionNotLoadedError
+        """
+        if isinstance(names, str):
+            names = [names]
+
+        missing = [
+            name for name in names if not self.is_dimension_loaded(name)
+        ]
+        if missing:
+            raise errors.DimensionNotLoadedError(missing)
+
+    def dimensions_are_available(self, names) -> bool:
+        """Returns True if all the given dimensions were loaded"""
+        if isinstance(names, str):
+            names = [names]
+        return all(self.is_dimension_loaded(name) for name in names)
+
+    def _unloaded_dimension_view(self, name: str):
+        """Returns a view exposing the placeholder values of an unloaded dimension"""
+        try:
+            composed_dim, sub_field = self.sub_fields_dict[name]
+        except KeyError:
+            field_name = self._dimension_to_stored_field(name)
+            view = dims.UnloadedDimensionView(self.array[field_name], name)
+        else:
+            view = dims.UnloadedDimensionView(
+                dims.SubFieldView(self.array[composed_dim], sub_field.mask), name
+            )
+        view._setter = lambda: self.mark_dimensions_as_loaded([name])
+        return view
 
     def _load_waveforms_from_source(self) -> None:
         match self._waveform_state:
@@ -191,6 +377,17 @@ class PackedPointRecord:
         array = np.zeros_like(other_point_record.array, dtype=new_point_format.dtype())
         new_record = cls(array, new_point_format)
         new_record.copy_fields_from(other_point_record)
+        # Dimensions that exist in the source but were not loaded stay
+        # unloaded. Dimensions that are brand new (not present in the
+        # source) are initialized with real zero values.
+        unloaded = set(other_point_record.not_loaded_dimensions)
+        new_record._set_loaded_dimensions(
+            [
+                dim_name
+                for dim_name in new_record._dimension_names()
+                if dim_name not in unloaded
+            ]
+        )
         return new_record
 
     @classmethod
@@ -203,6 +400,8 @@ class PackedPointRecord:
     def copy_fields_from(self, other_record: "PackedPointRecord") -> None:
         """Tries to copy the values of the current dimensions from other_record"""
         for dim_name in self.point_format.dimension_names:
+            if not other_record.is_dimension_loaded(dim_name):
+                continue
             try:
                 self[dim_name] = np.array(other_record[dim_name])
             except ValueError:
@@ -230,6 +429,7 @@ class PackedPointRecord:
             self.array.copy(),
             deepcopy(self.point_format),
             waveform_state=self._copy_waveform_state(),
+            loaded_dimensions=self._copy_loaded_dimensions(),
         )
 
     def memoryview(self) -> memoryview:
@@ -325,6 +525,7 @@ class PackedPointRecord:
             self.array[point_indexer],
             self.point_format,
             waveform_state=waveform_state,
+            loaded_dimensions=self._copy_loaded_dimensions(),
         )
 
     def __getitem__(self, item):
@@ -336,7 +537,11 @@ class PackedPointRecord:
 
         if isinstance(item, tuple):
             if len(item) > 0 and all(isinstance(el, str) for el in item):
-                return PackedPointRecord(self.array[list(item)], self.point_format)
+                return PackedPointRecord(
+                    self.array[list(item)],
+                    self.point_format,
+                    loaded_dimensions=self._copy_loaded_dimensions(),
+                )
             if len(item) > 0 and all(
                 np.isscalar(el) and not isinstance(el, str) for el in item
             ):
@@ -345,7 +550,11 @@ class PackedPointRecord:
 
         if isinstance(item, list):
             if len(item) > 0 and all(isinstance(el, str) for el in item):
-                return PackedPointRecord(self.array[item], self.point_format)
+                return PackedPointRecord(
+                    self.array[item],
+                    self.point_format,
+                    loaded_dimensions=self._copy_loaded_dimensions(),
+                )
             if len(item) == 0:
                 return self._subset(np.asarray(item, dtype=np.intp))
             return self._subset(np.asarray(item))
@@ -354,6 +563,11 @@ class PackedPointRecord:
             item = OLD_LASPY_NAMES[item]
         except KeyError:
             pass
+
+        if item in self.point_format.dimension_names and not self.is_dimension_loaded(
+            item
+        ):
+            return self._unloaded_dimension_view(item)
 
         # 1) Is it a sub field ?
         try:
@@ -408,7 +622,12 @@ class PackedPointRecord:
 
         self._append_zeros_if_too_small(value)
         if isinstance(key, str):
+            normalized_key = OLD_LASPY_NAMES.get(key, key)
             self[key][:] = value
+            if not self.is_dimension_loaded(normalized_key):
+                # Writing real values means the dimension is not a
+                # placeholder anymore
+                self.mark_dimensions_as_loaded([normalized_key])
         else:
             self.array[key] = value
 
@@ -474,11 +693,13 @@ class ScaleAwarePointRecord(PackedPointRecord):
         offsets,
         *,
         waveform_state: WaveformState | None = None,
+        loaded_dimensions: frozenset[str] | None = None,
     ):
         super().__init__(
             array,
             point_format,
             waveform_state=waveform_state,
+            loaded_dimensions=loaded_dimensions,
         )
         self.scales = np.array(scales)
         self.offsets = np.array(offsets)
@@ -491,7 +712,13 @@ class ScaleAwarePointRecord(PackedPointRecord):
 
     @staticmethod
     def zeros(
-        point_count, *, point_format=None, scales=None, offsets=None, header=None
+        point_count,
+        *,
+        point_format=None,
+        scales=None,
+        offsets=None,
+        header=None,
+        loaded_dimensions=None,
     ):
         """Creates a new point record with all dimensions initialized to zero
 
@@ -535,7 +762,13 @@ class ScaleAwarePointRecord(PackedPointRecord):
                 )
 
         data = np.zeros(point_count, point_format.dtype())
-        return ScaleAwarePointRecord(data, point_format, scales, offsets)
+        return ScaleAwarePointRecord(
+            data,
+            point_format,
+            scales,
+            offsets,
+            loaded_dimensions=loaded_dimensions,
+        )
 
     @staticmethod
     def empty(point_format=None, scales=None, offsets=None, header=None):
@@ -572,8 +805,15 @@ class ScaleAwarePointRecord(PackedPointRecord):
             if len(normalized_item) > 0 and all(
                 isinstance(name, str) for name in normalized_item
             ):
+                projected_loaded = [
+                    name
+                    for name in normalized_item
+                    if self.is_dimension_loaded(name)
+                ]
                 projected_record = PackedPointRecord(
-                    self.array[normalized_item], self.point_format
+                    self.array[normalized_item],
+                    self.point_format,
+                    loaded_dimensions=projected_loaded,
                 )
                 return ScaleAwarePointRecord(
                     projected_record.array,
@@ -581,6 +821,7 @@ class ScaleAwarePointRecord(PackedPointRecord):
                     self.scales,
                     self.offsets,
                     waveform_state=projected_record._waveform_state,
+                    loaded_dimensions=projected_record._copy_loaded_dimensions(),
                 )
             elif isinstance(item, tuple):
                 if len(item) > 0 and all(
@@ -601,14 +842,18 @@ class ScaleAwarePointRecord(PackedPointRecord):
                 self.scales,
                 self.offsets,
                 waveform_state=point_subset_record._waveform_state,
+                loaded_dimensions=point_subset_record._copy_loaded_dimensions(),
             )
 
-        if item == "x":
-            return ScaledArrayView(self.array["X"], self.scales[0], self.offsets[0])
-        elif item == "y":
-            return ScaledArrayView(self.array["Y"], self.scales[1], self.offsets[1])
-        elif item == "z":
-            return ScaledArrayView(self.array["Z"], self.scales[2], self.offsets[2])
+        if item in ("x", "y", "z"):
+            if not self.is_dimension_loaded(item):
+                return self._unloaded_dimension_view(item)
+            if item == "x":
+                return ScaledArrayView(self.array["X"], self.scales[0], self.offsets[0])
+            elif item == "y":
+                return ScaledArrayView(self.array["Y"], self.scales[1], self.offsets[1])
+            else:
+                return ScaledArrayView(self.array["Z"], self.scales[2], self.offsets[2])
         else:
             return super().__getitem__(item)
 

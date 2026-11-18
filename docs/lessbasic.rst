@@ -154,3 +154,55 @@ will be able to automatically parse the VLR when reading the file & write it whe
 >>> las.vlrs[0].numbers
 [1, 2, 3]
 
+
+
+Selective Decompression
+=======================
+
+When reading a LAZ file with a version >= 1.4 and a point format id
+between 6 and 10 (inclusive) it is possible to ask laspy to only
+decompress some of the dimensions, using :class:`.DecompressionSelection`.
+This can save a lot of time when only a few dimensions are needed:
+
+.. code-block:: python
+
+    import laspy
+
+    selection = laspy.DecompressionSelection.base().decompress_z()
+    las = laspy.read("some_file.laz", decompression_selection=selection)
+
+The dimensions which were not decompressed are still present in the
+point format (so that writing the file keeps working), however the
+values stored in the array are only placeholders and must not be used.
+
+laspy tracks which dimensions were actually loaded:
+
+.. code-block:: python
+
+    >>> import laspy
+    >>> las = laspy.read("tests/data/simple.las")
+    >>> "intensity" in las.loaded_dimensions
+    True
+    >>> las.is_dimension_loaded("intensity")
+    True
+    >>> las.require_dimensions(["X", "Y", "Z"])
+
+- :attr:`LasData.loaded_dimensions` lists the dimensions holding real values.
+- :attr:`LasData.not_loaded_dimensions` lists the dimensions holding placeholders.
+- :meth:`LasData.is_dimension_loaded` / :meth:`LasData.dimensions_are_available`
+  check the availability of one or more dimensions.
+- :meth:`LasData.require_dimensions` raises
+  :class:`laspy.errors.DimensionNotLoadedError` if any of the given dimensions
+  was not loaded. Use it to make sure a query only relies on available data.
+
+Accessing an unloaded dimension returns a view on the placeholder values.
+Comparisons against the placeholders keep working, but aggregations such as
+``np.mean`` or ``np.sum`` return ``nan`` so that placeholders never silently
+take part in a computation. Converting the view to a plain numpy array emits a
+:class:`laspy.point.dims.DimensionNotLoadedWarning`.
+
+Writing points that contain unloaded dimensions raises a
+:class:`laspy.errors.DimensionNotLoadedError`, so placeholders are never written
+as if they were real zero values. Either decompress the dimensions (use
+``DecompressionSelection.all()``), fill them with real values, or remove them
+before writing.

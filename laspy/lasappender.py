@@ -3,7 +3,7 @@ from typing import BinaryIO, Iterable, Optional, Union
 
 from ._pointappender import IPointAppender
 from .compression import LazBackend
-from .errors import LaspyException
+from .errors import DimensionNotLoadedError, LaspyException
 from .header import LasHeader
 from .point.record import PackedPointRecord
 from .vlrs.vlrlist import VLRList
@@ -76,6 +76,14 @@ class LasAppender:
                 "can store. Current point count: {}, max point count: {}".format(
                     len(points), self.header.point_count, self.header.max_point_count()
                 )
+            )
+
+        not_loaded = points.not_loaded_dimensions
+        if not_loaded:
+            raise DimensionNotLoadedError(
+                not_loaded,
+                "Cannot append points: the following dimensions were not "
+                f"decompressed and only contain placeholders: {', '.join(not_loaded)}.",
             )
 
         self.points_appender.append_points(points)

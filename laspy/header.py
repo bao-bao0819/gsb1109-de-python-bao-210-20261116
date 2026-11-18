@@ -516,46 +516,51 @@ class LasHeader:
             self.grow(points)
 
     def grow(self, points: PackedPointRecord) -> None:
-        self.x_max = max(
-            self.x_max,
-            (points["X"].max() * self.x_scale) + self.x_offset,
-        )
-        self.y_max = max(
-            self.y_max,
-            (points["Y"].max() * self.y_scale) + self.y_offset,
-        )
-        self.z_max = max(
-            self.z_max,
-            (points["Z"].max() * self.z_scale) + self.z_offset,
-        )
-        self.x_min = min(
-            self.x_min,
-            (points["X"].min() * self.x_scale) + self.x_offset,
-        )
-        self.y_min = min(
-            self.y_min,
-            (points["Y"].min() * self.y_scale) + self.y_offset,
-        )
-        self.z_min = min(
-            self.z_min,
-            (points["Z"].min() * self.z_scale) + self.z_offset,
-        )
+        if points.is_dimension_loaded("X"):
+            self.x_max = max(
+                self.x_max,
+                (points["X"].max() * self.x_scale) + self.x_offset,
+            )
+            self.x_min = min(
+                self.x_min,
+                (points["X"].min() * self.x_scale) + self.x_offset,
+            )
+        if points.is_dimension_loaded("Y"):
+            self.y_max = max(
+                self.y_max,
+                (points["Y"].max() * self.y_scale) + self.y_offset,
+            )
+            self.y_min = min(
+                self.y_min,
+                (points["Y"].min() * self.y_scale) + self.y_offset,
+            )
+        if points.is_dimension_loaded("Z"):
+            self.z_max = max(
+                self.z_max,
+                (points["Z"].max() * self.z_scale) + self.z_offset,
+            )
+            self.z_min = min(
+                self.z_min,
+                (points["Z"].min() * self.z_scale) + self.z_offset,
+            )
 
         try:
-            gps_time = points["gps_time"]
-            self.max_gps_time = max(self.max_gps_time, gps_time.max())
-            self.min_gps_time = min(self.min_gps_time, gps_time.min())
+            if points.is_dimension_loaded("gps_time"):
+                gps_time = points["gps_time"]
+                self.max_gps_time = max(self.max_gps_time, gps_time.max())
+                self.min_gps_time = min(self.min_gps_time, gps_time.min())
         except ValueError:
             pass
 
-        for return_number, count in zip(
-            *np.unique(points.return_number, return_counts=True)
-        ):
-            if return_number == 0:
-                continue
-            if return_number > len(self.number_of_points_by_return):
-                break  # np.unique sorts unique values
-            self.number_of_points_by_return[return_number - 1] += count
+        if points.is_dimension_loaded("return_number"):
+            for return_number, count in zip(
+                *np.unique(points.return_number, return_counts=True)
+            ):
+                if return_number == 0:
+                    continue
+                if return_number > len(self.number_of_points_by_return):
+                    break  # np.unique sorts unique values
+                self.number_of_points_by_return[return_number - 1] += count
         self.point_count += len(points)
 
         # grow extra bytes

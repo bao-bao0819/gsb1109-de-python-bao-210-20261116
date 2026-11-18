@@ -56,6 +56,7 @@ class LasData:
                 scales=header.scales,
                 offsets=header.offsets,
                 waveform_state=points._waveform_state,
+                loaded_dimensions=points._copy_loaded_dimensions(),
             )
         else:
             assert np.all(header.scales, points.scales)
@@ -68,6 +69,43 @@ class LasData:
     def point_format(self) -> PointFormat:
         """Shortcut to get the point format"""
         return self.points.point_format
+
+    @property
+    def loaded_dimensions(self) -> tuple[str, ...]:
+        """Names of the dimensions that were actually loaded.
+
+        When a file is read with a restrictive
+        :class:`laspy.DecompressionSelection`, the dimensions that were
+        not decompressed are present in the point format, but their
+        values are placeholders. This property lists the dimensions
+        whose values are real.
+        """
+        return self.points.loaded_dimensions
+
+    @property
+    def not_loaded_dimensions(self) -> tuple[str, ...]:
+        """Names of the dimensions that were not loaded.
+
+        See :attr:`loaded_dimensions`.
+        """
+        return self.points.not_loaded_dimensions
+
+    def is_dimension_loaded(self, name: str) -> bool:
+        """Returns whether the given dimension holds real (loaded) values."""
+        return self.points.is_dimension_loaded(name)
+
+    def dimensions_are_available(self, names) -> bool:
+        """Returns True if all the given dimensions were loaded."""
+        return self.points.dimensions_are_available(names)
+
+    def require_dimensions(self, names) -> None:
+        """Raises :class:`laspy.errors.DimensionNotLoadedError` if any of
+        the given dimensions was not loaded.
+
+        Use this before running a query that needs some dimensions to
+        make sure it does not silently use placeholder values.
+        """
+        self.points.require_dimensions(names)
 
     @property
     def xyz(self) -> np.ndarray:
@@ -83,7 +121,27 @@ class LasData:
         >>> bool(np.all(xyz[..., 0] == las.x))
         True
         """
-        return np.vstack((self.x, self.y, self.z)).transpose()
+        coordinates = [self.x, self.y, self.z]
+        not_loaded = [
+            name
+            for name, coordinate in zip(("x", "y", "z"), coordinates)
+            if not self.is_dimension_loaded(name)
+        ]
+        if not_loaded:
+            # Do not silently expose placeholder coordinates
+            scales = self.header.scales
+            offsets = self.header.offsets
+            columns = []
+            for i, field_name in enumerate(("X", "Y", "Z")):
+                raw = np.asarray(self.points.array[field_name], dtype=np.float64)
+                columns.append((raw * scales[i]) + offsets[i])
+            data = np.vstack(columns).transpose()
+            mask = np.zeros(data.shape, dtype=bool)
+            for i, name in enumerate(("x", "y", "z")):
+                if name in not_loaded:
+                    mask[:, i] = True
+            return np.ma.array(data, mask=mask)
+        return np.vstack(coordinates).transpose()
 
     @xyz.setter
     def xyz(self, value) -> None:
@@ -147,8 +205,13 @@ class LasData:
         params: list of parameters of the new extra dimensions to add
         """
         self.header.add_extra_dims(params)
+        new_dimension_names = [param.name for param in params]
         new_point_record = record.ScaleAwarePointRecord.zeros(
-            len(self.points), header=self.header
+            len(self.points),
+            header=self.header,
+            loaded_dimensions=(
+                tuple(self.points.loaded_dimensions) + tuple(new_dimension_names)
+            ),
         )
         new_point_record.copy_fields_from(self.points)
         self.points = new_point_record
@@ -180,7 +243,9 @@ class LasData:
 
         self.header.remove_extra_dims(names)
         new_point_record = record.ScaleAwarePointRecord.zeros(
-            len(self.points), header=self.header
+            len(self.points),
+            header=self.header,
+            loaded_dimensions=self.points.loaded_dimensions,
         )
         new_point_record.copy_fields_from(self.points)
         self.points = new_point_record
@@ -284,6 +349,14 @@ class LasData:
             By default, laspy detect available backends
         """
         should_write_waveforms = waveforms and self.points._waveform_state is not None
+        not_loaded = self.points.not_loaded_dimensions
+        if not_loaded:
+            raise errors.DimensionNotLoadedError(
+                not_loaded,
+                "Cannot write points: the following dimensions were not "
+                f"decompressed and only contain placeholders: {', '.join(not_loaded)}. "
+                "Load them or remove them before writing.",
+            )
         if isinstance(destination, (str, pathlib.Path)):
             destination_path = pathlib.Path(destination)
             if should_write_waveforms:

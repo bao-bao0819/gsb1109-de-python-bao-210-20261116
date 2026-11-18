@@ -180,6 +180,87 @@ class DecompressionSelection(enum.IntFlag):
         """
         return cls.XY_RETURNS_CHANNEL
 
+    def loaded_dimension_names(self, point_format) -> frozenset:
+        """Returns the names of the dimensions this selection decompresses.
+
+        The returned names are the dimension names of ``point_format``
+        (i.e the ones found in ``point_format.dimension_names``).
+        The ``x``, ``y`` and ``z`` dimensions are included when their
+        underlying ``X``, ``Y`` and ``Z`` are decompressed.
+
+        Some dimensions share the same byte (for example
+        ``scanner_channel`` and ``synthetic`` are both stored in
+        ``classification_flags`` for point formats >= 6). They are
+        tracked individually since the LAZ selective decompression is
+        able to decode only some of the bit fields of a byte.
+        """
+        selected_dimensions = set()
+        if self.is_set(DecompressionSelection.XY_RETURNS_CHANNEL):
+            selected_dimensions.update(
+                ("X", "Y", "return_number", "number_of_returns", "scanner_channel")
+            )
+        if self.is_set(DecompressionSelection.Z):
+            selected_dimensions.add("Z")
+        if self.is_set(DecompressionSelection.CLASSIFICATION):
+            selected_dimensions.update(("classification", "raw_classification"))
+        if self.is_set(DecompressionSelection.FLAGS):
+            selected_dimensions.update(
+                (
+                    "synthetic",
+                    "key_point",
+                    "withheld",
+                    "overlap",
+                    "scan_direction_flag",
+                    "edge_of_flight_line",
+                    "classification_flags",
+                    "raw_classification",
+                )
+            )
+        if self.is_set(DecompressionSelection.INTENSITY):
+            selected_dimensions.add("intensity")
+        if self.is_set(DecompressionSelection.SCAN_ANGLE):
+            selected_dimensions.update(("scan_angle", "scan_angle_rank"))
+        if self.is_set(DecompressionSelection.USER_DATA):
+            selected_dimensions.add("user_data")
+        if self.is_set(DecompressionSelection.POINT_SOURCE_ID):
+            selected_dimensions.add("point_source_id")
+        if self.is_set(DecompressionSelection.GPS_TIME):
+            selected_dimensions.add("gps_time")
+        if self.is_set(DecompressionSelection.RGB):
+            selected_dimensions.update(("red", "green", "blue"))
+        if self.is_set(DecompressionSelection.NIR):
+            selected_dimensions.add("nir")
+        if self.is_set(DecompressionSelection.WAVEPACKET):
+            selected_dimensions.update(
+                (
+                    "wavepacket_index",
+                    "wavepacket_offset",
+                    "wavepacket_size",
+                    "return_point_wave_location",
+                    "x_t",
+                    "y_t",
+                    "z_t",
+                )
+            )
+
+        all_extra_bytes = self.is_set(DecompressionSelection.ALL_EXTRA_BYTES)
+        loaded = set()
+        for dimension in point_format.dimensions:
+            if not dimension.is_standard:
+                if all_extra_bytes:
+                    loaded.add(dimension.name)
+            elif dimension.name in selected_dimensions:
+                loaded.add(dimension.name)
+
+        if "X" in loaded:
+            loaded.add("x")
+        if "Y" in loaded:
+            loaded.add("y")
+        if "Z" in loaded:
+            loaded.add("z")
+
+        return frozenset(loaded)
+
     def to_lazrs(self) -> "lazrs.DecompressionSelection":
         import lazrs
 

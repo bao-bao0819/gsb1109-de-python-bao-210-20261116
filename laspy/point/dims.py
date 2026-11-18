@@ -817,3 +817,266 @@ class ScaledArrayView(ArrayView):
 
     def __repr__(self):
         return f"<ScaledArrayView({self.scaled_array()})>"
+
+
+class DimensionNotLoadedWarning(UserWarning):
+    """Warning emitted when placeholder values of an unloaded dimension
+    are converted to a plain numpy array."""
+
+
+class UnloadedDimensionView:
+    """View on a dimension whose values were not decompressed.
+
+    When reading a LAZ file with a restrictive
+    :class:`laspy.DecompressionSelection`, the bytes of the skipped
+    dimensions are filled with placeholder values. This view keeps the
+    raw placeholder bytes accessible (so that code relying on the
+    previous behaviour keeps working) while making sure those
+    placeholders are not silently mistaken for real data:
+
+    - :attr:`is_loaded` is ``False`` and :meth:`raise_if_not_available`
+      raises :class:`laspy.errors.DimensionNotLoadedError`
+    - statistical aggregations (``np.mean``, ``np.sum``, ``min``, ``max``)
+      ignore the placeholder values
+    - converting to a plain numpy array emits a
+      :class:`DimensionNotLoadedWarning`
+    """
+
+    def __init__(self, array, dimension_name: str) -> None:
+        self._array = array
+        self.dimension_name = dimension_name
+        self._setter = None
+
+    @property
+    def array(self) -> np.ndarray:
+        return np.asanyarray(self._array)
+
+    # Ensures that ``numpy_scalar == view`` calls our reflected
+    # comparison instead of numpy converting us to a masked array.
+    __array_priority__ = 1000
+
+    @property
+    def is_loaded(self) -> bool:
+        return False
+
+    @property
+    def mask(self) -> np.ndarray:
+        """All the values are masked since they are placeholders"""
+        return np.ones(np.shape(self.array), dtype=bool)
+
+    # ``numpy.ma.getmask`` (and therefore ``numpy.ma.is_masked``) looks
+    # at the ``_mask`` attribute.
+    _mask = mask
+
+    @property
+    def data(self) -> np.ndarray:
+        """The raw placeholder values (do not use them as real data)"""
+        return self.array
+
+    def filled(self, fill_value=np.nan) -> np.ndarray:
+        return np.full(np.shape(self.array), fill_value)
+
+    def compressed(self) -> np.ndarray:
+        return np.empty((0,), dtype=self.array.dtype)
+
+    def raise_if_not_available(self) -> None:
+        from .. import errors
+
+        raise errors.DimensionNotLoadedError(self.dimension_name)
+
+    def _masked(self) -> np.ma.MaskedArray:
+        return np.ma.array(
+            self.array, mask=np.ones(np.shape(self.array), dtype=bool), copy=False
+        )
+
+    def __array__(self, *args, **kwargs) -> np.ndarray:
+        import warnings
+
+        warnings.warn(
+            f"Dimension '{self.dimension_name}' was not loaded, "
+            "its values are placeholders",
+            DimensionNotLoadedWarning,
+            stacklevel=2,
+        )
+        return np.array(self.array, *args, **kwargs)
+
+    _AGGREGATION_FUNCTIONS = frozenset(
+        {
+            "mean",
+            "sum",
+            "min",
+            "max",
+            "amin",
+            "amax",
+            "std",
+            "var",
+            "average",
+            "median",
+        }
+    )
+
+    _COMPARISON_UFUNCS = frozenset(
+        {
+            "equal",
+            "not_equal",
+            "less",
+            "less_equal",
+            "greater",
+            "greater_equal",
+        }
+    )
+
+    def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
+        if method == "reduce" and ufunc.__name__ in (
+            "add",
+            "minimum",
+            "maximum",
+            "minimum_reduce",
+            "maximum_reduce",
+        ):
+            return np.nan
+
+        if ufunc.__name__ in self._COMPARISON_UFUNCS:
+            inputs = tuple(
+                item.array if isinstance(item, UnloadedDimensionView) else item
+                for item in inputs
+            )
+        else:
+            inputs = self._array_views_to_masked(inputs)
+        kwargs = {
+            key: self._array_views_to_masked(value)
+            for key, value in kwargs.items()
+        }
+        return getattr(ufunc, method)(*inputs, **kwargs)
+
+    def __array_function__(self, func, types, args, kwargs):
+        if func.__name__ in self._AGGREGATION_FUNCTIONS:
+            return np.nan
+        args = self._array_views_to_masked(args)
+        kwargs = {
+            key: self._array_views_to_masked(value)
+            for key, value in kwargs.items()
+        }
+        return func(*args, **kwargs)
+
+    @classmethod
+    def _array_views_to_masked(cls, value):
+        if isinstance(value, cls):
+            return value._masked()
+        if isinstance(value, (list, tuple)):
+            return type(value)(cls._array_views_to_masked(item) for item in value)
+        return value
+
+    def __len__(self) -> int:
+        return len(self.array)
+
+    def __getitem__(self, item):
+        if isinstance(item, int):
+            return self._masked()[item]
+        sliced = UnloadedDimensionView(self._array[item], self.dimension_name)
+        sliced._setter = self._setter
+        return sliced
+
+    def __setitem__(self, key, value) -> None:
+        self._array[key] = value
+        if self._setter is not None:
+            self._setter()
+
+    @property
+    def dtype(self):
+        return self.array.dtype
+
+    @property
+    def shape(self):
+        return self.array.shape
+
+    @property
+    def ndim(self):
+        return self.array.ndim
+
+    def copy(self) -> np.ndarray:
+        return np.array(self)
+
+    def _do_comparison(self, other, op):
+        if isinstance(other, UnloadedDimensionView):
+            other = other.array
+        elif hasattr(other, "array") and isinstance(
+            other, (ArrayView, np.ndarray)
+        ):
+            other = np.asarray(other)
+        return getattr(self.array, op)(other)
+
+    def __eq__(self, other):
+        return self._do_comparison(other, "__eq__")
+
+    def __ne__(self, other):
+        return self._do_comparison(other, "__ne__")
+
+    def __lt__(self, other):
+        return self._do_comparison(other, "__lt__")
+
+    def __le__(self, other):
+        return self._do_comparison(other, "__le__")
+
+    def __gt__(self, other):
+        return self._do_comparison(other, "__gt__")
+
+    def __ge__(self, other):
+        return self._do_comparison(other, "__ge__")
+
+    # Reflected comparisons: numpy scalars implement their own
+    # comparison against arbitrary objects, which would convert us
+    # to a masked array. Defining these keeps comparisons against
+    # the placeholder values meaningful.
+    def __rlt__(self, other):
+        return self._do_comparison(other, "__gt__")
+
+    def __rle__(self, other):
+        return self._do_comparison(other, "__ge__")
+
+    def __rgt__(self, other):
+        return self._do_comparison(other, "__lt__")
+
+    def __rge__(self, other):
+        return self._do_comparison(other, "__le__")
+
+    def __add__(self, other):
+        return self.array + other
+
+    def __radd__(self, other):
+        return other + self.array
+
+    def __sub__(self, other):
+        return self.array - other
+
+    def __rsub__(self, other):
+        return other - self.array
+
+    def __mul__(self, other):
+        return self.array * other
+
+    def __rmul__(self, other):
+        return other * self.array
+
+    def __truediv__(self, other):
+        return self.array / other
+
+    def __floordiv__(self, other):
+        return self.array // other
+
+    def __repr__(self) -> str:
+        return (
+            f"<UnloadedDimensionView({self.dimension_name}, "
+            f"{len(self.array)} placeholders)>"
+        )
+
+    def _aggregate(self, *args, **kwargs):
+        return np.nan
+
+    mean = sum = min = max = std = var = _aggregate
+
+    def any(self, *args, **kwargs):
+        return False
+
+    def all(self, *args, **kwargs):
+        return False

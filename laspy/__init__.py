@@ -4,7 +4,7 @@ import logging
 
 from . import errors, file, vlrs
 from .copc import Bounds, CopcReader
-from .errors import LaspyException
+from .errors import DimensionNotLoadedError, LaspyException
 from .header import LasHeader
 from .lasdata import LasData
 from .lasreader import LasReader
@@ -16,6 +16,7 @@ from .lib import open_las as open
 from .lib import read_las as read
 from .point import DimensionInfo, DimensionKind, ExtraBytesParams, PointFormat
 from .point.dims import supported_point_formats, supported_versions
+from .point.dims import UnloadedDimensionView
 from .point.format import lost_dimensions
 from .point.record import PackedPointRecord, ScaleAwarePointRecord
 from .vlrs import VLR

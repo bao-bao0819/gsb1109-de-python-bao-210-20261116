@@ -596,6 +596,7 @@ class CopcReader:
         self.close_fd = close_fd
         self.http_num_threads = http_num_threads
         self.http_strategy = _http_strategy
+        self._decompression_selection = decompression_selection
         self.decompression_selection: lazrs.DecompressionSelection = (
             decompression_selection.to_lazrs()
         )
@@ -835,7 +836,13 @@ class CopcReader:
         )
         r = PackedPointRecord.from_buffer(points_array, self.header.point_format)
         points = ScaleAwarePointRecord(
-            r.array, r.point_format, self.header.scales, self.header.offsets
+            r.array,
+            r.point_format,
+            self.header.scales,
+            self.header.offsets,
+            loaded_dimensions=self._decompression_selection.loaded_dimension_names(
+                self.header.point_format
+            ),
         )
 
         return points

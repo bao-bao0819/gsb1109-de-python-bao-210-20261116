@@ -90,6 +90,20 @@ class LasReader:
             self._point_source = self._create_point_source(self._source)
         return self._point_source
 
+    def _loaded_dimensions_for_read(self) -> Optional[frozenset[str]]:
+        """Dimensions that the decompression selection actually loads.
+
+        Returns None when the point source is not doing selective
+        decompression, meaning all the dimensions are available.
+        """
+        if not self.header.are_points_compressed:
+            return None
+        if not (6 <= self.header.point_format.id <= 10):
+            return None
+        return self.decompression_selection.loaded_dimension_names(
+            self.header.point_format
+        )
+
     def _read_points(self, n: int) -> record.ScaleAwarePointRecord:
         """Read n points from the file
 
@@ -125,7 +139,11 @@ class LasReader:
             logger.error(f"Could only read {len(r)} of the requested {n} points")
 
         points = record.ScaleAwarePointRecord(
-            r.array, r.point_format, self.header.scales, self.header.offsets
+            r.array,
+            r.point_format,
+            self.header.scales,
+            self.header.offsets,
+            loaded_dimensions=self._loaded_dimensions_for_read(),
         )
 
         self.points_read += n

@@ -111,13 +111,20 @@ def print_points_stats(reader: laspy.LasReader):
             stats_record[dimension_name][0] = np.inf
             stats_record[dimension_name][1] = -np.inf
 
+    loaded_dimensions = set(reader.header.point_format.dimension_names)
+
     with Progress(transient=True) as progress:
         task = progress.add_task(
             "[cyan]Procession points...", total=reader.header.point_count
         )
+        first_chunk = True
         for chunk in reader.chunk_iterator(10_000_000):
 
-            for dimension_name in reader.header.point_format.dimension_names:
+            if first_chunk:
+                loaded_dimensions = set(chunk.loaded_dimensions)
+                first_chunk = False
+
+            for dimension_name in loaded_dimensions:
                 stats_record[dimension_name][0] = np.minimum(
                     stats_record[dimension_name][0], np.min(chunk[dimension_name])
                 )
@@ -132,6 +139,8 @@ def print_points_stats(reader: laspy.LasReader):
     table.add_column("Min")
     table.add_column("Max")
     for dimension_name in reader.header.point_format.dimension_names:
+        if dimension_name not in loaded_dimensions:
+            continue
         r = stats_record[dimension_name]
         table.add_row(dimension_name, str(r[0]), str(r[1]))
 
@@ -988,6 +997,13 @@ class FilteringAction:
         """
 
         field_name = self._pdal_name_to_laspy.get(self.field_name, self.field_name)
+
+        if not points.dimensions_are_available([field_name]):
+            print(
+                f"The field '{field_name}' was not decompressed, "
+                "its values are only placeholders and cannot be used to filter"
+            )
+            raise typer.Abort()
 
         try:
             field_values = points[field_name]

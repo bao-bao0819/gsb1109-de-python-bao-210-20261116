@@ -407,6 +407,10 @@ class ExtraBytesStruct(ctypes.LittleEndianStructure):
             return
 
         try:
+            if not points.is_dimension_loaded(self.format_name()):
+                # The dimension was not decompressed, its values are
+                # only placeholders and must not be used to compute stats
+                return
             pts = points[self.format_name()]
         except ValueError:
             # The points did not contain the field

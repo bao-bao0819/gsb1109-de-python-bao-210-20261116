@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Dimensions that were not decompressed (when reading a LAZ file with a
+  restrictive `DecompressionSelection`) are now tracked: `LasData.loaded_dimensions`,
+  `LasData.not_loaded_dimensions`, `LasData.is_dimension_loaded`,
+  `LasData.dimensions_are_available` and `LasData.require_dimensions`.
+  Reading an unloaded dimension returns a view that does not take part in
+  statistics (e.g `np.mean` returns `nan`).
+
+### Fixed
+
+- Placeholder values of skipped dimensions are no longer treated as real
+  zeros: they cannot be used in a query nor written to a file, a
+  `DimensionNotLoadedError` is raised instead.
+
 ## Version 2.7.0 (14/01/2026)
 
 ### Added

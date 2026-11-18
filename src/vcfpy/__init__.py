@@ -24,6 +24,22 @@ from vcfpy.header import (
     SimpleHeaderLine,
     header_without_lines,
 )
+from vcfpy.pedigree import (
+    CONFLICT,
+    CONSISTENT,
+    INHERITANCE_MODES,
+    INSUFFICIENT,
+    INSUFFICIENT_EVIDENCE,
+    PROVEN_CONFLICT,
+    PROVEN_CONSISTENT,
+    Pedigree,
+    PedigreeMember,
+    ScreeningResult,
+    screen_calls,
+    screen_reader,
+    screen_record,
+    screen_records,
+)
 from vcfpy.reader import Reader
 from vcfpy.record import (
     BND,
@@ -101,5 +117,19 @@ __all__ = [
     "REVERSE",
     "FIVE_PRIME",
     "THREE_PRIME",
+    "CONSISTENT",
+    "CONFLICT",
+    "INSUFFICIENT",
+    "PROVEN_CONSISTENT",
+    "PROVEN_CONFLICT",
+    "INSUFFICIENT_EVIDENCE",
+    "INHERITANCE_MODES",
+    "Pedigree",
+    "PedigreeMember",
+    "ScreeningResult",
+    "screen_calls",
+    "screen_record",
+    "screen_records",
+    "screen_reader",
     "__version__",
 ]

@@ -81,6 +81,7 @@ Contents:
 
    schedule
    loader
+   geometry
    gtfs_entities
    gtfs2db
    internal

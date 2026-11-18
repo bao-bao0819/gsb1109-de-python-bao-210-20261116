@@ -355,6 +355,91 @@ class Chromatogram(MsData):
                             break
         return self._product_mz
 
+    def integrate(self, max_gap):
+        """
+        Integrate the chromatogram in a gap-aware way.
+
+        The time axis is split into acquisition segments wherever the
+        distance between two consecutive points exceeds ``max_gap``.
+        Each segment is integrated separately with the trapezoidal rule,
+        so no intensity is ever interpolated across a missing acquisition
+        interval. Segments consisting of a single point contribute no
+        area. Intervals between segments are reported as unknown.
+
+        Arguments:
+            max_gap (float): maximum allowed distance between two
+                consecutive time points of one acquisition segment, in
+                the same unit as the chromatogram time axis.
+
+        Returns:
+            result (dict): dictionary with the keys
+
+                - ``area`` (float): provable area, i.e. the sum of the
+                  areas of all acquisition segments.
+                - ``segments`` (list): one dict per acquisition segment
+                  with keys ``start``, ``end``, ``n_points`` and
+                  ``area``. Single-point segments have area 0.0.
+                - ``gaps`` (list): unknown time intervals between
+                  segments, each a dict with keys ``start`` and ``end``.
+
+        Example:
+
+        >>> import pymzml
+        >>> run = pymzml.run.Reader("example.mzML")
+        >>> tic = run["TIC"]
+        >>> result = tic.integrate(max_gap=0.1)
+        >>> result["area"]
+        >>> for gap in result["gaps"]:
+        ...     print("unknown interval", gap["start"], gap["end"])
+
+        Note:
+            Re-integrating after recovered data points have been added to
+            the profile only increases the area where new observations
+            exist; intervals that are still not covered by acquisition
+            remain listed in ``gaps``.
+        """
+        time = np.asarray(self.time, dtype=float)
+        intensity = np.asarray(self.i, dtype=float)
+        result = {"area": 0.0, "segments": [], "gaps": []}
+        if time.size == 0:
+            return result
+        order = np.argsort(time, kind="stable")
+        time = time[order]
+        intensity = intensity[order]
+        split_positions = np.nonzero(np.diff(time) > max_gap)[0] + 1
+        segment_starts = np.concatenate(([0], split_positions))
+        segment_ends = np.concatenate((split_positions, [time.size]))
+        for start, end in zip(segment_starts, segment_ends):
+            seg_time = time[start:end]
+            seg_intensity = intensity[start:end]
+            if seg_time.size > 1:
+                seg_area = float(
+                    np.sum(
+                        np.diff(seg_time)
+                        * (seg_intensity[1:] + seg_intensity[:-1])
+                        / 2.0
+                    )
+                )
+            else:
+                seg_area = 0.0
+            result["segments"].append(
+                {
+                    "start": float(seg_time[0]),
+                    "end": float(seg_time[-1]),
+                    "n_points": int(seg_time.size),
+                    "area": seg_area,
+                }
+            )
+            result["area"] += seg_area
+        for pos in range(len(result["segments"]) - 1):
+            result["gaps"].append(
+                {
+                    "start": result["segments"][pos]["end"],
+                    "end": result["segments"][pos + 1]["start"],
+                }
+            )
+        return result
+
     def get_chromatogram_properties(self):
         """
         Returns a dictionary with the main properties of the chromatogram.

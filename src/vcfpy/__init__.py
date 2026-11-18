@@ -24,6 +24,7 @@ from vcfpy.header import (
     SimpleHeaderLine,
     header_without_lines,
 )
+from vcfpy.phasing import PhaseBlock, PhaseBreakpoint, PhaseGrouper, group_phase_blocks
 from vcfpy.reader import Reader
 from vcfpy.record import (
     BND,
@@ -80,6 +81,10 @@ __all__ = [
     "Record",
     "Call",
     "UnparsedCall",
+    "PhaseBlock",
+    "PhaseBreakpoint",
+    "PhaseGrouper",
+    "group_phase_blocks",
     "AltRecord",
     "Substitution",
     "SymbolicAllele",

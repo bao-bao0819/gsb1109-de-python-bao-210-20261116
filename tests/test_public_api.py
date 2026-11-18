@@ -61,3 +61,10 @@ def test_from_reader():
 
 def test_from_writer():
     assert vcfpy.Writer
+
+
+def test_from_phasing():
+    assert vcfpy.PhaseGrouper
+    assert vcfpy.PhaseBlock
+    assert vcfpy.PhaseBreakpoint
+    assert vcfpy.group_phase_blocks

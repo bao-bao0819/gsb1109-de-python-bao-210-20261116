@@ -51,6 +51,7 @@ from vcfpy.record import (
     SymbolicAllele,
     UnparsedCall,
 )
+from vcfpy.split import split_multiallelic
 from vcfpy.version import __version__
 from vcfpy.writer import Writer
 
@@ -75,6 +76,7 @@ __all__ = [
     "SamplesInfos",
     "header_without_lines",
     "Reader",
+    "split_multiallelic",
     "HeaderLine",
     "Writer",
     "Record",

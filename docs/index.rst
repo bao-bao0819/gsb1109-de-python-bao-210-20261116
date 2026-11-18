@@ -15,6 +15,7 @@ Welcome to VCFPy's documentation!
     api_exceptions
     api_record
     api_parser
+    api_split
     api_bgzf
     api_tabix
 

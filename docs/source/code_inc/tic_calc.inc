@@ -27,14 +27,17 @@
 	    run = pymzml.run.Reader(mzml_file)
 	    for n, spec in enumerate(run):
 	        print(
-	            "Spectrum {0}, MS level {ms_level}".format(
+	            "Spectrum {0}, MS level {ms_level}, representation {rep}".format(
 	                spec["id"],
 	                ms_level=spec["ms level"],
+	                rep=spec.representation,
 	                # scan_time = spec['scan_time']
 	            ),
 	            end="\r",
 	        )
-	        i = sum(spec.i)
+	        # centroid spectra: sum of discrete peak intensities
+	        # profile spectra: trapezoidal area under the sampled curve
+	        i = spec.integrate()
 	    print("Parsed {0} spectra from file {1}".format(n, mzml_file))
 	    print()
 

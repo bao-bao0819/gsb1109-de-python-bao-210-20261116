@@ -35,7 +35,7 @@ There each chromatogram is accessible as a chromatogram object.
 
 import re
 import numpy as np
-from .msdata import MsData
+from .msdata import MsData, REPRESENTATION_PROFILE, REPRESENTATION_UNKNOWN
 from .obo import OboTranslator
 
 
@@ -77,6 +77,10 @@ class Chromatogram(MsData):
         self._precursor_mz = None
         self._product_mz = None
         self._polarity = None
+        # a chromatogram is always a sampled time/intensity curve
+        self._representation = (
+            REPRESENTATION_PROFILE if element is not None else REPRESENTATION_UNKNOWN
+        )
         self.obo_translator = OboTranslator.from_cache(obo_version)
 
         if self.element:
@@ -222,6 +226,7 @@ class Chromatogram(MsData):
         self._peaks = tuple_list
         self._reprofiledPeaks = None
         self._centroidedPeaks = None
+        self._representation = REPRESENTATION_PROFILE
         return self
 
     def peaks(self):
@@ -252,6 +257,44 @@ class Chromatogram(MsData):
 
         """
         return self.profile
+
+    def integrate(self, peak_type=None, gap_threshold=None):
+        """
+        Return the area under the time/intensity curve.
+
+        A chromatogram is a sampled profile curve, so the integral is
+        computed with the trapezoidal rule over time. Consecutive samples
+        are connected by linear interpolation and no area is extrapolated
+        beyond the measured time range. Re-sampling the same chromatogram
+        at a different point density therefore yields the same integral
+        instead of scaling with the number of samples.
+
+        Keyword Arguments:
+            peak_type (str, optional): accepted for interface symmetry with
+                :py:meth:`pymzml.spec.Spectrum.integrate`; chromatograms
+                only expose their profile curve, so the argument is
+                ignored.
+            gap_threshold (float, optional): consecutive samples separated
+                by more than this many time units define a gap. The
+                trapezoid spanning the gap is skipped instead of
+                interpolating across it, so no area is invented for the
+                unmeasured time interval.
+
+        Returns:
+            integral (float): area under the chromatogram in
+            intensity * time units
+        """
+        if peak_type is not None and peak_type != "raw":
+            raise KeyError(
+                "Chromatograms only support the profile ('raw') representation, "
+                "got {0!r}".format(peak_type)
+            )
+        profile = self.profile
+        if len(profile) < 2:
+            return 0.0
+        return self._trapezoid_integral(
+            profile[:, 0], profile[:, 1], gap_threshold
+        )
 
     @property
     def chromatogram_type(self):

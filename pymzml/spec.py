@@ -75,7 +75,12 @@ ISOTOPE_AVERAGE_DIFFERENCE = 1.002
 
 # Import Chromatogram from chromatogram.py for backward compatibility
 # Import MsData from msdata.py
-from .msdata import MsData
+from .msdata import (
+    MsData,
+    REPRESENTATION_CENTROID,
+    REPRESENTATION_PROFILE,
+    REPRESENTATION_REPROFILED,
+)
 
 # Unit Ontology time units, for cvParams that give unitAccession without unitName
 _TIME_UNIT_ACCESSIONS = {
@@ -461,6 +466,7 @@ class Spectrum(MsData):
         }
         self._selected_precursors = None
         self._profile = None
+        self._representation = None
         self.reprofiled = False
         self._reprofiled_peaks = None
         self._scan_time = None
@@ -822,6 +828,77 @@ class Spectrum(MsData):
                 ).get("value")
             )  # put hardcoded MS tags in minimum.py???
         return self._TIC
+
+    def integrate(self, peak_type=None, gap_threshold=None):
+        """
+        Return the integrated intensity using the convention matching the
+        data representation.
+
+        Profile and reprofiled data are sampled curves: their integral is
+        the trapezoidal area under the curve over m/z, which does not scale
+        with the number of sampled points. Centroid and deconvoluted data
+        are discrete peaks: their integral is the sum of the individual
+        peak intensities. These two conventions must not be mixed when
+        comparing spectra.
+
+        Keyword Arguments:
+            peak_type (str, optional): explicitly select the peak
+                representation to integrate (``"raw"``, ``"centroided"``,
+                ``"reprofiled"`` or ``"deconvoluted"``). If omitted, the
+                native representation reported by
+                :py:attr:`~pymzml.msdata.MsData.representation` is used:
+                profile -> ``"raw"``, centroid -> ``"centroided"``,
+                reprofiled -> ``"reprofiled"``. Spectra without a known
+                representation default to the centroid convention.
+            gap_threshold (float, optional): for the sampled curve
+                representations (``"raw"`` profile and ``"reprofiled"``),
+                consecutive samples separated by more than this many m/z
+                units define a gap. The trapezoid spanning the gap is
+                skipped instead of interpolating across it, so no area is
+                invented for the unmeasured region. Ignored for discrete
+                peak representations.
+
+        Returns:
+            integral (float): integrated intensity of the spectrum
+
+        Note:
+            This value is independent from the TIC cvParam stored in the
+            mzML (see :py:attr:`TIC`), which is reported by the instrument
+            software and may use yet another convention.
+        """
+        if peak_type is None:
+            peak_type = {
+                REPRESENTATION_PROFILE: "raw",
+                REPRESENTATION_CENTROID: "centroided",
+                REPRESENTATION_REPROFILED: "reprofiled",
+            }.get(self.representation, "centroided")
+
+        if peak_type == "centroided":
+            peaks = self.peaks("centroided")
+            if len(peaks) == 0:
+                return 0.0
+            return float(peaks[:, 1].sum())
+        if peak_type == "deconvoluted":
+            peaks = self.peaks("deconvoluted")
+            if peaks is None or len(peaks) == 0:
+                return 0.0
+            return float(peaks[:, 1].sum())
+        if peak_type == "reprofiled":
+            peaks = self.peaks("reprofiled")
+            if len(peaks) == 0:
+                return 0.0
+            coordinates = np.asarray(peaks, dtype=np.float64)
+            return self._trapezoid_integral(
+                coordinates[:, 0], coordinates[:, 1], gap_threshold
+            )
+        if peak_type == "raw":
+            peaks = self.peaks("raw")
+            if len(peaks) == 0:
+                return 0.0
+            return self._trapezoid_integral(
+                peaks[:, 0], peaks[:, 1], gap_threshold
+            )
+        raise KeyError("Unsupported peak type: {0!r}".format(peak_type))
 
     @property
     def ID(self):
@@ -1219,6 +1296,9 @@ class Spectrum(MsData):
             # if not isinstance(peaks, np.ndarray):
             #     peaks = np.array(peaks)
             self._peak_dict["centroided"] = peaks
+            # explicitly assigned centroid peaks are discrete measurements
+            if peaks is not None:
+                self._representation = REPRESENTATION_CENTROID
             try:
                 self._mz = self.peaks("raw")[:, 0]
                 self._i = self.peaks("raw")[:, 1]
@@ -1229,6 +1309,8 @@ class Spectrum(MsData):
         elif peak_type == "reprofiled":
             try:
                 self._peak_dict["reprofiled"] = peaks
+                # reprofiled peaks are a sampled curve derived from centroids
+                self._representation = REPRESENTATION_REPROFILED
             except TypeError:
                 self._peak_dict["reprofiled"] = None
         elif peak_type == "deconvoluted":
@@ -1335,6 +1417,7 @@ class Spectrum(MsData):
                     y = i * math.exp(-1 * ((mz - a) * (mz - a)) / (2 * s2))
                     tmp[a] += y
         self.reprofiled = True
+        self._representation = REPRESENTATION_REPROFILED
         self.set_peaks(None, "centroided")
         return tmp
 
@@ -1960,3 +2043,22 @@ class Chromatogram(MsData):
 
         """
         return self.profile
+
+    def integrate(self, peak_type=None, gap_threshold=None):
+        """
+        Return the area under the time/intensity curve using the
+        trapezoidal rule. See
+        :py:meth:`pymzml.chromatogram.Chromatogram.integrate` for the
+        integration conventions.
+        """
+        if peak_type is not None and peak_type != "raw":
+            raise KeyError(
+                "Chromatograms only support the profile ('raw') representation, "
+                "got {0!r}".format(peak_type)
+            )
+        profile = np.asarray(self.profile, dtype=np.float64)
+        if profile.ndim != 2 or len(profile) < 2:
+            return 0.0
+        return self._trapezoid_integral(
+            profile[:, 0], profile[:, 1], gap_threshold
+        )

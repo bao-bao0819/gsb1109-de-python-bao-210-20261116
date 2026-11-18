@@ -250,3 +250,38 @@ Decode a distribute document stream.
    :func: main_argparser
    :prog: hwp5proc
    :path: diststream
+
+frag
+----
+
+Inspect or edit a HWP5 fragment archive.
+
+A fragment archive is a directory of decompressed internal streams plus a
+``manifest.json`` resource map.  Memo annotations are anchored in paragraph
+text by a pair of inline control characters: a ``FIELD_START`` chunk whose
+CHID is ``%%me`` and a ``FIELD_END`` chunk whose CHID is ``\x00%me``.  The
+text between them is document body text and is never changed.
+
+.. argparse::
+   :module: hwp5.hwp5proc
+   :func: main_argparser
+   :prog: hwp5proc
+   :path: frag
+
+Example: list annotations with their paired markers, body text, and resource
+references::
+
+    $ hwp5proc frag list archive/
+    $ hwp5proc frag list archive/ --json
+
+Example: delete one annotation into a new archive copy, leaving body text and
+unrelated fields byte-for-byte unchanged::
+
+    $ hwp5proc frag delete archive/ pruned/ --select=ann-0001
+    $ hwp5proc frag delete archive/ pruned/ --text='review note'
+
+Deletion is conservative.  An annotation is refused when its markers are
+unpaired, when its range has more than one possible pairing with a nested or
+overlapping range, or when the memo body is still referenced elsewhere.  A
+refused annotation does not prevent independent annotations from being
+removed.  ``--dry-run`` prints the same plan without writing anything.

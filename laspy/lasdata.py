@@ -7,7 +7,7 @@ from typing import Any, BinaryIO, Iterable, List, Optional, Sequence, Union, ove
 import numpy as np
 from numpy.typing import NDArray
 
-from . import errors
+from . import errors, pulse
 from .compression import LazBackend
 from .header import LasHeader
 from .laswriter import LasWriter
@@ -208,6 +208,57 @@ class LasData:
 
         """
         self.remove_extra_dims([name])
+
+    def pulse_groups(
+        self,
+        time_precision: Optional[float] = None,
+        *,
+        tolerance: Optional[float] = None,
+        time_tolerance: Optional[float] = None,
+        excluded=None,
+        excluded_points=None,
+        filtered_out=None,
+        identity=None,
+        max_solutions: int = 256,
+        max_steps: int = 200_000,
+    ):
+        """Group the points of this file into emission pulses.
+
+        This is a convenience wrapper around :func:`laspy.group_pulses`.
+        ``point_source_id`` and ``scanner_channel`` are used when the point
+        format provides them, and every point keeps its position in
+        :attr:`PulseGroup.point_indices`.
+
+        Parameters
+        ----------
+        time_precision:
+            Maximum GPS-time difference within one pulse. ``tolerance`` and
+            ``time_tolerance`` are accepted as aliases.
+        excluded:
+            Points known to have been filtered out. They allow missing returns
+            to be reported as :attr:`MissingReason.KNOWN_FILTERED` instead of
+            :attr:`MissingReason.UNKNOWN`.
+        identity:
+            Optional original-occurrence identities, one per point.
+        max_solutions, max_steps:
+            Bounds for exhaustive enumeration of minimum-pulse groupings.
+
+        Returns
+        -------
+        PulseGrouping
+        """
+        return pulse.group_pulses(
+            self,
+            time_precision=time_precision,
+            tolerance=tolerance,
+            time_tolerance=time_tolerance,
+            excluded=excluded,
+            excluded_points=excluded_points,
+            filtered_out=filtered_out,
+            identity=identity,
+            max_solutions=max_solutions,
+            max_steps=max_steps,
+        )
 
     def update_header(self) -> None:
         """Update the information stored in the header

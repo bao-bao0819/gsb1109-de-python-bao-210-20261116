@@ -63,4 +63,5 @@ Submodules
    laspy.lasmmap
    laspy.lasappender
    laspy.laswriter
+   laspy.pulse
 

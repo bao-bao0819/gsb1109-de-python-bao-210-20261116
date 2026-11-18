@@ -1,0 +1,22 @@
+% Baseline period.  Weights are survey weights, not row counts.
+% Strata: region x channel.  Class: outcome.
+% Outbreak, deployed weights, baseline stratum mix.
+
+@RELATION visits_baseline
+
+@ATTRIBUTE region {north, south}
+@ATTRIBUTE channel {web, shop}
+@ATTRIBUTE outcome {converted, not_converted, legacy_pending}
+@ATTRIBUTE survey_weight REAL
+
+@DATA
+north,web,converted,180
+north,web,not_converted,20
+north,shop,converted,40
+north,shop,not_converted,160
+south,web,converted,30
+south,web,not_converted,70
+south,shop,converted,90
+south,shop,not_converted,10
+north,web,legacy_pending,25
+south,shop,legacy_pending,15

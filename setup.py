@@ -56,7 +56,13 @@ setup(
     ],
     keywords='arff weka parser liac python',
     py_modules=['arff'],
+    packages=['arff_compare'],
     package_data={'': ['README.rst', 'CHANGES.rst', 'LICENSE']},
     data_files=[('LICENSE')],
+    entry_points={
+        'console_scripts': [
+            'arff-compare=arff_compare.cli:main',
+        ],
+    },
     test_suite='tests',
 )

@@ -1,0 +1,22 @@
+% Comparison period.  Sampling weights changed: the south/shop stratum grew
+% and the north strata shrank.  One stratum (south/shop) has no baseline peer
+% in the category "promo" below, so it is deliberately absent here.
+
+@RELATION visits_comparison
+
+@ATTRIBUTE region {north, south}
+@ATTRIBUTE channel {web, shop}
+@ATTRIBUTE outcome {converted, not_converted, legacy_pending}
+@ATTRIBUTE survey_weight REAL
+
+@DATA
+north,web,converted,60
+north,web,not_converted,40
+north,shop,converted,80
+north,shop,not_converted,20
+south,web,converted,15
+south,web,not_converted,35
+south,shop,converted,1800
+south,shop,not_converted,200
+north,web,legacy_pending,10
+south,shop,legacy_pending,5

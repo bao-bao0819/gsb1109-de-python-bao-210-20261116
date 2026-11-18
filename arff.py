@@ -420,9 +420,10 @@ class EncodedNominalConversor:
 
 
 class NominalConversor:
-    def __init__(self, values):
+    def __init__(self, values, lenient=False):
         self.values = set(values)
         self.zero_value = values[0]
+        self.lenient = lenient
 
     def __call__(self, value):
         if value not in self.values:
@@ -432,6 +433,8 @@ class NominalConversor:
                 # unspecified in a sparse matrix. Naturally, this is consistent
                 # with EncodedNominalConversor.
                 return self.zero_value
+            if self.lenient:
+                return str(value)
             raise BadNominalValue(value)
         return str(value)
 
@@ -751,7 +754,8 @@ class ArffDecoder:
 
         return (name, type_)
 
-    def _decode(self, s, encode_nominal=False, matrix_type=DENSE):
+    def _decode(self, s, encode_nominal=False, matrix_type=DENSE,
+                lenient_nominal=False):
         '''Do the job the ``encode``.'''
 
         # Make sure this method is idempotent
@@ -816,7 +820,8 @@ class ArffDecoder:
                     if encode_nominal:
                         conversor = EncodedNominalConversor(attr[1])
                     else:
-                        conversor = NominalConversor(attr[1])
+                        conversor = NominalConversor(
+                            attr[1], lenient=lenient_nominal)
                 else:
                     CONVERSOR_MAP = {'STRING': str,
                                      'INTEGER': lambda x: int(float(x)),
@@ -858,7 +863,8 @@ class ArffDecoder:
 
         return obj
 
-    def decode(self, s, encode_nominal=False, return_type=DENSE):
+    def decode(self, s, encode_nominal=False, return_type=DENSE,
+               lenient_nominal=False):
         '''Returns the Python representation of a given ARFF file.
 
         When a file object is passed as an argument, this method reads lines
@@ -872,10 +878,15 @@ class ArffDecoder:
             `arff.DENSE_GEN` or `arff.LOD_GEN`.
             Consult the sections on `working with sparse data`_ and `loading
             progressively`_.
+        :param lenient_nominal: boolean, if True keep nominal values that are
+            absent from the attribute declaration as strings instead of raising
+            :class:`BadNominalValue`. This is useful for auditing data whose
+            labels may use a newer vocabulary than the header.
         '''
         try:
             return self._decode(s, encode_nominal=encode_nominal,
-                                matrix_type=return_type)
+                                matrix_type=return_type,
+                                lenient_nominal=lenient_nominal)
         except ArffException as e:
             e.line = self._current_line
             raise e
@@ -1025,7 +1036,8 @@ class ArffEncoder:
 # =============================================================================
 
 # BASIC INTERFACE =============================================================
-def load(fp, encode_nominal=False, return_type=DENSE):
+def load(fp, encode_nominal=False, return_type=DENSE,
+         lenient_nominal=False):
     '''Load a file-like object containing the ARFF document and convert it into
     a Python object.
 
@@ -1037,13 +1049,18 @@ def load(fp, encode_nominal=False, return_type=DENSE):
         `arff.DENSE_GEN` or `arff.LOD_GEN`.
         Consult the sections on `working with sparse data`_ and `loading
         progressively`_.
+    :param lenient_nominal: boolean, if True keep nominal values that are
+        absent from the attribute declaration as strings instead of raising
+        :class:`BadNominalValue`.
     :return: a dictionary.
      '''
     decoder = ArffDecoder()
     return decoder.decode(fp, encode_nominal=encode_nominal,
-                          return_type=return_type)
+                          return_type=return_type,
+                          lenient_nominal=lenient_nominal)
 
-def loads(s, encode_nominal=False, return_type=DENSE):
+def loads(s, encode_nominal=False, return_type=DENSE,
+          lenient_nominal=False):
     '''Convert a string instance containing the ARFF document into a Python
     object.
 
@@ -1055,11 +1072,15 @@ def loads(s, encode_nominal=False, return_type=DENSE):
         `arff.DENSE_GEN` or `arff.LOD_GEN`.
         Consult the sections on `working with sparse data`_ and `loading
         progressively`_.
+    :param lenient_nominal: boolean, if True keep nominal values that are
+        absent from the attribute declaration as strings instead of raising
+        :class:`BadNominalValue`.
     :return: a dictionary.
     '''
     decoder = ArffDecoder()
     return decoder.decode(s, encode_nominal=encode_nominal,
-                          return_type=return_type)
+                          return_type=return_type,
+                          lenient_nominal=lenient_nominal)
 
 def dump(obj, fp):
     '''Serialize an object representing the ARFF document to a given file-like

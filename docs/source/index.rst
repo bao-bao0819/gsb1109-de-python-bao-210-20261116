@@ -43,7 +43,20 @@ Basic Usage
 .. autofunction:: arff.dumps
 
 
----------------------
+-----------------------------------
+Stratified Class Comparisons
+-------------------------------
+
+.. toctree::
+   :maxdepth: 1
+
+   ../arff_compare
+
+The :mod:`arff_compare` package is a separate helper that compares weighted
+class shares across two ARFF periods by stratum.  See `docs/arff_compare.rst`
+for the command line, report fields, and the meaning of identified bounds.
+
+-----------------
 Encoders and Decoders
 ---------------------
 

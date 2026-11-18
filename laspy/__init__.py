@@ -18,6 +18,16 @@ from .point import DimensionInfo, DimensionKind, ExtraBytesParams, PointFormat
 from .point.dims import supported_point_formats, supported_versions
 from .point.format import lost_dimensions
 from .point.record import PackedPointRecord, ScaleAwarePointRecord
+from .publish import (
+    AmbiguousAppendError,
+    PublicationError,
+    PublicationResult,
+    PublicationVerificationError,
+    VerificationReport,
+    publish_append,
+    recover_publishing,
+    verify_publication,
+)
 from .vlrs import VLR
 from .waveform.mode import WaveformMode
 

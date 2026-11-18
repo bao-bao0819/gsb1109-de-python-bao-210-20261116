@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Crash-safe point-cloud publication for append workloads
+  * `laspy.publish_append` builds the new revision (point records, waveform
+    packets and header statistics from one merged commit) in staging files and
+    promotes it with atomic renames, so the previous revision stays readable
+    after a crash at any point
+  * `laspy.recover_publishing` rolls forward digest-verified staged revisions
+    or discards partial/stale ones, and `laspy.verify_publication` checks the
+    frozen digests, header statistics and waveform references point by point
+  * the caller supplied `append_id` makes retries idempotent; an append whose
+    outcome is unknown is never re-applied blindly (raises
+    `AmbiguousAppendError` until recovery runs)
+
 ## Version 2.7.0 (14/01/2026)
 
 ### Added

@@ -250,3 +250,53 @@ Decode a distribute document stream.
    :func: main_argparser
    :prog: hwp5proc
    :path: diststream
+
+attachments
+-----------
+
+Export the binary attachment inventory declared by a document.
+
+.. argparse::
+   :module: hwp5.hwp5proc
+   :func: main_argparser
+   :prog: hwp5proc
+   :path: attachments
+
+The inventory is built from ``HWPTAG_BIN_DATA`` records in ``DocInfo``.
+Each record yields one entry, so two records are never merged even when they
+point at the same stream or hold identical bytes.  ``storage_identity``
+records the declared identity (stream id and extension, storage id, or the
+external file paths) for every entry.
+
+Every body occurrence is kept in ``references``, including references reached
+through a paragraph shape or a BorderFill fill image; ``definition_references``
+holds DocInfo-level uses such as a BorderFill fill image.  The top-level
+``unresolved_references`` list records body references whose ``bindata-id`` has
+no declaration.  ``storage_references`` lists OLE storage references, which
+point at a storage identity rather than a single attachment.
+
+``link`` entries keep the absolute and relative paths declared by the
+document.  A relative path is resolved against the document directory (or
+``--base-dir``); it is not searched for under ``BinData``.  A link whose
+declared file was not supplied is reported with ``status`` ``pending`` and
+``external.retrieval_required`` ``true``.  It is never satisfied from a
+different attachment with the same base name.
+
+A ``storage`` entry declares only a storage id.  Its stream is matched by
+that identity and a unique extension; an ambiguous match is reported as
+``missing`` instead of picked arbitrarily.
+
+``BinData`` streams that no record declares are listed separately under
+``unreferenced_streams`` so shared content remains visible without becoming a
+declared attachment.  ``shared.storage_with`` and ``shared.content_with``
+report records sharing storage or bytes; ``name_collisions`` reports the same
+name denoting different storage identities.
+
+Example::
+
+    $ hwp5proc attachments samples/sample-5017.hwp
+
+    $ hwp5proc attachments --format table samples/sample-5017.hwp
+    ID   TYPE       STORAGE ID  NAME             STATUS     REFS
+    1    embedding  BIN0002     BIN0002.jpg      available  1
+    2    embedding  BIN0003     BIN0003.png      available  1

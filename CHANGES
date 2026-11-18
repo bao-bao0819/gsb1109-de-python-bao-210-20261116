@@ -4,6 +4,9 @@ CHANGES
 0.1b16 (unreleased)
 -------------------
 
+- hwp5proc: new ``attachments`` subcommand exports an attachment inventory
+  built from ``HWPTAG_BIN_DATA`` records, preserving storage identity,
+  per-occurrence body references, and unresolved external links.
 - [CVE-2023-0286] Depends on cryptography >= 40.0.1
 - [CVE-2022-2309] Depends on lxml >= 4.9,2
 

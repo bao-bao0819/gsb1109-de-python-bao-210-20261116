@@ -2,7 +2,7 @@
 
    $ hwp5proc --help
    usage: hwp5proc [-h] [--loglevel LOGLEVEL] [--logfile LOGFILE]
-                   {version,header,summaryinfo,ls,cat,unpack,records,models,find,xml,rawunz,diststream}
+                   {version,header,summaryinfo,ls,cat,unpack,records,models,find,xml,rawunz,diststream,attachments}
                    ...
    
    Do various operations on HWPv5 files.
@@ -15,7 +15,7 @@
    subcommands:
      valid subcommands
    
-     {version,header,summaryinfo,ls,cat,unpack,records,models,find,xml,rawunz,diststream}
+     {version,header,summaryinfo,ls,cat,unpack,records,models,find,xml,rawunz,diststream,attachments}
        version             Print the file format version of .hwp files.
        header              Print file headers of .hwp files.
        summaryinfo         Print summary informations of .hwp files.
@@ -31,6 +31,7 @@
        xml                 Transform .hwp files into an XML.
        rawunz              Deflate an headerless zlib-compressed stream
        diststream          Decode a distribute document stream.
+       attachments         List binary attachments declared by .hwp files.
 
 hwp5proc 은 여러 하위 명령으로 이루어져 있다.
 
@@ -356,6 +357,35 @@ diststream 명령
    75d6750ad7ad45edc9c1abae2060b8d1c404f6df  Section0
    $ hwp5proc diststream --sha1 < Section0.zraw.aes128ecb  #=> --regex ^8cb2237d0679ca88db6464eac60da96345513964$
    $ hwp5proc diststream --key < Section0.zraw.aes128ecb   #=> --regex ^38004300420032003200330037004400$
+
+attachments 명령
+------------------
+
+   $ hwp5proc attachments --help
+   usage: hwp5proc attachments [-h] [--format {json,table}] [--output <file>]
+                               [--base-dir <directory>] [--no-hash]
+                               <hwp5file>
+   
+   List the binary attachments declared in <hwp5file>. Each HWPTAG_BIN_DATA
+   record becomes one entry; body references are kept per occurrence.
+   
+   positional arguments:
+     <hwp5file>            .hwp file to analyze
+   
+   optional arguments:
+     -h, --help            show this help message and exit
+     --format {json,table}
+                           Output format (default: json).
+     --output <file>       Output filename.
+     --base-dir <directory>
+                           Directory used to resolve document-relative external
+                           links. Defaults to the directory of <hwp5file>.
+     --no-hash             Do not read attachment content to compute SHA-256.
+
+   $ hwp5proc attachments --format table samples/sample-5017.hwp
+   ID   TYPE       STORAGE ID  NAME             STATUS     REFS
+   1    embedding  BIN0002     BIN0002.jpg      available  1
+   2    embedding  BIN0003     BIN0003.png      available  1
 
 records 명령
 ------------

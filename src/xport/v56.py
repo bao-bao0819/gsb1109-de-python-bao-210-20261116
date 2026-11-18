@@ -67,6 +67,24 @@ class Underflow(ArithmeticError):
     """Number too small to express, rounds to zero."""
 
 
+def _sniff_numeric(series):
+    """
+    Check whether an object-dtype column holds only numbers and missings.
+
+    Columns that preserve SAS special missing values (``xport.NaN``
+    members) have object dtype but are numeric for encoding purposes.
+    """
+    saw_number = False
+    for value in series:
+        if value is None or value is pd.NA:
+            continue
+        if isinstance(value, (bool, int, float)):
+            saw_number = True
+            continue
+        return False
+    return saw_number
+
+
 class Namestr:
     """
     Variable metadata from a SAS Version 5 or 6 Transport (XPORT) file.
@@ -139,7 +157,12 @@ class Namestr:
         elif variable.dtype.kind in {'f', 'i'}:
             vtype = xport.VariableType.NUMERIC
         elif variable.dtype.kind == 'O':
-            vtype = xport.VariableType.CHARACTER
+            if _sniff_numeric(variable):
+                # Object dtype, but holds only numbers and missing
+                # values, such as preserved SAS special missings.
+                vtype = xport.VariableType.NUMERIC
+            else:
+                vtype = xport.VariableType.CHARACTER
         elif variable.dtype.kind == 'b':
             # We'll encode Boolean columns as 1 if True else 0.
             vtype = xport.VariableType.NUMERIC
@@ -631,7 +654,20 @@ class Member(xport.Dataset):
         # This awkwardness works around Pandas subclasses misbehaving.
         # ``DataFrame.append`` discards subclass attributes.  Lame.
         head = cls.from_header(header)
-        data = Member(pd.DataFrame.from_records(observations, columns=list(header)))
+        rows = list(observations)
+        columns = {}
+        for j, namestr in enumerate(header.values()):
+            values = [row[j] for row in rows]
+            if namestr.vtype == xport.VariableType.NUMERIC:
+                # Keep special missing values (``.A`` ... ``.Z``, ``._``)
+                # as ``xport.NaN`` members rather than collapsing every
+                # missing category to a plain ``float('nan')``.
+                special = any(isinstance(v, xport.SpecialMissingValue) for v in values)
+                dtype = 'object' if special else 'float'
+            else:
+                dtype = 'object'
+            columns[namestr.name] = xport.Variable(values, dtype=dtype, name=namestr.name)
+        data = Member(columns)
         data.copy_metadata(head)
         LOG.info(f'Decoded XPORT dataset {data.name!r}')
         LOG.debug('%s', data)
@@ -653,6 +689,13 @@ class Member(xport.Dataset):
         dtypes = self.dtypes.to_dict()
         conversions = {}
         for column, dtype in dtypes.items():
+            if dtype.kind == 'O':
+                variable = self[column]
+                numeric = variable.vtype == xport.VariableType.NUMERIC
+                if numeric or _sniff_numeric(variable):
+                    # Numbers with preserved special missing values;
+                    # ``ieee_to_ibm`` encodes each value directly.
+                    continue
             try:
                 conversions[column] = dtype_kind_conversions[dtype.kind]
             except KeyError:
@@ -876,6 +919,9 @@ def ieee_to_ibm(ieee):
     """
     # Python uses IEEE: sign * 1.mantissa * 2 ** (exponent - 1023)
     # IBM mainframe:    sign * 0.mantissa * 16 ** (exponent - 64)
+
+    if ieee is None or ieee is pd.NA:
+        return b'.' + b'\x00' * 7
 
     if ieee == 0.0:
         return b'\x00' * 8

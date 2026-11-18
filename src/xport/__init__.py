@@ -25,6 +25,7 @@ __all__ = [
     'Library',
     'Member',
     'NaN',
+    'missing',
 ]
 
 
@@ -38,6 +39,13 @@ class SpecialMissingValue(float):
     """
 
     pattern = re.compile(b'^(?P<tag>[A-Z_])' + b'\x00' * 7 + b'$')
+
+    @property
+    def representation(self):
+        """
+        SAS text representation of the value, such as ``'.A'`` or ``'._'``.
+        """
+        return f'.{self.name}'
 
     def __bytes__(self):
         """
@@ -282,6 +290,15 @@ class Format(Informat):
 # https://pandas.pydata.org/pandas-docs/stable/development/extending.html
 
 
+def _has_special_missing(data):
+    """
+    Check whether a sequence holds any special missing values.
+    """
+    if isinstance(data, (list, tuple)):
+        return any(isinstance(v, SpecialMissingValue) for v in data)
+    return False
+
+
 class Variable(pd.Series):
     """
     SAS variable.
@@ -335,6 +352,9 @@ class Variable(pd.Series):
         Initialize SAS variable metadata.
         """
         # TODO: Consider validating that the name isn't blank.
+        if dtype is None and _has_special_missing(data):
+            # Pandas would coerce special missing values to plain NaN.
+            dtype = 'object'
         metadata = {
             'label': label,
             'vtype': vtype,
@@ -514,6 +534,11 @@ class Dataset(pd.DataFrame):
         # TODO: Consider validating dataset type: {'DATA', 'VIEW', 'CATALOG'}.
         #       I think only 'DATA' is supported by the XPORT format.
         # TODO: Consider validating that the name isn't blank.
+        if isinstance(data, Mapping):
+            data = {
+                k: pd.Series(list(v), dtype='object') if _has_special_missing(v) else v
+                for k, v in data.items()
+            }
         metadata = {
             'name': name,
             'dataset_label': label,
@@ -862,3 +887,7 @@ class DictReader(Reader):
     def __iter__(self):
         for row in super().__iter__():
             yield row._asdict()
+
+
+# Xport Modules
+from xport import missing  # noqa: E402,F401 module imported but unused

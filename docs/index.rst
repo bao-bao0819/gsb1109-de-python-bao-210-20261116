@@ -94,6 +94,7 @@ What's the aim?
     api_io
     api_exceptions
     api_record
+    api_gvcf
 
 .. toctree::
     :caption: Project Info

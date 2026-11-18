@@ -8,9 +8,88 @@ from sqlalchemy.sql.expression import select, join
 from .gtfs_entities import (Feed, Service, ServiceException, gtfs_required,
                             Translation, Stop, Trip, ShapePoint, _stop_translations,
                             _trip_shapes, gtfs_calendar, gtfs_all)
+from .exceptions import PygtfsException
 from . import feed
 
 logger = logging.getLogger(__name__)
+
+
+def _get_or_create_placeholder_service(session, feed_id, service_id,
+                                       reference_date=None, reason=None):
+    """Return the Service for service_id, creating a placeholder if missing.
+
+    A GTFS feed may omit calendar.txt as long as it ships calendar_dates.txt,
+    and either calendar file may leave a service_id that other tables still
+    reference undeclared. Rather than dropping the referencing rows or leaving
+    a dangling foreign key, we keep the independently verifiable entity (the
+    trip or service exception) and synthesize an inactive, single-day Service
+    placeholder so the relationship stays intact.
+    """
+    service = session.execute(
+        select(Service).where(Service.service_id == service_id).where(
+            Service.feed_id == feed_id)
+    ).one_or_none()
+    if service is not None:
+        return service, False
+
+    if reference_date is None:
+        reference_date = date.today().strftime('%Y%m%d')
+    placeholder = Service(
+        feed_id=feed_id,
+        service_id=service_id,
+        monday='0',
+        tuesday='0',
+        wednesday='0',
+        thursday='0',
+        friday='0',
+        saturday='0',
+        sunday='0',
+        start_date=reference_date,
+        end_date=reference_date)
+    session.add(placeholder)
+    if reason == "calendar_dates.txt":
+        message = (
+            "service_id %r is used by calendar_dates.txt but has no regular "
+            "service in calendar.txt; inserting a placeholder service"
+            % service_id)
+    else:
+        message = (
+            "service_id %r%s is defined in neither calendar.txt nor "
+            "calendar_dates.txt; inserting a placeholder service"
+            % (service_id, " referenced by %s" % reason if reason else ""))
+    logger.warning(message)
+    return placeholder, True
+
+
+def _reconcile_trip_services(session, feed_id):
+    """Ensure every trip resolves to a persisted Service.
+
+    A missing calendar.txt is legal whenever calendar_dates.txt is present,
+    but a trip whose service_id appears in neither calendar file would
+    otherwise keep a null service relationship. Such trips are independently
+    verifiable entities, so instead of dropping them we back the referenced
+    service with a placeholder and surface the data gap via a warning.
+    """
+    if not session.query(Trip.feed_id).filter(Trip.feed_id == feed_id).first():
+        return
+
+    declared_service_ids = set(
+        session.execute(
+            select(Service.service_id).where(Service.feed_id == feed_id)
+        ).scalars()
+    )
+    referenced_service_ids = set(
+        session.execute(
+            select(Trip.service_id)
+            .where(Trip.feed_id == feed_id)
+            .where(Trip.service_id.isnot(None))
+            .distinct()
+        ).scalars()
+    )
+
+    for service_id in sorted(referenced_service_ids - declared_service_ids):
+        _get_or_create_placeholder_service(
+            session, feed_id, service_id, reason="trips.txt")
 
 
 def list_feeds(schedule):
@@ -99,25 +178,13 @@ def append_feed(schedule, feed_filename, strip_fields=True,
             schedule.session.add(instance)
 
             if isinstance(instance, ServiceException):
-                service = schedule.session.execute(
-                    select(Service).where(Service.service_id == instance.service_id).where(Service.feed_id == feed_id)
-                ).one_or_none()
-                if service is None:
-                    # ServiceException was added for a day that has no associated regular service
-                    # Create a dummy service object for this service exception
-                    dummy = Service(
-                        feed_id=feed_id,
-                        service_id=instance.service_id,
-                        monday='0',
-                        tuesday='0',
-                        wednesday='0',
-                        thursday='0',
-                        friday='0',
-                        saturday='0',
-                        sunday='0',
-                        start_date=instance.date.strftime('%Y%m%d'),
-                        end_date=instance.date.strftime('%Y%m%d'))
-                    schedule.session.add(dummy)
+                # ServiceException was added for a day that has no associated
+                # regular service. Create a placeholder service so the
+                # exception keeps a valid relationship instead of dangling.
+                _get_or_create_placeholder_service(
+                    schedule.session, feed_id, instance.service_id,
+                    reference_date=instance.date.strftime('%Y%m%d'),
+                    reason="calendar_dates.txt")
 
             if i % chunk_size == 0 and i > 0:
                 schedule.session.flush()
@@ -128,6 +195,7 @@ def append_feed(schedule, feed_filename, strip_fields=True,
         logger.info('%d record%s read for %s.' % ((i+1), '' if i == 0 else 's',
                                             gtfs_class))
     schedule.session.flush()
+    _reconcile_trip_services(schedule.session, feed_id)
     schedule.session.commit()
     # load many to many relationships
     if Translation in gtfs_tables:

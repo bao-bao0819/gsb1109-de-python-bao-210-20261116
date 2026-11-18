@@ -2,6 +2,7 @@
 
 import datetime
 import os.path
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,9 +10,29 @@ from zipfile import ZipFile
 
 from pygtfs import overwrite_feed
 from pygtfs import Schedule
+from pygtfs.exceptions import PygtfsException
 from pygtfs.feed import Feed, derive_feed_name
 
 from sqlalchemy.orm import Query
+
+SAMPLE_FEED = os.path.join(os.path.dirname(__file__), "data", "sample_feed")
+
+
+def copy_sample_feed(test_case):
+    """Copy the sample feed into a temp directory and clean up afterwards."""
+    temp_dir = tempfile.mkdtemp()
+    test_case.addCleanup(shutil.rmtree, temp_dir)
+    return shutil.copytree(
+        SAMPLE_FEED, os.path.join(temp_dir, "sample_feed"))
+
+
+def remove_table(feed_dir, filename):
+    os.remove(os.path.join(feed_dir, filename))
+
+
+def write_table(feed_dir, filename, content):
+    with open(os.path.join(feed_dir, filename), "w") as table:
+        table.write(content)
 
 
 class TestSchedule(unittest.TestCase):
@@ -169,6 +190,94 @@ class TestPathInputs(unittest.TestCase):
 
         self.assertEqual(feed.feed_name, "sample_feed")
         self.assertEqual(next(agency_rows)[0], "agency_id")
+
+
+class TestServiceIntegrity(unittest.TestCase):
+    """A missing optional calendar table must not reject a feed, but a trip
+    must never keep a dangling service relationship."""
+
+    def _load(self, feed_dir):
+        schedule = Schedule(":memory:")
+        overwrite_feed(schedule, feed_dir)
+        return schedule
+
+    def test_calendar_dates_only_feed_loads(self):
+        # calendar.txt is optional when calendar_dates.txt is present.
+        feed_dir = copy_sample_feed(self)
+        remove_table(feed_dir, "calendar.txt")
+        write_table(feed_dir, "calendar_dates.txt",
+                    "service_id,date,exception_type\n"
+                    "FULLW,20070604,2\n"
+                    "WE,20070604,1\n")
+
+        schedule = self._load(feed_dir)
+
+        self.assertEqual(sorted(s.service_id for s in schedule.services),
+                         ["FULLW", "WE"])
+        self.assertTrue(all(trip.service is not None
+                            for trip in schedule.trips))
+
+    def test_dates_only_partial_service_coverage(self):
+        # No calendar.txt and calendar_dates.txt omits a service that trips
+        # still reference: keep the trips, back the gap with a placeholder.
+        feed_dir = copy_sample_feed(self)
+        remove_table(feed_dir, "calendar.txt")
+        write_table(feed_dir, "calendar_dates.txt",
+                    "service_id,date,exception_type\n"
+                    "FULLW,20070604,2\n")
+
+        schedule = self._load(feed_dir)
+
+        self.assertEqual(sorted(s.service_id for s in schedule.services),
+                         ["FULLW", "WE"])
+        self.assertEqual([trip for trip in schedule.trips
+                          if trip.service is None], [])
+        we_service = schedule.services_by_id("WE")[0]
+        self.assertFalse(any((we_service.monday, we_service.tuesday,
+                              we_service.wednesday, we_service.thursday,
+                              we_service.friday, we_service.saturday,
+                              we_service.sunday)))
+
+    def test_trip_referencing_undeclared_service(self):
+        feed_dir = copy_sample_feed(self)
+        trips_path = os.path.join(feed_dir, "trips.txt")
+        with open(trips_path) as trips:
+            content = trips.read()
+        with open(trips_path, "w") as trips:
+            trips.write(content.rstrip("\n") +
+                        "\nAB,GHOST,GHOSTTRIP,to Nowhere,0,,\n")
+
+        schedule = self._load(feed_dir)
+
+        ghost_trip = next(trip for trip in schedule.trips
+                          if trip.trip_id == "GHOSTTRIP")
+        self.assertIsNotNone(ghost_trip.service)
+        self.assertEqual(ghost_trip.service.service_id, "GHOST")
+        self.assertIn("GHOST",
+                      [service.service_id for service in schedule.services])
+
+    def test_missing_both_calendar_tables_rejected(self):
+        feed_dir = copy_sample_feed(self)
+        remove_table(feed_dir, "calendar.txt")
+        remove_table(feed_dir, "calendar_dates.txt")
+
+        with self.assertRaises(PygtfsException):
+            self._load(feed_dir)
+
+    def test_missing_required_table_rejected(self):
+        feed_dir = copy_sample_feed(self)
+        remove_table(feed_dir, "routes.txt")
+
+        with self.assertRaises(IOError):
+            self._load(feed_dir)
+
+    def test_other_optional_table_missing_does_not_reject_feed(self):
+        feed_dir = copy_sample_feed(self)
+        remove_table(feed_dir, "shapes.txt")
+
+        schedule = self._load(feed_dir)
+        self.assertEqual(len(schedule.trips), 11)
+        self.assertEqual(schedule.shapes, [])
 
 
 if __name__ == '__main__':

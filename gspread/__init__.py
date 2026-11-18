@@ -22,6 +22,17 @@ from .exceptions import (
     WorksheetNotFound,
 )
 from .http_client import BackOffHTTPClient, HTTPClient
+from .importing import (
+    BatchImporter,
+    ImportConflictError,
+    ImportJournal,
+    ImportReport,
+    ImportStateError,
+    ImportStatus,
+    ImportTimeout,
+    RowImportResult,
+    import_rows,
+)
 from .spreadsheet import Spreadsheet
 from .worksheet import ValueRange, Worksheet
 
@@ -46,6 +57,17 @@ __all__ = [
     # from .http_client
     "BackOffHTTPClient",
     "HTTPClient",
+
+    # from .importing
+    "BatchImporter",
+    "ImportConflictError",
+    "ImportJournal",
+    "ImportReport",
+    "ImportStateError",
+    "ImportStatus",
+    "ImportTimeout",
+    "RowImportResult",
+    "import_rows",
 
     # from .spreadsheet
     "Spreadsheet",

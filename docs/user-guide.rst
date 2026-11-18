@@ -402,9 +402,113 @@ a value the encoder cannot handle and returns a JSON-serializable substitute.
    matches how you want the cell interpreted.
 
 
+Idempotent Batch Imports
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+``append_row`` and ``append_rows`` are not idempotent: if an append request
+times out, the server may have written all rows, some rows, or none. Sending
+the whole batch again can duplicate rows, while treating the timeout as a
+failure can silently lose rows.
+
+:class:`~gspread.importing.BatchImporter` records a business identity and a
+manifest before writing, adds an ownership receipt to every row, and reads the
+sheet back to decide what happened.
+
+.. code:: python
+
+   from gspread.importing import BatchImporter
+
+   importer = BatchImporter(
+       worksheet,
+       rows=[
+           ["ORDER-1001", "2026-11-19", "paid"],
+           ["ORDER-1002", "2026-11-19", "pending"],
+       ],
+       batch_id="orders-2026-11-19",     # stable business identity
+       key_columns=0,                    # ORDER id
+       receipt_column="import_receipt",  # optional; appended if omitted
+       state_path="import-journal.json", # survives process restarts
+   )
+
+   report = importer.run()
+   report.statuses
+   # {0: "confirmed", 1: "confirmed"}
+
+Each row is reconciled into exactly one of three states:
+
+``confirmed``
+   The row's unique receipt token is present in the sheet and its business
+   values still match. This row is never appended again.
+
+``unconfirmed``
+   Neither the receipt nor an unowned copy of the business row was found. If
+   ``retryable`` is true, only these rows are appended on the next attempt.
+
+``conflict``
+   A receipt is duplicated or points at changed values, or the business row
+   already exists without this batch's receipt. Conflicts are never appended.
+
+The receipt token is what proves ownership. If somebody else inserts a row
+with the same business values, that row has no receipt from this batch and is
+reported as a conflict; it is not mistaken for our successful write:
+
+.. code:: python
+
+   report = importer.run()
+   for row in report.conflicts:
+       print(row.index, row.conflicting_row_number, row.reason)
+
+After a timeout, inspect the report before doing anything else:
+
+.. code:: python
+
+   report = importer.run()
+
+   if report.complete:
+       print("all rows confirmed")
+   elif report.needs_retry:
+       print("only these indexes will be appended:", [
+           row.index for row in report.unconfirmed if row.retryable
+       ])
+       report = importer.retry(max_attempts=2)
+   else:
+       print("needs manual review:", report.conflicts)
+
+To fail loudly instead of returning a report:
+
+.. code:: python
+
+   from gspread.importing import ImportConflictError, ImportTimeout
+
+   try:
+       report = importer.run(raise_on_conflict=True, raise_on_timeout=True)
+   except ImportConflictError as error:
+       report = error.report
+   except ImportTimeout as error:
+       report = error.report
+
+Reusing the same ``batch_id`` with different rows is rejected with
+:class:`~gspread.importing.ImportStateError`. Tokens are also persisted in the
+sheet, so a retry can reconcile even if the local journal is unavailable, as
+long as the same ``batch_id`` and rows are supplied.
+
+.. note::
+
+   The receipt column becomes part of the sheet. Choose a header that does not
+   collide with business data, or pass a one-based column number. When using
+   ``table_range``, the importer applies the same column offset when reading
+   the sheet back.
+
+.. warning::
+
+   :class:`~gspread.http_client.BackOffHTTPClient` automatically retries
+   ``408`` and ``5xx`` responses. ``BatchImporter`` suppresses that automatic
+   retry for its own append and reconciles first. If you call ``append_rows``
+   directly, be aware that a timeout may already have been written.
+
+
 Adding Data Validation
 ~~~~~~~~~~~~~~~~~~~~~~
-
 You can add a strict validation to a cell.
 
 .. code:: python

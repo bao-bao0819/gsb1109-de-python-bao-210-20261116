@@ -8,6 +8,7 @@ API Reference
    auth
    client
    http_client
+   importing
    models/index
    utils
    exceptions

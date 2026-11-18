@@ -167,3 +167,25 @@ class BackOffHTTPClientTest(TestCase):
 
         # Same bound as the other retryable errors: initial call plus 7 retries.
         self.assertEqual(session.request.call_count, 8)
+
+    def test_suppressed_retry_sends_non_idempotent_request_once(self):
+        session = Mock()
+        session.request.return_value = self._error_response(504)
+        client = BackOffHTTPClient(auth=None, session=session)
+
+        with patch("gspread.http_client.time.sleep") as sleep:
+            with self.assertRaises(APIError):
+                with client.suppress_automatic_retry():
+                    client.request("post", "http://example.com/append")
+
+        # A timed-out append may already have been written.  It must be handed
+        # back to the caller for reconciliation rather than re-POSTed blindly.
+        self.assertEqual(session.request.call_count, 1)
+        sleep.assert_not_called()
+
+        # The suppression is scoped, so normal retry behavior returns.
+        session.request.reset_mock()
+        session.request.side_effect = [self._error_response(500), Mock(ok=True)]
+        with patch("gspread.http_client.time.sleep"):
+            client.request("get", "http://example.com/retryable")
+        self.assertEqual(session.request.call_count, 2)

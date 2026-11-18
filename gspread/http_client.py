@@ -7,6 +7,8 @@ Google API.
 
 """
 
+import contextlib
+import threading
 import time
 from http import HTTPStatus
 from json import dumps as json_dumps
@@ -569,7 +571,31 @@ class BackOffHTTPClient(HTTPClient):
     _NR_BACKOFF: int = 0
     _MAX_BACKOFF: int = 128  # arbitrary maximum backoff
 
+    def __init__(self, auth: Credentials, session: Optional[Session] = None) -> None:
+        super().__init__(auth, session)
+        self._retry_disabled = threading.local()
+
+    @contextlib.contextmanager
+    def suppress_automatic_retry(self) -> Any:
+        """Disable automatic retries for requests made in this context.
+
+        Matching a retryable error code with a blind re-POST is unsafe for
+        non-idempotent calls such as ``values.append``: the first request may
+        have reached the server.  Callers that can reconcile the result, like
+        :class:`gspread.importing.BatchImporter`, use this to receive the
+        error and verify the sheet before deciding whether to send again.
+        """
+        previous = getattr(self._retry_disabled, "value", False)
+        self._retry_disabled.value = True
+        try:
+            yield
+        finally:
+            self._retry_disabled.value = previous
+
     def request(self, *args: Any, **kwargs: Any) -> Response:
+        if getattr(self._retry_disabled, "value", False):
+            return super().request(*args, **kwargs)
+
         # Check if we should retry the request
         def _should_retry(
             code: int,

@@ -6,6 +6,15 @@ CHANGES
 
 - [CVE-2023-0286] Depends on cryptography >= 40.0.1
 - [CVE-2022-2309] Depends on lxml >= 4.9,2
+- New ``hwp5proc frag`` subcommand and ``hwp5.frag`` module: extract
+  selected paragraphs (with their tables and nested objects) into a
+  self-contained fragment package.  The package carries only the fonts,
+  styles, numberings and embedded objects the selected paragraphs actually
+  depend on (shared resources are collected only once), with every
+  resource reference renumbered and the correspondence to the original
+  resources recorded in ``manifest.json``.  Packages which may reference
+  uncollected resources through unknown controls or records are marked as
+  incomplete.
 
 
 0.1b15 (2020-05-30)

@@ -116,6 +116,34 @@ Example::
     $ hwp5proc unpack --vstreams samples/sample-5017.hwp
     $ cat sample-5017/PrvText.utf8
 
+frag
+----
+
+Extract selected paragraphs into a self-contained fragment package.
+
+.. argparse::
+   :module: hwp5.hwp5proc
+   :func: main_argparser
+   :prog: hwp5proc
+   :path: frag
+
+The fragment package is a directory with the same layout as the output of
+``hwp5proc unpack``: it contains a ``FileHeader``, a rebuilt ``DocInfo``
+with only the fonts, styles, numberings and other resources the selected
+paragraphs actually depend on, a ``BodyText/Section<N>`` stream with only
+the selected paragraph trees (including their tables and other nested
+objects), and only the ``BinData`` streams they reference.  Shared
+resources are collected only once.  Every resource reference is renumbered
+and the correspondence to the original resources is recorded in
+``manifest.json``.  If unknown controls or records may reference
+uncollected resources, the package is marked as incomplete in the manifest
+instead of being claimed self-sufficient.
+
+Example::
+
+    $ hwp5proc frag samples/sample-5017.hwp -p 0,1,2
+    $ cat sample-5017.frag/manifest.json
+
 records
 -------
 

@@ -101,6 +101,7 @@ def main_argparser():
     from .proc.xml import xml_argparser
     from .proc.rawunz import rawunz_argparser
     from .proc.diststream import diststream_argparser
+    from .proc.frag import frag_argparser
     parser = ArgumentParser(
         prog='hwp5proc',
         description=_('Do various operations on HWPv5 files.'),
@@ -129,4 +130,5 @@ def main_argparser():
     xml_argparser(subcommands, _)
     rawunz_argparser(subcommands, _)
     diststream_argparser(subcommands, _)
+    frag_argparser(subcommands, _)
     return parser

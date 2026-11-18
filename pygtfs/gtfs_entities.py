@@ -113,6 +113,22 @@ class Feed(Base):
     feedinfo = relationship("FeedInfo", backref=("feed"), cascade="all, delete-orphan")
     translations = relationship("Translation", backref=("feed"), cascade="all, delete-orphan")
 
+    # Feed-level lineage: a publication can declare one predecessor publication.
+    # Rows are kept when a new publication is appended, so old data stays
+    # reviewable. See :class:`FeedLineage`.
+    predecessor_links = relationship(
+        "FeedLineage", foreign_keys="FeedLineage.feed_id",
+        back_populates="successor_feed", cascade="all, delete-orphan")
+    successor_links = relationship(
+        "FeedLineage", foreign_keys="FeedLineage.predecessor_feed_id",
+        back_populates="predecessor_feed", cascade="all, delete-orphan")
+
+    # Source-scoped identities registered for this feed's entities. Cascade
+    # keeps identity bookkeeping consistent when a feed is dropped.
+    identities = relationship(
+        "EntityIdentity", back_populates="feed",
+        cascade="all, delete-orphan")
+
     def __repr__(self):
         return '<Feed %s: %s>' % (self.feed_id, self.feed_name)
 
@@ -532,6 +548,138 @@ class FeedInfo(Base):
         return "<FeedInfo %s>" % self.feed_publisher_name
 
 
+# Entity types that get a source-scoped identity are listed in
+# ``identity_entity_map`` at the bottom of this module. Identifiers of these
+# GTFS entities are only unique inside one feed, so two agencies may
+# legitimately publish, for example, a route with ``route_id == "1"``.
+
+
+class EntityIdentity(Base):
+    """Source-scoped identity of a GTFS entity.
+
+    One row is registered for every identified entity found in an imported
+    feed. The natural key is always ``(feed_id, entity_type, source_id)``,
+    which keeps entities from different feeds apart even when their GTFS
+    identifiers collide. Rows are never merged or overwritten based on a
+    matching identifier alone; cross-source equivalence is recorded
+    explicitly through :class:`EntityAlias`.
+
+    ``identity_key`` is a group label for one real-world entity: every
+    identity joined together through aliases shares the same key, while each
+    feed keeps its own identity row. A freshly registered identity starts with
+    ``identity_key == identity_id``.
+    """
+
+    __tablename__ = '_entity_identity'
+    _plural_name_ = 'entity_identities'
+
+    identity_id = Column(Integer, primary_key=True)
+    feed_id = Column(Integer, ForeignKey('_feed.feed_id'), nullable=False,
+                     index=True)
+    entity_type = Column(Unicode, nullable=False, index=True)
+    source_id = Column(Unicode, nullable=False, index=True)
+    identity_key = Column(Integer, nullable=False, index=True)
+
+    feed = relationship("Feed", back_populates="identities")
+    aliases_as_a = relationship(
+        "EntityAlias", foreign_keys="EntityAlias.identity_a",
+        back_populates="identity_a_row", cascade="all, delete-orphan")
+    aliases_as_b = relationship(
+        "EntityAlias", foreign_keys="EntityAlias.identity_b",
+        back_populates="identity_b_row", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        Index('uq_entity_identity_natural_key', feed_id, entity_type,
+              source_id, unique=True),
+    )
+
+    def __repr__(self):
+        return '<EntityIdentity %s/%s@%s key=%s>' % (
+            self.entity_type, self.source_id, self.feed_id,
+            self.identity_key)
+
+
+class EntityAlias(Base):
+    """An explicit, user-supplied equivalence between two source identities.
+
+    Unlike an accidental identifier collision, an alias row states that two
+    ``(feed, entity_type, source_id)`` identities refer to the same
+    real-world entity. Aliasing is the *only* mechanism through which
+    identities from different feeds end up sharing an ``identity_key``;
+    nothing is ever inferred from identical ``source_id`` values, matching
+    names, or shared stop coordinates. Both endpoints must already be
+    registered as :class:`EntityIdentity` rows and must have the same
+    ``entity_type``.
+    """
+
+    __tablename__ = '_entity_alias'
+    _plural_name_ = 'entity_aliases'
+
+    alias_id = Column(Integer, primary_key=True)
+    entity_type = Column(Unicode, nullable=False, index=True)
+    identity_a = Column(Integer, ForeignKey('_entity_identity.identity_id'),
+                        nullable=False, index=True)
+    identity_b = Column(Integer, ForeignKey('_entity_identity.identity_id'),
+                        nullable=False, index=True)
+
+    identity_a_row = relationship(
+        "EntityIdentity", foreign_keys=[identity_a],
+        back_populates="aliases_as_a")
+    identity_b_row = relationship(
+        "EntityIdentity", foreign_keys=[identity_b],
+        back_populates="aliases_as_b")
+
+    __table_args__ = (
+        Index('uq_entity_alias_pair', entity_type, identity_a, identity_b,
+              unique=True),
+        Index('uq_entity_alias_pair_reversed', entity_type, identity_b,
+              identity_a, unique=True),
+    )
+
+    def __repr__(self):
+        return '<EntityAlias %s: %s <-> %s>' % (self.entity_type,
+                                                self.identity_a,
+                                                self.identity_b)
+
+
+class FeedLineage(Base):
+    """A continuation link between two publications of the same feed.
+
+    A row states that ``feed_id`` (the newer publication) continues
+    ``predecessor_feed_id`` (an older publication of the same upstream feed).
+    Lineage is stored separately from entity identity on purpose: it records
+    publication history without merging the two feeds' entities and without
+    deleting the older publication, whose detail rows remain fully queryable.
+    Lineage is never inferred; it is supplied explicitly at import time.
+    """
+
+    __tablename__ = '_feed_lineage'
+    _plural_name_ = 'feed_lineages'
+
+    lineage_id = Column(Integer, primary_key=True)
+    feed_id = Column(Integer, ForeignKey('_feed.feed_id'), nullable=False,
+                     unique=True, index=True)
+    predecessor_feed_id = Column(Integer, ForeignKey('_feed.feed_id'),
+                                 nullable=False, index=True)
+    note = Column(Unicode, nullable=True)
+
+    predecessor_feed = relationship(
+        "Feed", foreign_keys=[predecessor_feed_id],
+        back_populates="successor_links")
+    successor_feed = relationship(
+        "Feed", foreign_keys=[feed_id],
+        back_populates="predecessor_links")
+
+    __table_args__ = (
+        Index('uq_feed_lineage_pair', feed_id, predecessor_feed_id,
+              unique=True),
+    )
+
+    def __repr__(self):
+        return '<FeedLineage %s continues %s>' % (self.feed_id,
+                                                  self.predecessor_feed_id)
+
+
 # Many-to-many secondary tables. Make sure to also load them properly in
 # loader.py
 _stop_translations = Table(
@@ -566,3 +714,19 @@ gtfs_calendar = {Service, ServiceException}
 gtfs_all = [Agency, Stop, Transfer, Route, Fare, FareRule, ShapePoint,
             Service, ServiceException, Trip, Frequency, StopTime, FeedInfo,
             Translation]
+
+# Bookkeeping tables that live alongside the GTFS entities: source-scoped
+# identities, explicit cross-feed aliases, and feed publication lineage.
+identity_tables = [EntityIdentity, EntityAlias, FeedLineage]
+
+# GTFS entity classes that carry a feed-unique identifier and therefore get a
+# source-scoped identity row on import, mapped to their identity type name.
+identity_entity_map = {
+    'agency': Agency,
+    'stop': Stop,
+    'route': Route,
+    'trip': Trip,
+    'service': Service,
+    'fare': Fare,
+    'shape': ShapePoint,
+}

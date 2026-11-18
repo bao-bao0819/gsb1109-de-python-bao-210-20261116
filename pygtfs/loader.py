@@ -9,6 +9,8 @@ from .gtfs_entities import (Feed, Service, ServiceException, gtfs_required,
                             Translation, Stop, Trip, ShapePoint, _stop_translations,
                             _trip_shapes, gtfs_calendar, gtfs_all)
 from . import feed
+from . import identity
+from .exceptions import PygtfsException
 
 logger = logging.getLogger(__name__)
 
@@ -44,9 +46,23 @@ def overwrite_feed(schedule, feed_filename, *args, **kwargs):
     delete_feed(schedule, feed_filename, interactive=interactive)
     append_feed(schedule, feed_filename, *args, **kwargs)
 
-
 def append_feed(schedule, feed_filename, strip_fields=True,
-                chunk_size=5000, agency_id_override=None, ignore_files=()):
+                chunk_size=5000, agency_id_override=None, ignore_files=(),
+                predecessor_feed_id=None, lineage_note=None):
+    """Append one GTFS feed publication to the database.
+
+    After the GTFS entities are loaded, a source-scoped
+    :class:`~pygtfs.gtfs_entities.EntityIdentity` is registered for every
+    identified entity, so identical ids in feeds from different agencies stay
+    distinct.
+
+    :param predecessor_feed_id: when this publication continues an earlier
+        publication of the same upstream feed, pass the earlier
+        :attr:`Feed.feed_id` here. The continuation is recorded in
+        :class:`~pygtfs.gtfs_entities.FeedLineage` without merging or deleting
+        the predecessor.
+    :param lineage_note: optional free-text note stored with the lineage link.
+    """
 
     fd = feed.Feed(feed_filename, strip_fields)
 
@@ -162,6 +178,20 @@ def append_feed(schedule, feed_filename, strip_fields=True,
         upd = _trip_shapes.insert().from_select(
                 ['trip_feed_id', 'shape_feed_id', 'trip_id', 'shape_id', 'shape_pt_sequence'], q)
         schedule.session.execute(upd)
+    schedule.session.commit()
+
+    # Give every imported entity a source-scoped identity. The natural key
+    # includes feed_id, so a route_id reused by another agency never collides.
+    new_identities = identity.register_feed_identities(
+        schedule.session, feed_id)
+    logger.info('Registered %d source-scoped identities for feed %s',
+                len(new_identities), feed_id)
+
+    # Lineage is an explicit, separately stored continuation link; it neither
+    # merges entities nor removes the older publication.
+    if predecessor_feed_id is not None:
+        identity.record_lineage(schedule.session, feed_id,
+                                predecessor_feed_id, note=lineage_note)
     schedule.session.commit()
 
     print('Complete.')

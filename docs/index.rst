@@ -63,6 +63,36 @@ GTFS entities which cross-reference each other can also be obtained straightforw
     >>> sched.trips_by_id('01SFO10').service  # the service associated with trip 01SFO10
     <Service WKDY (MTWThFSSu)>
 
+Multi-feed identity, aliases, and lineage
+-----------------------------------------
+
+A GTFS id is only unique inside one feed, so two agencies can both publish,
+for example, ``route_id = "1"``. On import, every entity receives a
+source-scoped identity keyed by ``(feed_id, entity_type, source_id)``, so such
+collisions never mix detail rows across feeds::
+
+    >>> from pygtfs import get_identity
+    >>> alpha = get_identity(sched.session, feed_id=1, entity_type="route", source_id="1")
+    >>> beta  = get_identity(sched.session, feed_id=2, entity_type="route", source_id="1")
+    >>> alpha.identity_key == beta.identity_key
+    False
+
+Equivalence across feeds is only established through an explicit alias; a
+shared stop or an identical id never causes an automatic merge::
+
+    >>> from pygtfs import add_alias
+    >>> shared_key = add_alias(sched.session, "route", 1, "1", 2, "1")
+
+Different publications of the same feed are linked, not merged. Passing a
+predecessor records lineage while keeping the older publication reviewable::
+
+    >>> append_feed(sched, "feed_v2.zip", predecessor_feed_id=1)
+    >>> from pygtfs import lineage_chain
+    >>> lineage_chain(sched.session, feed_id=2)
+    [2, 1]
+
+See :py:mod:`pygtfs.identity` for the full API.
+
 gtfs2db
 -------
 
@@ -81,6 +111,7 @@ Contents:
 
    schedule
    loader
+   identity
    gtfs_entities
    gtfs2db
    internal

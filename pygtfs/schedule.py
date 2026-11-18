@@ -1,7 +1,7 @@
 import sqlalchemy
 import sqlalchemy.orm
 
-from .gtfs_entities import gtfs_all, Feed, Base
+from .gtfs_entities import gtfs_all, identity_tables, Feed, Base
 
 
 class Schedule:
@@ -75,7 +75,7 @@ def _meta_query_raw(entity, docstring=None):
     return property(_query_raw)
 
 
-for entity in (gtfs_all + [Feed]):
+for entity in (gtfs_all + identity_tables + [Feed]):
     entity_doc = "A list of :py:class:`pygtfs.gtfs_entities.{0}` objects".format(entity.__name__)
     entity_raw_doc = ("A :py:class:`sqlalchemy.orm.Query` object to fetch "
                       ":py:class:`pygtfs.gtfs_entities.{0}` objects"

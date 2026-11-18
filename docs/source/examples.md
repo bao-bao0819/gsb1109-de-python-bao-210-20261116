@@ -105,3 +105,26 @@ edf = read_edf("example.edf")
 edf.anonymize()
 edf.write("example_anonymized.edf")
 ```
+
+## Match same-label leads across sessions
+When two sessions contain several leads with the same label and the device
+changed their physical channel order, match them by metadata instead of by
+position:
+
+```python
+from edfio import match_leads
+
+first = read_edf("session-1.edf")
+second = read_edf("session-2.edf")
+
+result = match_leads(first, second)
+result.pairs          # only correspondences forced by metadata/anchors
+result.interchangeable  # leads that can still be permuted
+
+# Confirmed anchors are hard evidence: they fix the named pairs and leave
+# every other label's candidates untouched.
+result = match_leads(first, second, anchors=[(("EEG Fpz-Cz", 0), 3)])
+```
+
+Matching only compares header metadata; signal data, labels, and channel order
+are never modified.

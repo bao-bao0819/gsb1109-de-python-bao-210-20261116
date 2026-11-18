@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- Add `match_leads` for cross-session matching of same-label leads using signal metadata and confirmed anchors, reporting forced pairs and the remaining interchangeable groups without modifying signal data.
+
 ## [0.4.18] - 2026-10-01
 
 ### Fixed

@@ -17,3 +17,11 @@ API reference
    Patient
    Recording
    AnonymizedDateError
+   match_leads
+   LeadMatching
+   LeadMatcher
+   LeadPair
+   LeadRef
+   LeadMetadata
+   InterchangeableGroup
+   LeadMatchingError

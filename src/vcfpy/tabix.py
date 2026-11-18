@@ -100,6 +100,110 @@ def reg2bins(beg: int, end: int) -> list[int]:
     return list(reversed(bins))
 
 
+def _parse_info_field(info: str, key: str) -> str | None:
+    """Return the raw string value of an INFO ``key`` entry, or ``None``."""
+    for entry in info.split(";"):
+        if "=" not in entry:
+            continue
+        entry_key, value = entry.split("=", 1)
+        if entry_key == key:
+            return value
+    return None
+
+
+def _parse_ci_offsets(info: str, key: str) -> tuple[int, int] | None:
+    """Parse a CIPOS/CIEND-style ``"left,right"`` INFO value."""
+    raw = _parse_info_field(info, key)
+    if raw is None:
+        return None
+    parts = raw.split(",")
+    if len(parts) != 2:
+        return None
+    try:
+        return int(parts[0]), int(parts[1])
+    except ValueError:
+        return None
+
+
+def parse_record_span(line: str) -> tuple[int, int, int | None, int | None, bool]:
+    """Parse the positional span of a VCF record line.
+
+    :return: tuple ``(begin, end, ci_begin, ci_end, is_breakend)`` with 1-based
+        inclusive coordinates; ``ci_begin``/``ci_end`` are ``None`` when the
+        corresponding confidence interval is absent.  Structural variants use
+        the ``END`` INFO field instead of the REF length, insertions collapse
+        to their insertion point, and breakends have no span on this contig.
+        When a symbolic variant lacks ``END`` (unknown length) only the anchor
+        base is definite and, if present, ``CIPOS`` is applied to both sides;
+        an actually unbounded extent cannot be represented by the finite tabix
+        intervals and is modeled by :py:class:`vcfpy.RecordInterval` instead.
+    """
+    fields = line.split("\t")
+    pos = int(fields[1])
+    ref = fields[3]
+    alt = fields[4]
+    info = fields[7] if len(fields) > 7 else "."
+
+    alt_alleles = [] if alt in (".", "") else alt.split(",")
+    is_breakend = any(("[" in a or "]" in a or a.startswith(".") or a.endswith(".")) for a in alt_alleles)
+    symbolic_ins = any(a == "<INS>" or a.startswith("<INS:") for a in alt_alleles)
+    substitution_insertions = [
+        a for a in alt_alleles if not a.startswith("<") and not ("[" in a or "]" in a) and len(a) > len(ref)
+    ]
+    only_insertions = bool(alt_alleles) and len(substitution_insertions) == len(alt_alleles)
+    is_insertion = symbolic_ins or only_insertions
+
+    end_raw = _parse_info_field(info, "END")
+    end = int(end_raw) if end_raw is not None else None
+
+    if is_breakend:
+        # Only the local breakpoint is anchored; there is no spanning interval.
+        begin, definite_end = pos, pos
+    elif is_insertion:
+        # Insertion point between POS-1 and POS; both bounds meet at POS.
+        begin, definite_end = pos, pos
+    elif any(a.startswith("<") for a in alt_alleles) and end is not None:
+        # Spanning symbolic variant (DEL, DUP, INV, ...): trust INFO/END.
+        # Explicit alleles always use the REF span below, even if END is set.
+        begin, definite_end = pos, end
+    else:
+        # Ordinary small variant: span the REF bases (1-based inclusive).
+        begin, definite_end = pos, pos + len(ref) - 1
+
+    cipos = _parse_ci_offsets(info, "CIPOS")
+    ciend = _parse_ci_offsets(info, "CIEND")
+    ci_begin = pos + cipos[0] if cipos is not None else None
+    if ciend is not None:
+        ci_end = definite_end + ciend[1]
+    elif cipos is not None:
+        ci_end = definite_end + cipos[1]
+    else:
+        ci_end = None
+
+    return begin, definite_end, ci_begin, ci_end, is_breakend
+
+
+def classify_record_overlap(
+    begin: int,
+    end: int,
+    ci_begin: int | None,
+    ci_end: int | None,
+    query_start: int,
+    query_end: int,
+) -> str:
+    """Classify overlap of a record with a 1-based inclusive query.
+
+    :return: ``"definite"`` when the query overlaps the point-estimate span,
+        ``"possible"`` when it only touches the CIPOS/CIEND confidence region,
+        and ``"no_hit"`` otherwise.
+    """
+    if not (end < query_start or begin > query_end):
+        return "definite"
+    if ci_begin is not None and ci_end is not None and not (ci_end < query_start or ci_begin > query_end):
+        return "possible"
+    return "no_hit"
+
+
 def read_index(path_tbi: pathlib.Path | str) -> TabixIndex:
     """Read tabix index from given path.
 
@@ -298,6 +402,9 @@ class TabixFileIter:
         self._current_lines: list[str] = []
         self._current_line_idx = 0
         self._finished = False
+        #: Class (``"definite"``/``"possible"``) of the last line returned by
+        #: the iterator; ``None`` before the first match
+        self.last_match_class: str | None = None
 
         # Find relevant chunks for the region
         self._find_chunks()
@@ -420,53 +527,35 @@ class TabixFileIter:
         self._current_line_idx = 0
         return len(lines) > 0
 
-    def _parse_line_position(self, line: str) -> tuple[str, int, int]:
-        """Parse sequence name and position from a line.
-
-        :return: (sequence_name, begin_pos, end_pos) using 1-based coordinates
-        """
-        fields = line.split("\t")
-
-        # Extract sequence name (convert from 1-based column to 0-based index)
-        seq_name = fields[self.index.col_seq - 1] if self.index.col_seq > 0 else ""
-
-        # Extract begin position (1-based coordinate)
-        begin_pos = int(fields[self.index.col_beg - 1]) if self.index.col_beg > 0 else 1
-
-        # Extract end position (1-based coordinate)
-        if self.index.col_end == 0 or self.index.col_end == self.index.col_beg:
-            # For VCF files: col_end = 0 means calculate end from REF allele length
-            # The inclusive end position is start + len(REF) - 1
-            if len(fields) > 3:  # Make sure we have the REF column
-                ref_allele = fields[3]  # REF is the 4th column (index 3)
-                end_pos = begin_pos + len(ref_allele) - 1
-            else:  # pragma: no cover
-                # Fallback for malformed lines
-                end_pos = begin_pos
-        else:  # pragma: no cover
-            end_pos = int(fields[self.index.col_end - 1])
-
-        return seq_name, begin_pos, end_pos
-
     def _line_matches_region(self, line: str) -> bool:
-        """Check if a line matches our region criteria."""
+        """Check if a line matches our region criteria and record its class.
+
+        Records overlapping the definite span are definite hits; records whose
+        CIPOS/CIEND confidence interval alone reaches the query are possible
+        hits and kept separate in :py:attr:`last_match_class`.
+        """
         try:
-            seq_name, begin_pos, end_pos = self._parse_line_position(line)
+            fields = line.split("\t")
+            seq_name = fields[self.index.col_seq - 1] if self.index.col_seq > 0 else ""
 
             # Check sequence name
             if seq_name != self.reference:  # pragma: no cover
                 return False
 
-            # Check position overlap with our region
-            # For VCF: treat query ranges as inclusive on both ends
-            # A record at position N should be found by queries that include position N or N+1
-            # This matches pysam's behavior for VCF files
-            if self.start is not None and end_pos < self.start:
-                return False
+            if self.start is None and self.end is None:
+                # Whole-reference query: every record is a definite hit.
+                self.last_match_class = "definite"
+                return True
 
-            if self.end is not None and begin_pos > self.end:
+            begin_pos, end_pos, ci_begin, ci_end, _is_bnd = parse_record_span(line)
+            query_start = self.start if self.start is not None else 1
+            query_end = self.end if self.end is not None else 2**29
+            match_class = classify_record_overlap(
+                begin_pos, end_pos, ci_begin, ci_end, query_start, query_end
+            )
+            if match_class == "no_hit":
                 return False
-
+            self.last_match_class = match_class
             return True
         except (ValueError, IndexError):  # pragma: no cover
             # Skip malformed lines
@@ -505,7 +594,9 @@ class TabixFileIter:
 
                 # Check if we've gone past our region
                 try:
-                    seq_name, begin_pos, _ = self._parse_line_position(line)
+                    fields = line.split("\t")
+                    seq_name = fields[self.index.col_seq - 1] if self.index.col_seq > 0 else ""
+                    begin_pos, _end_pos, ci_begin, _ci_end, _is_bnd = parse_record_span(line)
 
                     # If we're past our reference sequence, we're done
                     # Use the index order, not lexical order
@@ -517,8 +608,10 @@ class TabixFileIter:
                             self._finished = True
                             raise StopIteration
 
-                    # If we're past our end position, we're done
-                    if seq_name == self.reference and self.end is not None and begin_pos > self.end:
+                    # If even the left confidence edge is past our end position,
+                    # no later record (sorted by POS) can match anymore.
+                    earliest_begin = ci_begin if ci_begin is not None else begin_pos
+                    if seq_name == self.reference and self.end is not None and earliest_begin > self.end:
                         self._finished = True
                         raise StopIteration
 

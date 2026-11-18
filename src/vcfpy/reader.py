@@ -10,6 +10,9 @@ from io import TextIOWrapper
 from vcfpy import parser
 from vcfpy.tabix import TabixFile
 
+if typing.TYPE_CHECKING:
+    from vcfpy.record import Record
+
 __author__ = "Manuel Holtgrewe <manuel.holtgrewe@bihealth.de>"
 
 
@@ -165,6 +168,35 @@ class Reader:
         else:
             self.tabix_iter = self.tabix_file.fetch(reference=chrom_or_region, start=begin, end=end)
         return self
+
+    @property
+    def last_match_class(self) -> str | None:
+        """Class of the last record returned by a tabix-backed fetch.
+
+        ``"definite"`` when the query overlaps the record's point-estimate
+        span, ``"possible"`` when it only reaches the CIPOS/CIEND confidence
+        interval, and ``None`` before the first match or without a tabix fetch.
+        """
+        if self.tabix_iter is None:
+            return None
+        return self.tabix_iter.last_match_class
+
+    def fetch_classified(
+        self, chrom_or_region: str, begin: int | None = None, end: int | None = None
+    ) -> typing.Iterator[tuple["Record", str]]:
+        """Like :py:meth:`fetch` but yield ``(record, match_class)`` pairs.
+
+        ``match_class`` is ``"definite"`` for records overlapping the queried
+        span and ``"possible"`` for records only touched through their
+        CIPOS/CIEND confidence interval, keeping the two kinds of hits apart.
+        """
+        self.fetch(chrom_or_region, begin, end)
+        while True:
+            try:
+                record = next(self)
+            except StopIteration:
+                return
+            yield record, self.last_match_class
 
     def close(self):
         """Close underlying stream"""

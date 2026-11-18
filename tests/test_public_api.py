@@ -37,6 +37,11 @@ def test_from_record():
     assert vcfpy.SV
     assert vcfpy.BreakEnd
     assert vcfpy.SymbolicAllele
+    assert vcfpy.RecordInterval
+    assert vcfpy.IntervalClass
+    assert vcfpy.IntervalClass.DEFINITE
+    assert vcfpy.IntervalClass.POSSIBLE
+    assert vcfpy.IntervalClass.NO_HIT
 
 
 def test_record_constants():

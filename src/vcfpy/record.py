@@ -4,6 +4,8 @@
 The VCF record structure is modeled after the one of PyVCF
 """
 
+import dataclasses
+import enum
 import re
 import warnings
 from typing import Any, Iterator, Literal, Sequence
@@ -54,6 +56,101 @@ ESCAPE_MAPPING = [
 UNESCAPE_MAPPING = [(v, k) for k, v in ESCAPE_MAPPING]
 
 
+class IntervalClass(enum.Enum):
+    """How a query interval relates to a record.
+
+    A query that lies completely within the record's definite interval is a
+    definite hit.  A query that only reaches into the confidence region
+    (``CIPOS``/``CIEND``) is a possible hit.  Everything else is no hit.
+    """
+
+    #: query overlaps the definite (point-estimate) interval of the record
+    DEFINITE = "definite"
+    #: query only overlaps the confidence interval, not the definite interval
+    POSSIBLE = "possible"
+    #: query does not overlap the record's confidence interval at all
+    NO_HIT = "no_hit"
+
+
+@dataclasses.dataclass(frozen=True)
+class RecordInterval:
+    """Half-open, 0-based interval describing where a record may be located.
+
+    All coordinates are 0-based and the interval end is exclusive, matching
+    the convention of :py:attr:`Record.affected_start` and
+    :py:attr:`Record.affected_end`.  ``definite`` gives the location derived
+    from the point estimates (``POS``, ``END``/REF length, or the insertion
+    point), while ``possible`` expands it by the ``CIPOS`` and ``CIEND``
+    confidence intervals.  A bound of ``None`` marks an unknown extent, as is
+    the right side of a symbolic structural variant whose length is not given
+    by ``END``; breakends instead keep the finite anchor base interval.
+    """
+
+    #: definite interval ``[start, end)`` from point estimates; ``end`` may be
+    #: ``None`` when the extent of the record is unknown
+    start: int
+    end: int | None
+    #: confidence-expanded interval ``[start, end)``; either bound may be
+    #: ``None`` when that side of the confidence interval is unknown
+    ci_start: int | None = None
+    ci_end: int | None = None
+
+    @property
+    def definite(self) -> tuple[int, int | None]:
+        """Return the definite interval as a ``(start, end)`` tuple."""
+        return (self.start, self.end)
+
+    @property
+    def possible(self) -> tuple[int | None, int | None]:
+        """Return the confidence-expanded interval as a ``(start, end)`` tuple."""
+        return (self.ci_start, self.ci_end)
+
+    @property
+    def is_imprecise(self) -> bool:
+        """Return whether a confidence interval actually widens the definite interval."""
+        widened_left = self.ci_start is not None and self.ci_start < self.start
+        widened_right = self.ci_end is not None and (self.end is None or self.ci_end > self.end)
+        return widened_left or widened_right
+
+    @staticmethod
+    def _overlaps(start: int | None, end: int | None, query_start: int, query_end: int) -> bool:
+        """Check overlap of ``[start, end)`` with a 0-based half-open query.
+
+        ``None`` marks an unbounded side.  A zero-length interval (an insertion
+        point) is treated as the point at ``start`` and matches any query that
+        contains that position, instead of never overlapping as strict
+        half-open arithmetic would imply.
+        """
+        if start is not None and end is not None and start == end:
+            return query_start <= start < query_end
+        if start is not None and query_end <= start:
+            return False
+        if end is not None and end <= query_start:
+            return False
+        return True
+
+    def classify(self, query_start: int, query_end: int) -> IntervalClass:
+        """Classify a 0-based, half-open query against this interval.
+
+        A point query at 0-based position ``p`` must be given as ``[p, p + 1)``.
+
+        :param query_start: 0-based inclusive query start
+        :param query_end: 0-based exclusive query end
+        :return: :py:class:`IntervalClass` member
+        """
+        if query_end < query_start:
+            raise ValueError("query_end must not be smaller than query_start")
+        if self._overlaps(self.start, self.end, query_start, query_end):
+            return IntervalClass.DEFINITE
+        if self._overlaps(self.ci_start, self.ci_end, query_start, query_end):
+            return IntervalClass.POSSIBLE
+        return IntervalClass.NO_HIT
+
+    def overlaps(self, query_start: int, query_end: int) -> bool:
+        """Return whether the query overlaps the confidence interval at all."""
+        return self.classify(query_start, query_end) is not IntervalClass.NO_HIT
+
+
 class Record:
     """Represent one record from the VCF file
 
@@ -81,8 +178,6 @@ class Record:
         self.POS = POS
         #: An ``int`` with a 0-based begin position
         self.begin = POS - 1
-        #: An ``int`` with a 0-based end position
-        self.end = None  # XXX
         #: A list of the semicolon-separated values of the ID column
         self.ID = list(ID)
         #: A ``str`` with the REF value
@@ -99,12 +194,21 @@ class Record:
         #: A list of strings for the FORMAT column.  Optional, must be given if
         #: and only if ``calls`` is also given.
         self.FORMAT = FORMAT or []
-        #: A list of genotype :py:class:`Call` objects.  Optional, must be given if
-        #: and only if ``FORMAT`` is also given.
+        #: A list of genotype :py:class:`Call` objects.  Optional, must be
+        #: given if and only if ``FORMAT`` is also given.
         self.calls = calls or []
         #: A mapping from sample name to entry in self.calls.
         self.call_for_sample = {}
         self.update_calls(self.calls)
+
+    @property
+    def interval(self) -> "RecordInterval":
+        """The definite and confidence-expanded intervals of this record.
+
+        Recomputed from the current ``POS``, ``ALT`` and ``INFO`` values on
+        every access, so it stays consistent after a record is modified.
+        """
+        return self._build_interval()
 
     def update_calls(self, calls: Sequence["Call | UnparsedCall"]):
         """Update ``self.calls`` and other fields as necessary."""
@@ -149,6 +253,110 @@ class Record:
             return self.POS  # right of first base
         else:  # Return 0-based end position, behind last REF base
             return (self.POS - 1) + len(self.REF)
+
+    @staticmethod
+    def _is_int_pair(value: Any) -> bool:
+        """Return whether ``value`` is a two-element integer pair (CIPOS/CIEND)."""
+        return (
+            isinstance(value, (list, tuple))
+            and len(value) == 2
+            and all(isinstance(v, int) and not isinstance(v, bool) for v in value)
+        )
+
+    def _ci_offsets(self, key: str) -> tuple[int | None, int | None]:
+        """Return the ``(left, right)`` offsets of a CIPOS/CIEND INFO field."""
+        value = self.INFO.get(key)
+        if self._is_int_pair(value):
+            return int(value[0]), int(value[1])
+        return None, None
+
+    def _build_interval(self) -> RecordInterval:
+        """Build the definite and confidence intervals for this record.
+
+        Coordinates are 0-based and half-open.  The definite interval uses
+        the point estimates only; the confidence interval applies the
+        ``CIPOS`` and ``CIEND`` offsets.  Insertions are represented by a
+        zero-length interval at the insertion point, deletions and other
+        spanning variants use ``END`` (or the REF span), and breakends as
+        well as structural variants without a usable extent leave the end
+        side unbounded instead of silently using the REF length.
+        """
+        types = {alt.type for alt in self.ALT}
+        only_insertion_substitutions = bool(types) and types == {INS}
+        symbolic_insertions = [
+            alt
+            for alt in self.ALT
+            if isinstance(alt, SymbolicAllele) and (alt.value == "INS" or alt.value.startswith("INS:"))
+        ]
+        is_breakend = any(isinstance(alt, BreakEnd) for alt in self.ALT)
+        is_insertion = only_insertion_substitutions or (
+            bool(symbolic_insertions) and len(symbolic_insertions) == len(self.ALT)
+        )
+
+        pos_left, pos_right = self._ci_offsets("CIPOS")
+        _end_left, end_right = self._ci_offsets("CIEND")
+        info_end = self.INFO.get("END")
+        if not isinstance(info_end, int) or isinstance(info_end, bool):
+            info_end = None
+
+        if is_breakend:
+            # Only the local anchor breakpoint is pinned down; the mate lives
+            # elsewhere (possibly on another contig), so there is no span.
+            start = self.POS - 1
+            end = start + 1
+            ci_start = start + pos_left if pos_left is not None else start
+            ci_end = start + 1 + pos_right if pos_right is not None else end
+            return RecordInterval(start, end, ci_start, ci_end)
+
+        if is_insertion:
+            # Insertion point: between POS-1 and POS, i.e. the 0-based POS,
+            # represented as a zero-length interval even when END == POS.
+            start = self.POS
+            end = self.POS
+            ci_start = start + pos_left if pos_left is not None else start
+            ci_end = end + pos_right if pos_right is not None else end
+            return RecordInterval(start, end, ci_start, ci_end)
+
+        # Definite start is always the 0-based position of the first REF base.
+        start = self.POS - 1
+        ci_start = start + pos_left if pos_left is not None else start
+
+        if types & {SV, SYMBOLIC}:
+            # Symbolic alleles other than insertions: use END when the record
+            # spans a region (deletions, duplications, inversions, ...).  Never
+            # fall back to the REF length, which is just the anchor base.
+            if info_end is not None:
+                end = info_end  # END is 1-based inclusive; == 0-based exclusive
+                ci_end = end + end_right if end_right is not None else end
+            else:
+                # Unknown length: the anchor base is definite, but the end side
+                # of the confidence interval stays open rather than pretending
+                # the single REF base limits the extent.
+                end = start + 1
+                ci_end = None
+            return RecordInterval(start, end, ci_start, ci_end)
+
+        # Ordinary substitutions (SNV, MNV, explicit indel): the REF allele is
+        # the authoritative span; a contradicting INFO/END (as emitted by some
+        # callers for explicit deletions) must not invert or shrink it.
+        end = start + len(self.REF)
+        ci_end = end + end_right if end_right is not None else end
+        return RecordInterval(start, end, ci_start, ci_end)
+
+    def classify_interval(self, query_start: int, query_end: int) -> IntervalClass:
+        """Classify a 0-based, half-open query against this record's intervals.
+
+        A query overlapping the definite interval is reported as
+        :py:attr:`IntervalClass.DEFINITE`; one that only reaches a CIPOS/CIEND
+        confidence edge is :py:attr:`IntervalClass.POSSIBLE`; otherwise the
+        result is :py:attr:`IntervalClass.NO_HIT`.
+
+        :param query_start: 0-based inclusive start of the query
+        :param query_end: 0-based exclusive end of the query
+        """
+        if query_end < query_start:
+            raise ValueError("query_end must not be smaller than query_start")
+        return self.interval.classify(query_start, query_end)
 
     def add_filter(self, label: str):
         """Add label to FILTER if not set yet, removing ``PASS`` entry if

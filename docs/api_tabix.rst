@@ -44,6 +44,10 @@ Tabix Data Structures
 Tabix Utilities
 ---------------
 
+.. autofunction:: vcfpy.tabix.parse_record_span
+
+.. autofunction:: vcfpy.tabix.classify_record_overlap
+
 .. autofunction:: vcfpy.tabix.read_index
 
 .. autofunction:: vcfpy.tabix.reg2bins

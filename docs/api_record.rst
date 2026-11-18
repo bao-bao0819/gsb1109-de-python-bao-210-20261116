@@ -36,6 +36,18 @@ vcfpy.Record
 .. autoclass:: vcfpy.Record
     :members:
 
+vcfpy.RecordInterval
+--------------------
+
+.. autoclass:: vcfpy.RecordInterval
+    :members:
+
+vcfpy.IntervalClass
+-------------------
+
+.. autoclass:: vcfpy.IntervalClass
+    :members:
+
 vcfpy.Call
 ----------
 

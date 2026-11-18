@@ -61,3 +61,14 @@ def test_from_reader():
 
 def test_from_writer():
     assert vcfpy.Writer
+
+
+def test_from_breakend_pairing():
+    assert vcfpy.BreakendEndpoint
+    assert vcfpy.BreakendPair
+    assert vcfpy.BreakendPairing
+    assert vcfpy.pair_breakends
+    assert vcfpy.iter_breakend_endpoints
+    assert vcfpy.PAIRED
+    assert vcfpy.MISSING_MATE
+    assert vcfpy.AMBIGUOUS_MATE

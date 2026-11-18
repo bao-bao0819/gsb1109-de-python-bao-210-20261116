@@ -1,5 +1,15 @@
 # -*- coding: utf-8 -*-
 
+from vcfpy.breakend import (
+    AMBIGUOUS_MATE,
+    MISSING_MATE,
+    PAIRED,
+    BreakendEndpoint,
+    BreakendPair,
+    BreakendPairing,
+    iter_breakend_endpoints,
+    pair_breakends,
+)
 from vcfpy.exceptions import (
     HeaderNotFound,
     IncorrectVCFFormat,
@@ -101,5 +111,13 @@ __all__ = [
     "REVERSE",
     "FIVE_PRIME",
     "THREE_PRIME",
+    "BreakendEndpoint",
+    "BreakendPair",
+    "BreakendPairing",
+    "pair_breakends",
+    "iter_breakend_endpoints",
+    "PAIRED",
+    "MISSING_MATE",
+    "AMBIGUOUS_MATE",
     "__version__",
 ]

@@ -15,6 +15,7 @@ Welcome to VCFPy's documentation!
     api_exceptions
     api_record
     api_parser
+    api_filterstats
     api_bgzf
     api_tabix
 
@@ -94,6 +95,7 @@ What's the aim?
     api_io
     api_exceptions
     api_record
+    api_filterstats
 
 .. toctree::
     :caption: Project Info

@@ -250,3 +250,17 @@ Decode a distribute document stream.
    :func: main_argparser
    :prog: hwp5proc
    :path: diststream
+
+texts
+-----
+
+Collect text occurrences with their structural region (body/header/footer),
+keeping repeated page-decoration text separate from identical body text and
+reporting identity candidates with count ranges when region evidence is
+missing.
+
+.. argparse::
+   :module: hwp5.hwp5proc
+   :func: main_argparser
+   :prog: hwp5proc
+   :path: texts

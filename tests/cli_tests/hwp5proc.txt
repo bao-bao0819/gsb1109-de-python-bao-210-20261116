@@ -2,7 +2,7 @@
 
    $ hwp5proc --help
    usage: hwp5proc [-h] [--loglevel LOGLEVEL] [--logfile LOGFILE]
-                   {version,header,summaryinfo,ls,cat,unpack,records,models,find,xml,rawunz,diststream}
+                   {version,header,summaryinfo,ls,cat,unpack,records,models,find,xml,rawunz,diststream,texts}
                    ...
    
    Do various operations on HWPv5 files.
@@ -15,7 +15,7 @@
    subcommands:
      valid subcommands
    
-     {version,header,summaryinfo,ls,cat,unpack,records,models,find,xml,rawunz,diststream}
+     {version,header,summaryinfo,ls,cat,unpack,records,models,find,xml,rawunz,diststream,texts}
        version             Print the file format version of .hwp files.
        header              Print file headers of .hwp files.
        summaryinfo         Print summary informations of .hwp files.
@@ -31,6 +31,8 @@
        xml                 Transform .hwp files into an XML.
        rawunz              Deflate an headerless zlib-compressed stream
        diststream          Decode a distribute document stream.
+       texts               Collect text occurrences, distinguishing page
+                           headers/footers from body text.
 
 hwp5proc 은 여러 하위 명령으로 이루어져 있다.
 
@@ -2806,3 +2808,99 @@ xml 명령
 
    $ hwp5proc xml --no-xml-decl --no-validate-wellformed samples/sample-5017.hwp | dd obs=1M 2>/dev/null | head -c 26 | sed -e 's/$/\n/g'
    <HwpDoc version="5.0.1.7">
+
+
+texts 명령
+-----------
+
+   $ hwp5proc texts --help
+   usage: hwp5proc texts [-h] [--text <text>] [--output <file>] <hwp5file>
+   
+   Collect every text occurrence with its structural region (body/header/footer),
+   so identical text in repeated page decorations is not deduplicated from
+   genuine body text.
+   
+   positional arguments:
+     <hwp5file>       .hwp file to analyze
+   
+   optional arguments:
+     -h, --help       show this help message and exit
+     --text <text>    Only report occurrences containing this text, with identity
+                      candidates and count ranges.
+     --output <file>  Output filename (default: standard output).
+
+   $ hwp5proc texts samples/headerfooter.hwp --text 머리말
+   {
+     "header_footer_decorations": [
+       {
+         "control": "Header",
+         "model_occurrences": 1,
+         "paragraph_ids": [
+           2
+         ],
+         "places": "both_pages",
+         "region": "header",
+         "rendering_note": "stored once in the model; the layout engine repeats it on every applicable page, so rendered page positions are not enumerable at this model level",
+         "section_index": 0,
+         "text": "Header 이것은 머리말입니다."
+       },
+       {
+         "control": "Footer",
+         "model_occurrences": 1,
+         "paragraph_ids": [
+           3
+         ],
+         "places": "odd_page",
+         "region": "footer",
+         "rendering_note": "stored once in the model; the layout engine repeats it on every applicable page, so rendered page positions are not enumerable at this model level",
+         "section_index": 0,
+         "text": "Footer 이것은 꼬리말입니다."
+       }
+     ],
+     "identity_summary": {
+       "body_text": {
+         "definite_count": 0,
+         "max_count": 0,
+         "min_count": 0,
+         "uncertain_count": 0
+       },
+       "page_decoration": {
+         "definite_count": 1,
+         "max_count": 1,
+         "min_count": 1,
+         "uncertain_count": 0
+       }
+     },
+     "matches": [
+       {
+         "candidate_identities": [
+           "page_decoration"
+         ],
+         "fragment_count": 3,
+         "identity": "page_decoration",
+         "needle": "머리말",
+         "paragraph_id": 2,
+         "positions": [
+           11
+         ],
+         "region": "header",
+         "section_index": 0,
+         "text": "Header 이것은 머리말입니다."
+       }
+     ],
+     "needle": "머리말",
+     "note": "identical text is kept per occurrence; header/footer text is stored once per section and repeated by the layout engine on each applicable page",
+     "page_decorations_containing_needle": [
+       {
+         "control": "Header",
+         "model_occurrences": 1,
+         "paragraph_ids": [
+           2
+         ],
+         "places": "both_pages",
+         "region": "header",
+         "section_index": 0
+       }
+     ],
+     "total_paragraph_matches": 1
+   }

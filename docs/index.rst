@@ -59,6 +59,7 @@ User Guide
     examples
     complete_tutorial
     lessbasic
+    cleaning
     migration
     changelog
     contributing

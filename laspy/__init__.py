@@ -3,6 +3,27 @@ __version__ = "2.7.0"
 import logging
 
 from . import errors, file, vlrs
+from .cleaning import (
+    ClassificationChange,
+    ClassificationCleaner,
+    ClassificationError,
+    ClassificationHistory,
+    ClassificationLedger,
+    ClassificationNotConverged,
+    ClassificationRule,
+    ClassificationRuleSet,
+    ClassificationSession,
+    ClassificationVersion,
+    CleaningResult,
+    ExtentRule,
+    InvalidClassificationRule,
+    NeighborRule,
+    SpatialExtent,
+    SpatialRule,
+    clean_classification,
+    load_classification_history,
+    store_classification_history,
+)
 from .copc import Bounds, CopcReader
 from .errors import LaspyException
 from .header import LasHeader

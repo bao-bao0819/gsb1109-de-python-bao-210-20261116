@@ -32,6 +32,10 @@ Re-exported classes
 
  - :class:`.LasHeader`
  - :class:`.LasData`
+ - :class:`.ClassificationRuleSet`
+ - :class:`.ClassificationSession`
+ - :class:`.ClassificationLedger`
+ - :class:`.CleaningResult`
  - :class:`.PointFormat`
  - :class:`.VLR`
  - :class:`.ExtraBytesParams`
@@ -49,6 +53,7 @@ Submodules
 .. toctree::
 
    laspy.lib
+   laspy.cleaning
    laspy.header
    laspy.lasreader
    laspy.lasdata

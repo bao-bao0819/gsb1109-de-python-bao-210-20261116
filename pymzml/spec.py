@@ -85,6 +85,17 @@ _TIME_UNIT_ACCESSIONS = {
     "UO:0000032": "hour",
 }
 
+# Binary array names carrying ion mobility, in preference order.
+_ION_MOBILITY_ARRAY_NAMES = (
+    "mean inverse reduced ion mobility array",
+    "raw inverse reduced ion mobility array",
+    "mean ion mobility array",
+    "raw ion mobility array",
+    "mean ion mobility drift time array",
+    "raw ion mobility drift time array",
+    "ion mobility drift time",
+)
+
 
 class MS_Spectrum(MsData):
     """
@@ -1153,6 +1164,56 @@ class Spectrum(MsData):
         if arr is None:
             _ = self.get_all_arrays_in_spec(not_found_array=array_name)
         return arr
+
+    def get_ion_mobility(self, array_name=None):
+        """
+        Return the ion mobility array of this spectrum, if available.
+
+        Keyword Arguments:
+            array_name (str, optional): explicit name of a binary data array.
+                If omitted, the common PSI-MS mobility array names are checked
+                in a stable order, preferring calibrated mean inverse reduced
+                ion mobility, then raw inverse reduced mobility, drift time
+                and mean mobility arrays.
+
+        Returns:
+            array (numpy.ndarray or None): mobility values aligned with
+            :py:attr:`mz` and :py:attr:`i`, or None if no mobility array is
+            present.
+
+        Note:
+            Mobility arrays must have the same length as the m/z array. The
+            alignment is checked by :func:`pymzml.search3d.extract_peaks3d`
+            before a three-dimensional peak is created.
+        """
+        if array_name is not None:
+            return self.get_array(array_name)
+        available = {name.lower(): name for name in self.get_all_arrays_in_spec()}
+        for candidate in _ION_MOBILITY_ARRAY_NAMES:
+            name = available.get(candidate.lower())
+            if name is not None:
+                return self.get_array(name)
+        # Some writers omit the unit cvParam, which hides the array from
+        # get_all_arrays_in_spec(). Fall back to the binaryDataArray cvParams.
+        names = {}
+        for cv_param in self.element.iterfind(
+            "./{ns}binaryDataArrayList/{ns}binaryDataArray/{ns}cvParam".format(
+                ns=self.ns
+            )
+        ):
+            name = cv_param.get("name")
+            if name is not None:
+                names.setdefault(name.lower(), name)
+        for candidate in _ION_MOBILITY_ARRAY_NAMES:
+            name = names.get(candidate.lower())
+            if name is not None:
+                return self.get_array(name)
+        return None
+
+    @property
+    def ion_mobility(self):
+        """Ion mobility values aligned with :py:attr:`mz` and :py:attr:`i`."""
+        return self.get_ion_mobility()
 
     def get_all_arrays_in_spec(self, not_found_array=None):
         b_data_string = "./{ns}binaryDataArrayList/{ns}binaryDataArray/{ns}cvParam[@unitCvRef='MS']".format(

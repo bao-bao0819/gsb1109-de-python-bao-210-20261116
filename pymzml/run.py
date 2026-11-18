@@ -486,6 +486,32 @@ class Reader(object):
         """
         return self[identifier]
 
+    def peaks3d(self, **kwargs):
+        """
+        Build retention time/m/z/ion mobility peaks for this reader.
+
+        Keyword arguments are passed to
+        :func:`pymzml.search3d.extract_reader_peaks3d`.
+        """
+        from .search3d import extract_reader_peaks3d
+
+        return extract_reader_peaks3d(self, **kwargs)
+
+    def build_3d_index(self, calibration=None, **kwargs):
+        """
+        Build a :class:`pymzml.search3d.PeakIndex3D` from this reader.
+
+        Arguments:
+            calibration (MobilityCalibration, optional): piecewise mobility
+                calibration. If omitted, an identity calibration is used.
+
+        Keyword arguments are passed to
+        :func:`pymzml.search3d.extract_reader_peaks3d`.
+        """
+        from .search3d import PeakIndex3D
+
+        return PeakIndex3D(self.peaks3d(**kwargs), calibration)
+
     def get_chromatogram(self, identifier):
         """
         Access chromatogram with the given identifier.

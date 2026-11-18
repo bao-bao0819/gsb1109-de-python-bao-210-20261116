@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Pulse-aware scan coverage analysis and missed-scan review lists
+  (``laspy.coverage``): raw pulse support, retained points, and unconfirmed
+  cells are reported separately, and several returns of one pulse never count
+  as several coverage observations.
+- ``CoverageResult`` review export to JSON/CSV and ``compare_coverage`` for
+  distinguishing newly covered cells from repeat observations after adding a
+  strip.
+- ``laspy coverage review`` and ``laspy coverage compare`` CLI commands.
+
 ## Version 2.7.0 (14/01/2026)
 
 ### Added

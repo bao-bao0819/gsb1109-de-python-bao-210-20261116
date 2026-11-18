@@ -3,6 +3,18 @@ __version__ = "2.7.0"
 import logging
 
 from . import errors, file, vlrs
+from .coverage import (
+    CellStatus,
+    CoverageComparison,
+    CoverageConfig,
+    CoverageError,
+    CoverageResult,
+    GridSpec,
+    analyze_coverage,
+    build_review_list,
+    compare_coverage,
+    compare_strips,
+)
 from .copc import Bounds, CopcReader
 from .errors import LaspyException
 from .header import LasHeader

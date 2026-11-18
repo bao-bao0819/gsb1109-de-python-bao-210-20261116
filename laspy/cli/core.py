@@ -35,7 +35,7 @@ from laspy.header import Version
 from .. import PackedPointRecord, PointFormat
 from ..point import dims
 from ..vlrs.vlrlist import VLRList
-from . import copc
+from . import copc, coverage
 
 DEFAULT_ITER_CHUNK_SIZE: int = 10_000_000
 ITER_CHUNK_SIZE_HELP_STR: str = """Number of points processed at once.
@@ -54,6 +54,7 @@ err_console = Console(stderr=True)
 app = typer.Typer(help="CLI tool using laspy")
 
 app.add_typer(copc.app, name="copc")
+app.add_typer(coverage.app, name="coverage")
 
 
 def print_header(hdr: laspy.LasHeader):

@@ -119,6 +119,8 @@ laspy has an optional command line interface (CLI) with the following commands:
 * ``laspy info`` to print informations about a LAS/LAZ file
 * ``laspy compress`` / ``laspy decompress`` to compress/decompress one or many file
 * ``laspy convert`` to convert file(s) between version and point format
+* ``laspy coverage review`` / ``laspy coverage compare`` to build missed-scan
+  review lists and measure coverage gained by added strips
 * ``laspy copc query`` to download to a LAS/LAZ file some points from a COPC ressource.
 
 As the cli requires etra dependencies, it has to be installed using

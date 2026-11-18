@@ -56,6 +56,7 @@ User Guide
     intro
     waveform
     basic
+    coverage
     examples
     complete_tutorial
     lessbasic

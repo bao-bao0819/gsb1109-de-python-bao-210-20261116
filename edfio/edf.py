@@ -42,6 +42,7 @@ from edfio.edf_header import (
     _encode_edfplus_date,
 )
 from edfio.edf_signal import BdfSignal, EdfSignal
+from edfio.edf_time import TimeInterpretation, interpret_time
 
 if sys.version_info < (3, 11):  # pragma: no cover
     from typing_extensions import Self
@@ -600,6 +601,109 @@ class _Base(Generic[_Signal]):
                     maxlen // bytes_per_sample * self.data_record_duration
                 )
                 annotation_signal._digital = np.frombuffer(raw, dtype=np.uint8)  # type: ignore[assignment]
+
+    def interpret_time(self, *, century: int | None = None) -> TimeInterpretation:
+        """
+        Interpret the recording date and time from all header evidence.
+
+        In contrast to :attr:`startdate`, which silently prefers the EDF+ field and
+        applies a fixed two-digit-year rule, this returns every date-bearing header
+        field, its status (exact, ambiguous, anonymized, placeholder, invalid, or
+        missing), the determinable start range, and absolute datetimes advanced from
+        the actual start.
+
+        Parameters
+        ----------
+        century : int | None, default: None
+            Century basis for short years, supplied by the caller. Either a
+            two-digit century number (`19` for 1900-1999) or its start year
+            (`1900`). If `None`, short years remain ambiguous rather than being
+            resolved from the current year.
+
+        Returns
+        -------
+        TimeInterpretation
+            The per-source interpretations and the determinable recording range.
+        """
+        return interpret_time(
+            legacy_startdate=self._startdate,
+            local_recording_identification=self.local_recording_identification,
+            header_starttime=self._starttime,
+            subsecond_offset=self._subsecond_offset,
+            duration=self.duration,
+            century=century,
+        )
+
+    def datetime_at(
+        self, seconds: float, *, century: int | None = None
+    ) -> datetime.datetime | None:
+        """
+        Absolute datetime at a recording-relative onset.
+
+        The onset is added to the actual recording start, so offsets past midnight
+        advance the date. Returns `None` if the date is ambiguous, anonymized, or
+        otherwise not determinable.
+
+        Parameters
+        ----------
+        seconds : float
+            Seconds from recording start.
+        century : int | None, default: None
+            Century basis for short years, see :meth:`interpret_time`.
+        """
+        return self.interpret_time(century=century).datetime_at(seconds)
+
+    def data_record_datetimes(
+        self, *, century: int | None = None
+    ) -> tuple[datetime.datetime | None, ...]:
+        """
+        Absolute start datetime of every data record.
+
+        EDF+ timekeeping onsets are already absolute offsets from the file start, so
+        they are added to the actual start instead of being combined with a clock
+        face. This keeps records after midnight on the following date, including in
+        discontiguous recordings.
+
+        Returns a tuple containing `None` for every record if the start is not
+        exactly determinable.
+        """
+        interpretation = self.interpret_time(century=century)
+        if interpretation.start is None:
+            return (None,) * self.num_data_records
+        try:
+            timekeeping_signal = self._timekeeping_signal
+        except StopIteration:
+            return tuple(
+                interpretation.start
+                + datetime.timedelta(seconds=i * self.data_record_duration)
+                for i in range(self.num_data_records)
+            )
+        base_onset = self._subsecond_offset
+        datetimes = []
+        for data_record in timekeeping_signal.digital.reshape(
+            (-1, timekeeping_signal._bytes_per_data_record)
+        ):
+            onset = float(_get_data_record_onset(data_record))
+            datetimes.append(
+                interpretation.start + datetime.timedelta(seconds=onset - base_onset)
+            )
+        return tuple(datetimes)
+
+    def annotation_datetimes(
+        self, *, century: int | None = None
+    ) -> tuple[tuple[EdfAnnotation, datetime.datetime | None], ...]:
+        """
+        All annotations paired with their absolute datetime.
+
+        The annotation onset is added to the actual recording start, so annotations
+        after midnight advance the date. The datetime is `None` if the start is not
+        exactly determinable.
+        """
+        interpretation = self.interpret_time(century=century)
+        return tuple(
+            (annotation, interpretation.datetime_at(annotation.onset))
+            for annotation in self.annotations
+        )
 
     @property
     def startdatetime(self) -> datetime.datetime:

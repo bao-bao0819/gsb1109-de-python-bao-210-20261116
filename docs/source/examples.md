@@ -105,3 +105,27 @@ edf = read_edf("example.edf")
 edf.anonymize()
 edf.write("example_anonymized.edf")
 ```
+
+## Interpret recording dates and times
+`startdate` prefers the EDF+ field and applies a fixed two-digit-year rule. To keep
+every header source and inspect what is actually determinable, use
+`interpret_time()`. The century basis must come from the caller and is never inferred
+from today's date:
+
+```python
+edf = read_edf("example.edf")
+interpreted = edf.interpret_time(century=20)  # 2000-2099
+
+print(interpreted.status)                    # resolved, ambiguous, conflict, ...
+print(interpreted.determinable_range)        # start and end, or a range
+for source in interpreted.sources:
+    print(source.source, source.raw, source.status, source.value)
+
+# Onsets advance from the actual start, so records after midnight move to the
+# following date instead of re-interpreting a fresh clock face.
+print(interpreted.datetime_at(8 * 3600))
+print(edf.annotation_datetimes())
+```
+
+If `century` is omitted, a two-digit date remains ambiguous and
+`determinable_range` describes the possible interval instead of guessing a year.

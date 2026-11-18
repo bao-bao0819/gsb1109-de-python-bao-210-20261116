@@ -2,6 +2,14 @@ from edfio.edf import Bdf, Edf, read_bdf, read_edf
 from edfio.edf_annotations import EdfAnnotation
 from edfio.edf_header import AnonymizedDateError, Patient, Recording
 from edfio.edf_signal import BdfSignal, EdfSignal
+from edfio.edf_time import (
+    DateInterpretation,
+    DateSource,
+    DateStatus,
+    TimeInterpretation,
+    TimeStatus,
+    interpret_time,
+)
 
 try:
     from importlib.metadata import version
@@ -15,11 +23,17 @@ __all__ = [
     "AnonymizedDateError",
     "Bdf",
     "BdfSignal",
+    "DateInterpretation",
+    "DateSource",
+    "DateStatus",
     "Edf",
     "EdfAnnotation",
     "EdfSignal",
     "Patient",
     "Recording",
+    "TimeInterpretation",
+    "TimeStatus",
+    "interpret_time",
     "read_bdf",
     "read_edf",
 ]

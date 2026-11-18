@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+- Add `Edf.interpret_time()` and `edfio.interpret_time()` to expose every date-bearing header field with its source and status. Short years stay ambiguous unless the caller supplies a `century`; the current year is never used. The result includes the determinable start range plus `datetime_at()`, `data_record_datetimes()`, and `annotation_datetimes()`, which advance from the actual start so recordings crossing midnight continue on the following date.
+- Add an optional `century` argument to `decode_date()` for explicitly resolving two-digit legacy dates.
+
 ## [0.4.18] - 2026-10-01
 
 ### Fixed

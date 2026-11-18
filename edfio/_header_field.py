@@ -49,16 +49,42 @@ def decode_float(field: bytes) -> float:
     return value
 
 
-def decode_date(field: bytes) -> datetime.date:
+def _century_start_year(century: int) -> int:
+    if isinstance(century, bool) or not isinstance(century, int):
+        raise TypeError("century must be an integer or None")
+    if 0 <= century < 100:  # noqa: PLR2004
+        return century * 100
+    if 100 <= century <= 9900 and century % 100 == 0:  # noqa: PLR2004
+        return century
+    raise ValueError(
+        "century must be a two-digit century number (0..99) or a century start "
+        "year (100..9900, divisible by 100)"
+    )
+
+
+def decode_date(field: bytes, *, century: int | None = None) -> datetime.date:
+    """
+    Decode a legacy `DD.MM.YY` date field.
+
+    Parameters
+    ----------
+    field : bytes
+        Raw header field.
+    century : int | None, default: None
+        Century basis for the two-digit year. Either a two-digit century number
+        (`19` for 1900-1999) or its start year (`1900`). If `None`, the historical
+        EDF rule is used (85..99 map to 1985..1999, 00..84 map to 2000..2084).
+        The current year is never used.
+    """
     date = decode_str(field)
     match = DATE_OR_TIME_PATTERN.fullmatch(date)
     if match is None:
         raise ValueError(f"Invalid date for format DD.MM.YY: {date!r}")
     day, month, year = (int(g) for g in match.groups())
-    if year >= 85:  # noqa: PLR2004
-        year += 1900
+    if century is None:
+        year += 1900 if year >= 85 else 2000  # noqa: PLR2004
     else:
-        year += 2000
+        year = _century_start_year(century) + year
     return datetime.date(year, month, day)
 
 

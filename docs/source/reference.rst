@@ -17,3 +17,9 @@ API reference
    Patient
    Recording
    AnonymizedDateError
+   interpret_time
+   TimeInterpretation
+   DateInterpretation
+   DateSource
+   DateStatus
+   TimeStatus

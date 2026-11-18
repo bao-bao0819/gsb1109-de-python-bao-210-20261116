@@ -133,6 +133,15 @@ Acces run infos
 
 
 
+Assign precursors with uncertain charge
+---------------------------------------
+
+.. autofunction:: assign_precursors.main
+
+.. include:: code_inc/assign_precursors.inc
+
+
+
 Creating a custom Filehandler
 -----------------------------
 

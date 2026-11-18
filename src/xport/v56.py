@@ -479,6 +479,7 @@ class Observations(Iterator):
         """
         self.it = iter(observations)
         self.header = header
+        self.raw = {}
 
     def __next__(self):
         """
@@ -490,11 +491,25 @@ class Observations(Iterator):
     def from_dataset(cls, dataset):
         """
         Yield observations from an ``xport.Dataset``.
+
+        If the dataset still has its original encodings, those encodings are
+        attached so that byte-for-byte lossless writes remain possible.  A
+        value that has been edited no longer matches its encoding, so it is
+        freshly converted from its numeric view.
         """
-        return cls(
+        self = cls(
             observations=dataset.itertuples(index=False, name='Observation'),
             header=MemberHeader.from_dataset(dataset),
         )
+        raw = getattr(dataset, '_raw_columns', None)
+        if raw:
+            index = dataset.index
+            self.raw = {
+                k: list(v.reindex(index)) if hasattr(v, 'reindex') and
+                getattr(v, 'index', None) is not None else list(v)
+                for k, v in raw.items()
+            }
+        return self
 
     @classmethod
     def from_bytes(cls, bytestring, header):
@@ -507,11 +522,15 @@ class Observations(Iterator):
             return s.decode(TEXT_DATA_ENCODING).rstrip()
 
         converters = []
+        numeric_names = []
         for namestr in header.values():
             if namestr.vtype == xport.VariableType.NUMERIC:
                 converters.append(ibm_to_ieee)
+                numeric_names.append(namestr.name)
             else:
                 converters.append(character_decode)
+
+        raw_columns = {name: [] for name in numeric_names}
 
         def iterator():
             sizes = [namestr.length for namestr in header.values()]
@@ -533,9 +552,14 @@ class Observations(Iterator):
                 #       or spaces, it's indistinguishable from padding.
                 #       https://github.com/selik/xport/issues/46
                 tokens = struct.unpack(fmt, chunk)
+                for namestr, token in zip(header.values(), tokens):
+                    if namestr.vtype == xport.VariableType.NUMERIC:
+                        raw_columns[namestr.name].append(bytes(token))
                 yield tuple(f(v) for f, v in zip(converters, tokens))
 
-        return cls(iterator(), header)
+        self = cls(iterator(), header)
+        self.raw = raw_columns
+        return self
 
     def to_bytes(self):
         """
@@ -557,13 +581,27 @@ class Observations(Iterator):
 
         fmt = ''.join(f'{namestr.length}s' for namestr in self.header.values())
         converters = []
+        numeric_names = []
         for namestr in self.header.values():
             if namestr.vtype == xport.VariableType.NUMERIC:
-                converters.append(ieee_to_ibm)
+                numeric_names.append(namestr.name)
+                converters.append(None)  # Replaced per row to use raw bytes.
             else:
                 converters.append(character_encoder(namestr.length))
-        for t in self:
-            g = (f(v) for f, v in zip(converters, t))
+        raws = {
+            name: list(values) for name, values in getattr(self, 'raw', {}).items()
+        }
+        for i, t in enumerate(self):
+            g = []
+            n = 0
+            for namestr, f, v in zip(self.header.values(), converters, t):
+                if namestr.vtype == xport.VariableType.NUMERIC:
+                    name = numeric_names[n]
+                    n += 1
+                    raw = raws[name][i] if name in raws and i < len(raws[name]) else None
+                    g.append(_encode_field(v, raw))
+                else:
+                    g.append(f(v))
             yield struct.pack(fmt, *g)
 
     def __bytes__(self):
@@ -575,6 +613,79 @@ class Observations(Iterator):
         if len(observations) % 80:
             observations += b' ' * (80 - len(observations) % 80)
         return observations
+
+
+def _is_missing_encoding(raw):
+    """
+    Whether IBM bytes encode a SAS missing value rather than a number.
+    """
+    raw = bytes(raw).ljust(8, b'\x00')
+    return raw[0] in b'._ABCDEFGHIJKLMNOPQRSTUVWXYZ' and not any(raw[1:])
+
+
+def _encode_field(value, raw=None):
+    """
+    Encode a numeric field, reusing ``raw`` only when it still matches.
+
+    This is deliberately conservative: an edited value must not inherit an
+    unrelated original encoding.  When the bytes match the value's current
+    numeric view, using them preserves the exact representation even where
+    IEEE-754 cannot express the IBM fraction.  Missing markers are reused
+    when the value is still missing, so tags such as ``.A`` survive writing.
+    """
+    if raw is not None:
+        raw = bytes(raw)
+        try:
+            current = ibm_to_ieee(raw)
+            if _is_missing_encoding(raw):
+                # Pandas stores these as plain NaN in a float column, which
+                # erases the SAS tag.  Retain the source bytes whenever the
+                # value is still missing.  An explicitly different special
+                # missing value is re-encoded instead.
+                if _same_missing(value, raw):
+                    return raw
+            elif float(current) == float(value):
+                return raw
+        except (ValueError, TypeError):
+            pass
+    return encode_value(value)
+
+
+def _same_missing(value, raw):
+    """
+    Whether ``value`` can reuse the missing-value tag encoded by ``raw``.
+
+    A plain float NaN cannot express which SAS tag it came from, so it reuses
+    the original bytes.  A special missing value must match the stored tag.
+    """
+    try:
+        missing = math.isnan(value)
+    except TypeError:
+        return False
+    if not missing:
+        return False
+    if isinstance(value, xport.SpecialMissingValue):
+        return raw[:1] == value.name.encode('ascii')
+    return True
+
+
+def _set_raw_columns(dataset, raw):
+    """
+    Attach original encodings to a dataset and to its numeric variables.
+
+    Encodings are stored as index-aligned Series so that filtering the dataset
+    does not silently pair a value with another row's bytes.
+    """
+    columns = {}
+    for name, values in raw.items():
+        values = list(values)
+        if len(values) != len(dataset.index):
+            raise ValueError(f'Raw encodings for {name!r} have a different length')
+        columns[name] = pd.Series(values, index=dataset.index, dtype='object', name=name)
+    object.__setattr__(dataset, '_raw_columns', columns)
+    for name, series in columns.items():
+        if name in dataset.columns:
+            object.__setattr__(dataset[name], '_raw', series)
 
 
 class Member(xport.Dataset):
@@ -633,6 +744,8 @@ class Member(xport.Dataset):
         head = cls.from_header(header)
         data = Member(pd.DataFrame.from_records(observations, columns=list(header)))
         data.copy_metadata(head)
+        if observations.raw:
+            _set_raw_columns(data, observations.raw)
         LOG.info(f'Decoded XPORT dataset {data.name!r}')
         LOG.debug('%s', data)
         return data
@@ -804,70 +917,66 @@ def strftime(dt, minimum=datetime(1900, 1, 1), maximum=datetime(2100, 1, 1)):
     return dt.strftime('%d%b%y:%H:%M:%S').upper().encode('ascii')
 
 
-def ibm_to_ieee(ibm: bytes) -> float:
+def ibm_to_ieee(ibm: bytes) -> xport.IBMFloat:
     """
     Convert IBM-format floating point (bytes) to IEEE 754 64-bit (float).
-    """
-    # IBM mainframe:    sign * 0.mantissa * 16 ** (exponent - 64)
-    # Python uses IEEE: sign * 1.mantissa * 2 ** (exponent - 1023)
 
+    The return value is an ``xport.IBMFloat``: a regular Python ``float``
+    that also remembers the bytes it came from.  That makes it possible to
+    audit a read result without pretending that numeric equality proves the
+    original encoding can be reproduced.
+
+    IBM-format values are ``sign * 0.mantissa * 16 ** (exponent - 64)``.
+    The fraction has 56 bits, which is three more than an IEEE-754 double's
+    significand, so some values necessarily round when viewed as a float.
+    """
     # Pad-out to 8 bytes if necessary. We expect 2 to 8 bytes, but
     # there's no need to check; bizarre sizes will cause a struct
     # module unpack error.
-    ibm = ibm.ljust(8, b'\x00')
+    raw = bytes(ibm)
+    width = len(raw)
+    ibm = raw.ljust(8, b'\x00')
 
-    # parse the 64 bits of IBM float as one 8-byte unsigned long long
+    # Parse the 64 bits of IBM float as one 8-byte unsigned long long.
     ulong, = struct.unpack('>Q', ibm)
 
     # IBM: 1-bit sign, 7-bits exponent, 56-bits mantissa
-    sign = ulong & 0x8000000000000000
+    sign = -1.0 if ulong & 0x8000000000000000 else 1.0
     exponent = (ulong & 0x7f00000000000000) >> 56
     mantissa = ulong & 0x00ffffffffffffff
 
     if mantissa == 0:
-        if ibm[:1] == b'\x00':
-            return 0.0
-        elif ibm[:1] == b'\x80':
-            return -0.0
-        elif ibm[:1] == b'.':
-            return float('nan')
-        elif ibm[:1] in b'_ABCDEFGHIJKLMNOPQRSTUVWXYZ':
-            return getattr(xport.NaN, chr(ibm[0]))
-        else:
-            raise ValueError('Neither "true" zero nor NaN: %r' % ibm)
+        first = ibm[:1]
+        if first == b'.':
+            # SAS's default missing value, distinct from special missing.
+            return xport.IBMFloat(float('nan'), raw=raw, width=width)
+        if first in b'_ABCDEFGHIJKLMNOPQRSTUVWXYZ':
+            # Keep the tag.  The enum's ``raw`` property returns the bytes.
+            return getattr(xport.NaN, chr(first[0]))
+        # IBM considers any encoding with a zero fraction to be a zero.
+        # Zero is not normalized, so the exponent and sign may be unusual.
+        return xport.IBMFloat(sign * 0.0, raw=raw, width=width)
 
-    # IBM-format exponent is base 16, so the mantissa can have up to 3
-    # leading zero-bits in the binary mantissa. IEEE format exponent
-    # is base 2, so we don't need any leading zero-bits and will shift
-    # accordingly. This is one of the criticisms of IBM-format, its
-    # wobbling precision.
-    if ulong & 0x0080000000000000:
-        shift = 3
-    elif ulong & 0x0040000000000000:
-        shift = 2
-    elif ulong & 0x0020000000000000:
-        shift = 1
-    else:
-        shift = 0
-    mantissa >>= shift
+    # Avoid reconstructing the value through IEEE bit manipulation: the IBM
+    # fraction can have up to 56 significant bits and may be unnormalized.
+    # ``math.ldexp`` correctly rounds the exact value to an IEEE double.
+    value = math.ldexp(mantissa, 4 * (exponent - 64) - 56)
+    return xport.IBMFloat(sign * value, raw=raw, width=width)
 
-    # clear the 1 bit to the left of the binary point
-    # this is implicit in IEEE specification
-    mantissa &= 0xffefffffffffffff
 
-    # IBM exponent is excess 64, but we subtract 65, because of the
-    # implicit 1 left of the radix point for the IEEE mantissa
-    exponent -= 65
-    # IBM exponent is base 16, IEEE is base 2, so we multiply by 4
-    exponent <<= 2
-    # IEEE exponent is excess 1023, but we also increment for each
-    # right-shift when aligning the mantissa's first 1-bit
-    exponent += shift + 1023
+def encode_value(value, preserve_raw=False):
+    """
+    Encode one numeric value in IBM-format.
 
-    # IEEE: 1-bit sign, 11-bits exponent, 52-bits mantissa
-    # We didn't shift the sign bit, so it's already in the right spot
-    ieee = sign | (exponent << 52) | mantissa
-    return struct.unpack(">d", struct.pack(">Q", ieee))[0]
+    Special missing values keep their tag.  If ``preserve_raw`` is true and
+    ``value`` carries an original encoding that still matches its numeric
+    view, that encoding is returned instead of a fresh conversion.
+    """
+    if isinstance(value, xport.SpecialMissingValue):
+        return bytes(value)
+    if isinstance(value, xport.IBMFloat) and preserve_raw and value.raw is not None:
+        return value.encoded
+    return ieee_to_ibm(float(value))
 
 
 def ieee_to_ibm(ieee):
@@ -877,7 +986,15 @@ def ieee_to_ibm(ieee):
     # Python uses IEEE: sign * 1.mantissa * 2 ** (exponent - 1023)
     # IBM mainframe:    sign * 0.mantissa * 16 ** (exponent - 64)
 
+    if isinstance(ieee, xport.SpecialMissingValue):
+        return bytes(ieee)
+
     if ieee == 0.0:
+        # IBM's true zero is all zero bits, but the sign bit is meaningful
+        # when reading.  Preserve negative zero so that a numeric view of
+        # -0.0 does not silently claim to be the same encoding as +0.0.
+        if math.copysign(1.0, ieee) < 0:
+            return b'\x80' + b'\x00' * 7
         return b'\x00' * 8
 
     # The IBM hexadecimal floating point (HFP) format represents the number
@@ -904,7 +1021,9 @@ def ieee_to_ibm(ieee):
     exponent = ((ulong & (0x7ff << 52)) >> 52) - 1023  # 11-bits   exponent
     mantissa = ulong & 0x000fffffffffffff  # 52-bits   mantissa/significand
 
-    if exponent > 248:
+    # IBM's largest normalized value is 0.ffffffffffffff * 16 ** 63,
+    # which is just under 2 ** 252.  IEEE exponents of 251 and below fit.
+    if exponent > 251:
         msg = 'Cannot store magnitude more than ~ 16 ** 63 as IBM-format'
         raise Overflow(msg)
     if exponent < -260:

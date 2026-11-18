@@ -43,3 +43,9 @@ v3.6.0, 2022-02-02
 
 v3.6.1, 2022-02-15
   Fix issue with v8 format when the dataset has no long labels.
+
+Unreleased
+  Retain IBM encodings alongside numeric values and add field-level audits.
+  Preserve byte-exact encodings when writing an unedited read result.
+  Fix IBM overflow boundary to accept IEEE values below 16 ** 63.
+  Preserve the sign of negative zero when encoding.

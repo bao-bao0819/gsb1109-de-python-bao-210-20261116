@@ -91,6 +91,64 @@ open them using mode ``'rb'``.
 .. _Pandas: http://pandas.pydata.org/
 
 
+Auditing numeric encodings
+==========================
+
+Reading an IBM hexadecimal floating point field produces a Python
+``float``, which uses IEEE-754 binary64.  The two values are often close,
+but IBM's fraction has 56 bits and IEEE's has 53.  A value can therefore
+read back to a plausible number and still not reproduce the original
+bytes.  The reader retains that original representation so that an audit
+can check it directly.
+
+Each value decoded from a numeric field is an ``xport.IBMFloat``, a normal
+``float`` with ``raw`` bytes attached.  Datasets and variables also expose
+``raw`` views aligned with their index.  The ``audit`` module compares the
+numeric view with a fresh conversion, using exact rational arithmetic for
+the error:
+
+.. code:: python
+
+    import xport.v56
+
+    with open('example.xpt', 'rb') as f:
+        library = xport.v56.load(f)
+
+    ds = next(iter(library.values()))
+    print(ds.raw)                  # original bytes, by variable
+    print(ds['TEMP'].audit()[0])   # one AuditResult
+    report = ds.audit()            # every numeric value
+    print(report.reencodable, report.lossless)
+
+The distinction between ``reencodable`` and ``lossless`` is deliberate.
+``lossless`` requires byte-for-byte reproduction of the original encoding.
+``reencodable`` only requires the field error requirement to be met.
+By default, no tolerance is assumed, so a precision-only difference is not
+called lossless.  A field error requirement can come from a relative
+tolerance, an absolute tolerance, or the decimals in a SAS format:
+
+.. code:: python
+
+    ds.audit(tolerance={'rtol': 1e-12})
+    ds.audit(tolerance={'TEMP': {'decimals': 1}})
+    ds['TEMP'].audit(decimals=1)
+
+Statuses explain the result: ``exact``, ``precision``, ``precision_only``,
+``missing``, ``negative_zero``, ``zero``, ``underflow``, and ``overflow``.
+Special missing values such as ``.A`` keep their tag.  Ordinary missing
+values (``.``) stay missing markers rather than becoming arbitrary NaN
+payloads.  ``-0.0`` remains a distinct encoding from ``0.0``; float equality
+between them is not evidence of a lossless round trip.  Values smaller than
+the smallest normalized IBM value report ``underflow`` instead of silently
+rounding to zero.
+
+Writing a dataset that still carries its read encodings reuses those bytes
+when the numeric value is unchanged.  This keeps an ordinary read/write
+round trip byte-exact even for values whose IBM fraction exceeds IEEE-754
+precision.  If a value was edited, the old encoding is ignored and the value
+is converted afresh.
+
+
 You can also use the ``xport`` module as a command-line tool to convert
 an XPT file to CSV (comma-separated values) file.  The ``xport``
 executable is a friendly alias for ``python -m xport``. Caution: if this command-line does not work with the lastest version, it should be working with version 2.0.2. To get this version, we can either download the files from this `link`_ or simply type the following command line your bash terminal: ``pip install xport==2.0.2``.

@@ -5,6 +5,7 @@ Read and write SAS XPORT/XPT-format files.
 # Standard Library
 import enum
 import logging
+import math
 import re
 import string
 import struct
@@ -22,10 +23,116 @@ from .__about__ import __version__  # noqa: F401 module imported but unused
 LOG = logging.getLogger(__name__)
 
 __all__ = [
+    'IBMFloat',
     'Library',
     'Member',
     'NaN',
+    'RawFloat',
 ]
+
+
+class IBMFloat(float):
+    """
+    IEEE numeric view of an IBM hexadecimal floating point value.
+
+    ``IBMFloat`` is a regular ``float``, so it behaves like the numeric view
+    in comparisons and in Pandas.  It also carries the bytes from which it was
+    decoded, which is what makes it possible to audit whether re-encoding the
+    numeric view reproduces the original representation.
+
+    The original bytes are available as ``raw``.  ``encoded`` is the same
+    representation padded to the eight bytes used by IBM floating point.
+    Neither attribute is a substitute for a byte-for-byte audit: two different
+    encodings can compare equal as floats, such as ``0.0`` and ``-0.0``.
+    """
+
+    def __new__(cls, value=0.0, raw=None, width=None):
+        """
+        Create a numeric view, optionally retaining its original bytes.
+        """
+        self = super().__new__(cls, value)
+        self.raw = bytes(raw) if raw is not None else None
+        self.width = width if width is not None else (len(self.raw) if self.raw
+                                                      is not None else 8)
+        self.encoded = self.raw.ljust(8, b'\x00') if self.raw is not None else None
+        self.missing_tag = None
+        return self
+
+    @property
+    def value(self):
+        """
+        The numeric (IEEE) value.
+        """
+        return float(self)
+
+    @property
+    def ieee(self):
+        """
+        The numeric (IEEE) value.
+        """
+        return float(self)
+
+    @property
+    def ibm(self):
+        """
+        The original IBM-format bytes, if known.
+        """
+        return self.raw
+
+    @property
+    def is_missing(self):
+        """
+        Whether this value represents a SAS missing value.
+        """
+        return self.missing_tag is not None or math.isnan(self)
+
+    @property
+    def is_negative_zero(self):
+        """
+        Whether this is a negative zero.
+        """
+        return self == 0.0 and math.copysign(1.0, self) < 0
+
+    def reencode(self, preserve_raw=False):
+        """
+        Encode the numeric view as IBM-format bytes.
+
+        By default this is a fresh numeric conversion.  Set ``preserve_raw`` to
+        return the original bytes when the numeric view still matches them.
+        """
+        from .v56 import encode_value
+        return encode_value(self, preserve_raw=preserve_raw)
+
+    def audit(self, tolerance=None, **kwds):
+        """
+        Audit whether this value can be re-encoded to its original bytes.
+        """
+        from . import audit
+        if self.raw is not None:
+            return audit.audit_value(
+                self.raw,
+                value=float(self),
+                width=self.width,
+                tolerance=tolerance,
+                **kwds,
+            )
+        return audit.audit_float(float(self), tolerance=tolerance, **kwds)
+
+    def can_reencode(self, tolerance=None, **kwds):
+        """
+        Whether the value is re-encodable under the given error requirement.
+        """
+        return self.audit(tolerance=tolerance, **kwds).reencodable
+
+    def __repr__(self):
+        """REPL-format."""
+        details = f'{float(self)!r}'
+        if self.raw is not None:
+            details += f', raw={self.raw.hex()}'
+        return f'{type(self).__name__}({details})'
+
+
+RawFloat = IBMFloat
 
 
 class SpecialMissingValue(float):
@@ -44,6 +151,74 @@ class SpecialMissingValue(float):
         XPORT-format byte string.
         """
         return self.name.encode('ascii') + b'\x00' * 7
+
+    @property
+    def raw(self):
+        """
+        The original IBM-format bytes.
+        """
+        return bytes(self)
+
+    @property
+    def encoded(self):
+        """
+        The original bytes padded to the eight-byte IBM representation.
+        """
+        return bytes(self)
+
+    @property
+    def ibm(self):
+        """
+        The original IBM-format bytes.
+        """
+        return bytes(self)
+
+    @property
+    def width(self):
+        """
+        The width of the encoded numeric field.
+        """
+        return 8
+
+    @property
+    def missing_tag(self):
+        """
+        The SAS missing-value tag, such as ``A`` or ``_``.
+        """
+        return self.name
+
+    @property
+    def is_missing(self):
+        """
+        Whether this value represents a SAS missing value.
+        """
+        return True
+
+    @property
+    def is_negative_zero(self):
+        """
+        Special missing values are never negative zero.
+        """
+        return False
+
+    def reencode(self, preserve_raw=True):
+        """
+        Encode this missing value as IBM-format bytes.
+        """
+        return bytes(self)
+
+    def audit(self, tolerance=None, **kwds):
+        """
+        Audit the encoding of this missing value.
+        """
+        from . import audit
+        return audit.audit_value(bytes(self), value=float('nan'), tolerance=tolerance, **kwds)
+
+    def can_reencode(self, tolerance=None, **kwds):
+        """
+        Whether this missing value is re-encodable.
+        """
+        return self.audit(tolerance=tolerance, **kwds).reencodable
 
     @classmethod
     def unpack(cls, bytestring):
@@ -373,6 +548,39 @@ class Variable(pd.Series):
         return Variable
 
     @property
+    def raw(self):
+        """
+        Original numeric encodings aligned with this variable, if any.
+
+        The bytes come from the dataset reader and are retained separately
+        from the Pandas float column, because Pandas coerces float subclasses
+        and would otherwise discard the IBM representation.
+        """
+        raw = getattr(self, '_raw', None)
+        if raw is None:
+            return None
+        return pd.Series(raw, index=self.index, dtype='object', name=self.name)
+
+    def audit(self, tolerance=None, **kwds):
+        """
+        Audit numeric values against their original encodings.
+        """
+        from .audit import audit_series
+        return audit_series(
+            list(self),
+            raws=self.raw,
+            tolerance=tolerance,
+            name=self.name,
+            **kwds,
+        )
+
+    def can_reencode(self, tolerance=None, **kwds):
+        """
+        Whether every value in this variable can be re-encoded.
+        """
+        return all(result.reencodable for result in self.audit(tolerance=tolerance, **kwds))
+
+    @property
     def _constructor_expanddim(self):
         """
         Construct an instance with an extra dimension.
@@ -449,12 +657,80 @@ class Dataset(pd.DataFrame):
         if isinstance(other, Dataset):
             for name in self._metadata:
                 object.__setattr__(self, name, getattr(other, name, None))
+            raw = getattr(other, '_raw_columns', None)
+            if raw:
+                object.__setattr__(self, '_raw_columns', raw)
         if isinstance(other, (Dataset, Mapping)):
             for k, v in self.items():
                 try:
                     v.copy_metadata(other[k])
                 except KeyError:
                     continue
+
+    @property
+    def raw(self):
+        """
+        Original numeric encodings, by variable name.
+
+        The values of this mapping are Pandas ``Series`` of bytes aligned with
+        the dataset index.  Character variables are omitted.  This is the
+        source representation side of the numeric view held by the dataset
+        itself, so audits do not have to guess from rounded floats.
+
+        If the dataset has been filtered, the raw series are reindexed to the
+        same labels.  Rows without a retained encoding are absent rather than
+        paired with the wrong bytes.
+        """
+        raw = getattr(self, '_raw_columns', None)
+        if not raw:
+            return {}
+        columns = {}
+        for k, v in raw.items():
+            if k not in self.columns:
+                continue
+            if isinstance(v, pd.Series):
+                series = v.reindex(self.index)
+            else:
+                values = list(v)
+                if len(values) != len(self.index):
+                    raise ValueError(f'Raw encodings for {k!r} have a different length')
+                series = pd.Series(values, index=self.index, dtype='object')
+            columns[k] = series.astype('object')
+            object.__setattr__(self[k], '_raw', series)
+        return columns
+
+    @property
+    def numeric(self):
+        """
+        Numeric view of the dataset.
+
+        This is only a readable alias for the dataset itself; use ``raw`` for
+        the original encodings.
+        """
+        return self
+
+    def to_raw_frame(self):
+        """
+        DataFrame of original encoded bytes, one column per numeric variable.
+        """
+        return pd.DataFrame(self.raw, index=self.index)
+
+    def to_numeric_frame(self):
+        """
+        DataFrame of numeric views.
+        """
+        return pd.DataFrame(self, copy=False)
+
+    def audit(self, tolerance=None, **kwds):
+        """
+        Audit numeric values against their original encodings.
+
+        Returns an ``xport.audit.AuditReport`` covering every value.  Each
+        result distinguishes byte-exact encodings, precision-only differences,
+        missing values, signed zero, and arithmetic underflow or overflow.
+        """
+        from .audit import audit_dataset
+        return audit_dataset(self, tolerance=tolerance, **kwds)
 
     def __repr__(self):
         """REPL-format."""
@@ -862,3 +1138,8 @@ class DictReader(Reader):
     def __iter__(self):
         for row in super().__iter__():
             yield row._asdict()
+
+
+# Import the audit helpers last: they refer back to the core types above
+# without creating an import cycle.
+from . import audit  # noqa: E402,F401 isort:skip

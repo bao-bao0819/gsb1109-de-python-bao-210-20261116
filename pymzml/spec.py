@@ -553,6 +553,65 @@ class Spectrum(MsData):
         self.set_peaks(None, "raw")
         return self
 
+    def subtract_blank(
+        self,
+        blank,
+        *,
+        scale=1.0,
+        tolerance=0.0,
+        max_gap=None,
+        clip=False,
+        chunk_size=None,
+        peak_type="raw",
+        blank_peak_type="raw",
+    ):
+        """
+        Subtract a blank spectrum sampled on a different m/z grid.
+
+        Unlike :meth:`__sub__`, which matches reprofiled m/z keys exactly, this
+        aligns the blank onto this spectrum: direct matches within
+        ``tolerance`` are used as they are, other m/z values are linearly
+        interpolated from the bracketing blank points.  Ranges the blank does
+        not cover are reported as unknown and are never treated as zero
+        background.  Negative results are kept unless ``clip=True``.
+
+        Arguments:
+            blank (Spectrum): blank spectrum to subtract.
+
+        Keyword Arguments:
+            scale (float or callable): factor applied to the blank intensity,
+                or a callable evaluated per sample m/z.
+            tolerance (float): absolute m/z tolerance for a direct match.
+            max_gap (float, optional): widest blank gap bridged by
+                interpolation.  Wider gaps become unknown intervals.
+            clip (bool): clip negative values at zero.  Defaults to False.
+            chunk_size (int, optional): process this many sample points per
+                chunk; the result is identical to a full pass.
+            peak_type (str): peak type read from this spectrum.
+            blank_peak_type (str): peak type read from ``blank``.
+
+        Returns:
+            BlankSubtractionResult: values with both-sided sources and
+            unknown intervals.  Use ``.peaks`` for ``(mz, value)`` pairs.
+
+        Example:
+
+        >>> sample.subtract_blank(blank, scale=0.5, max_gap=0.05)
+        """
+        from .blank import subtract_blank as _subtract_blank
+
+        return _subtract_blank(
+            self,
+            blank,
+            scale=scale,
+            tolerance=tolerance,
+            max_gap=max_gap,
+            clip=clip,
+            chunk_size=chunk_size,
+            sample_peak_type=peak_type,
+            blank_peak_type=blank_peak_type,
+        )
+
     def __mul__(self, value):
         """
         Multiplies each intensity with a float, i.e. scales the spectrum.

@@ -25,7 +25,16 @@ Copyright (C) 2010-2019 M. Kösters, C. Fufezan
     SOFTWARE.
 """
 
-__all__ = ["run", "spec", "chromatogram", "obo", "minimum", "plot", "file_classes"]
+__all__ = [
+    "run",
+    "spec",
+    "chromatogram",
+    "blank",
+    "obo",
+    "minimum",
+    "plot",
+    "file_classes",
+]
 
 import sys
 
@@ -41,6 +50,7 @@ __version__ = version("pymzml").rstrip(".dev0")
 import pymzml.run
 import pymzml.spec
 import pymzml.chromatogram
+import pymzml.blank
 from pymzml.spec import MSDecoder
 from pymzml.chromatogram import Chromatogram
 import pymzml.obo

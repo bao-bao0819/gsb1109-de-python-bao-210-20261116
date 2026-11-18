@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+- Add quantization-aware code recovery and range previewing. `EdfSignal.recover_digital_codes` and `edfio.recover_digital_codes` return per-sample candidate code intervals (a unique code or a range when the declared source uncertainty makes it ambiguous). Physical views retain previous quantization error instead of being treated as exact original values.
+- Add `EdfSignal.preview_range`, `Edf.preview_ranges`, and `edfio.preview_requantization` for chunked previewing of a new range without loading an entire recording. Previews report previous and new quantization error, target and source saturation counts, and true extrema separately from clipped endpoints.
+
 ## [0.4.18] - 2026-10-01
 
 ### Fixed

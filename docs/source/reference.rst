@@ -14,6 +14,14 @@ API reference
    Edf
    EdfSignal
    EdfAnnotation
+   QuantizationRange
+   SourceDeclaration
+   DigitalRecovery
+   RangePreview
+   QuantizedView
+   recover_digital_codes
+   preview_requantization
+   requantize
    Patient
    Recording
    AnonymizedDateError

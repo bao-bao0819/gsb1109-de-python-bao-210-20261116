@@ -13,7 +13,7 @@ from decimal import Decimal
 from fractions import Fraction
 from math import ceil, floor
 from pathlib import Path
-from typing import ClassVar, Generic, Literal, TypeVar, Union
+from typing import Any, ClassVar, Generic, Literal, TypeVar, Union
 
 import numpy as np
 
@@ -41,6 +41,7 @@ from edfio.edf_header import (
     Recording,
     _encode_edfplus_date,
 )
+from edfio.edf_quantization import RangePreview
 from edfio.edf_signal import BdfSignal, EdfSignal
 
 if sys.version_info < (3, 11):  # pragma: no cover
@@ -924,6 +925,89 @@ class _Base(Generic[_Signal]):
     def duration(self) -> float:
         """Recording duration in seconds."""
         return self.num_data_records * self.data_record_duration
+
+    def preview_ranges(
+        self,
+        *,
+        physical_range: dict[str | int, tuple[float, float]]
+        | tuple[float, float]
+        | None = None,
+        digital_range: dict[str | int, tuple[int, int]] | tuple[int, int] | None = None,
+        error_bound: float | dict[str | int, float] = 0.0,
+        source_kind: Literal["digital", "physical"] = "digital",
+        source_saturated_low: bool | dict[str | int, bool] = False,
+        source_saturated_high: bool | dict[str | int, bool] = False,
+        chunk_size: int = 1_000_000,
+    ) -> dict[str, RangePreview]:
+        """
+        Preview new signal ranges without loading the recording into memory.
+
+        Each signal is processed in chunks, so lazy-loaded recordings do not
+        have to be read as a whole. Ranges and error bounds are either applied
+        to every signal or specified per signal index or label.
+
+        Parameters
+        ----------
+        physical_range : dict | tuple | None, default: None
+            Target physical range for each signal, or a single range applied to
+            all signals. Defaults to each signal's current range.
+        digital_range : dict | tuple | None, default: None
+            Target digital range for each signal, or a single range applied to
+            all signals. Defaults to each signal's current range.
+        error_bound : float | dict, default: 0
+            Additional absolute physical uncertainty, globally or per signal.
+        source_kind : {"digital", "physical"}, default: "digital"
+            Whether to read raw codes or calibrated physical views.
+        source_saturated_low, source_saturated_high : bool | dict, default: False
+            Whether source endpoint values should be treated as clipped.
+        chunk_size : int, default: 1_000_000
+            Approximate number of samples processed per chunk.
+
+        Returns
+        -------
+        dict[str, RangePreview]
+            Preview results keyed by signal label. If labels are ambiguous,
+            keys are ``"<label>#<index>"``.
+        """
+        previews: dict[str, RangePreview] = {}
+        for index, signal in enumerate(self.signals):
+            key = self._preview_key(index, signal.label)
+            previews[key] = signal.preview_range(
+                physical_range=self._per_signal_value(
+                    physical_range, index, signal.label, "physical_range"
+                ),
+                digital_range=self._per_signal_value(
+                    digital_range, index, signal.label, "digital_range"
+                ),
+                error_bound=self._per_signal_value(
+                    error_bound, index, signal.label, "error_bound"
+                ),
+                source_kind=source_kind,
+                source_saturated_low=self._per_signal_value(
+                    source_saturated_low, index, signal.label, "source_saturated_low"
+                ),
+                source_saturated_high=self._per_signal_value(
+                    source_saturated_high, index, signal.label, "source_saturated_high"
+                ),
+                chunk_size=chunk_size,
+            )
+        return previews
+
+    def _preview_key(self, index: int, label: str) -> str:
+        labels = self.labels
+        if labels.count(label) > 1:
+            return f"{label}#{index}"
+        return label
+
+    @staticmethod
+    def _per_signal_value(value: Any, index: int, label: str, name: str) -> Any:
+        if isinstance(value, dict):
+            if index in value:
+                return value[index]
+            if label in value:
+                return value[label]
+            raise ValueError(f"No {name} specified for signal {index} ({label!r})")
+        return value
 
     def get_annotations(
         self, start_second: float | None = None, stop_second: float | None = None

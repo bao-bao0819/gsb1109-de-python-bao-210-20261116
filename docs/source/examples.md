@@ -105,3 +105,30 @@ edf = read_edf("example.edf")
 edf.anonymize()
 edf.write("example_anonymized.edf")
 ```
+
+
+## Quantization and range preview
+Digital codes can be recovered from raw codes or from a physical view. A physical
+view is never treated as exact: its declared error bound is retained.
+
+```python
+from edfio import QuantizationRange, SourceDeclaration, read_edf
+
+edf = read_edf("example.edf")
+signal = edf.signals[0]
+
+# Raw digital codes are exact, so every code is recovered uniquely.
+recovery = signal.recover_digital_codes()
+assert recovery.is_unique
+
+# A physical view retains the quantization error of its source range.
+physical_source = SourceDeclaration.from_signal(signal, kind="physical")
+recovery = signal.recover_digital_codes(signal.data, source=physical_source)
+print(recovery.ranges())
+
+# Preview a new range without loading the whole recording.
+preview = signal.preview_range(
+    physical_range=(-1000, 1000), digital_range=(-2048, 2047), chunk_size=100_000
+)
+print(preview.total_error_bound, preview.true_min, preview.true_max)
+```

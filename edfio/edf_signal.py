@@ -16,6 +16,16 @@ from edfio._header_field import (
     encode_str,
 )
 from edfio._lazy_loading import LazyLoader, _DigitalDtype
+from edfio.edf_quantization import (
+    DigitalRecovery,
+    QuantizationRange,
+    QuantizedView,
+    RangePreview,
+    SourceDeclaration,
+    _preview_signal_range,
+    _recover_signal_codes,
+    requantize,
+)
 
 if sys.version_info < (3, 11):  # pragma: no cover
     from typing_extensions import Self
@@ -515,6 +525,142 @@ class _BaseSignal(Generic[_DigitalDtype]):
         if sampling_frequency is not None:
             self._sampling_frequency = sampling_frequency
         self._set_data(data)
+
+    @property
+    def quantization_range(self) -> QuantizationRange:
+        """The signal's declared digital-to-physical range."""
+        return QuantizationRange.from_signal(self)
+
+    def recover_digital_codes(
+        self,
+        values: npt.ArrayLike | None = None,
+        *,
+        target: QuantizationRange | None = None,
+        source: SourceDeclaration | QuantizationRange | None = None,
+        error_bound: float | npt.ArrayLike = 0.0,
+        source_saturated_low: bool | npt.ArrayLike | None = None,
+        source_saturated_high: bool | npt.ArrayLike | None = None,
+    ) -> DigitalRecovery:
+        """
+        Recover the digital codes compatible with declared source values.
+
+        By default, the signal's raw digital codes are used as an exact source
+        and the signal's own range as the target, so every code is unique. To
+        recover codes from an already converted physical view, pass
+        ``values=signal.data`` and
+        ``source=SourceDeclaration.from_signal(signal, kind="physical")``. The
+        returned intervals are then widened by the previous quantization error.
+
+        Parameters
+        ----------
+        values : npt.ArrayLike | None, default: None
+            Source codes or physical values. Defaults to the raw digital codes
+            (or the physical data if ``source.kind == "physical"``).
+        target : QuantizationRange | None, default: None
+            Target range. Defaults to the signal's declared range.
+        source : SourceDeclaration | QuantizationRange | None, default: None
+            Source declaration. Defaults to the signal's raw digital codes.
+        error_bound : float | npt.ArrayLike, default: 0
+            Additional absolute physical uncertainty.
+        source_saturated_low, source_saturated_high : bool | npt.ArrayLike | None
+            Per-sample source saturation masks.
+
+        Returns
+        -------
+        DigitalRecovery
+            Candidate intervals and separate saturation masks.
+        """
+        return _recover_signal_codes(
+            self,
+            values,
+            target=target,
+            source=source,
+            error_bound=error_bound,
+            source_saturated_low=source_saturated_low,
+            source_saturated_high=source_saturated_high,
+        )
+
+    def preview_range(
+        self,
+        *,
+        physical_range: tuple[float, float] | None = None,
+        digital_range: tuple[int, int] | None = None,
+        error_bound: float = 0.0,
+        source_kind: Literal["digital", "physical"] = "digital",
+        source_saturated_low: bool = False,
+        source_saturated_high: bool = False,
+        chunk_size: int = 1_000_000,
+        source: SourceDeclaration | None = None,
+    ) -> RangePreview:
+        """
+        Preview a new range without loading the whole signal.
+
+        For lazy-loaded signals, data is read one chunk at a time, so an entire
+        night does not have to be kept in memory. The preview reports candidate
+        code uniqueness, previous and new quantization error, and saturation at
+        the source and target endpoints separately from true extrema.
+
+        Parameters
+        ----------
+        physical_range : tuple[float, float] | None, default: None
+            Target physical range. Defaults to the signal's current range.
+        digital_range : tuple[int, int] | None, default: None
+            Target digital range. Defaults to the signal's current range.
+        error_bound : float, default: 0
+            Additional absolute physical uncertainty of source values.
+        source_kind : {"digital", "physical"}, default: "digital"
+            Whether to read raw codes or the calibrated physical view.
+        source_saturated_low, source_saturated_high : bool, default: False
+            Whether source endpoint values should be treated as clipped.
+        chunk_size : int, default: 1_000_000
+            Approximate number of samples processed per chunk.
+        source : SourceDeclaration | None, default: None
+            Explicit source declaration. Overrides ``source_kind`` and the
+            source saturation flags.
+
+        Returns
+        -------
+        RangePreview
+            Aggregated preview statistics.
+        """
+        return _preview_signal_range(
+            self,
+            physical_range=physical_range,
+            digital_range=digital_range,
+            error_bound=error_bound,
+            source_kind=source_kind,
+            source_saturated_low=source_saturated_low,
+            source_saturated_high=source_saturated_high,
+            chunk_size=chunk_size,
+            source=source,
+        )
+
+    # British spelling alias
+    preview_requantization = preview_range
+
+    def calibrated_view(
+        self,
+        physical_range: tuple[float, float] | None = None,
+        digital_range: tuple[int, int] | None = None,
+    ) -> QuantizedView:
+        """
+        Return a :class:`QuantizedView` of the signal's physical data.
+
+        The view keeps a declaration that retains the signal's existing
+        quantization error for later conversions.
+        """
+        target = QuantizationRange(
+            digital_min=self.digital_min if digital_range is None else digital_range[0],
+            digital_max=self.digital_max if digital_range is None else digital_range[1],
+            physical_min=(
+                self.physical_min if physical_range is None else physical_range[0]
+            ),
+            physical_max=(
+                self.physical_max if physical_range is None else physical_range[1]
+            ),
+        )
+        source = SourceDeclaration.from_signal(self, kind="digital")
+        return requantize(self.digital, source, target)
 
     def _get_expected_new_length(self, sampling_frequency: float) -> int:
         if sampling_frequency <= 0:

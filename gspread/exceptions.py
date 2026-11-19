@@ -6,9 +6,12 @@ Exceptions used in gspread.
 
 """
 
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping, Optional
 
 from requests import Response
+
+if TYPE_CHECKING:
+    from .worksheet import WriteAccessRehearsal
 
 
 class UnSupportedExportFormat(Exception):
@@ -72,3 +75,17 @@ class APIError(GSpreadException):
 
 class SpreadsheetNotFound(GSpreadException):
     """Trying to open non-existent or inaccessible spreadsheet."""
+
+
+class StaleProtectionMetadataError(GSpreadException):
+    """Cached protection metadata was fetched with credentials that have
+    since changed (e.g. an OAuth token refresh).
+
+    The cached write/deny decision must not be treated as a server-side
+    guarantee. The protected ranges were re-fetched and the rehearsal
+    recomputed; the fresh result is available on :attr:`rehearsal`.
+    """
+
+    def __init__(self, *args: object) -> None:
+        super().__init__(*args)
+        self.rehearsal: Optional["WriteAccessRehearsal"] = None

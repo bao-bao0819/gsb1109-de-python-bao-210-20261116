@@ -19,6 +19,7 @@ from .exceptions import (
     IncorrectCellLabel,
     NoValidUrlKeyFound,
     SpreadsheetNotFound,
+    StaleProtectionMetadataError,
     WorksheetNotFound,
 )
 from .http_client import BackOffHTTPClient, HTTPClient
@@ -59,6 +60,7 @@ __all__ = [
     "IncorrectCellLabel",
     "NoValidUrlKeyFound",
     "SpreadsheetNotFound",
+    "StaleProtectionMetadataError",
     "WorksheetNotFound",
 
     # full module imports

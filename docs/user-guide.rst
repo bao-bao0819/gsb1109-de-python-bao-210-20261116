@@ -361,6 +361,74 @@ Update a range
    worksheet.update([[1, 2], [3, 4]], 'A1:B2')
 
 
+Rehearsing Writable Cells with Protected Ranges
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A worksheet can carry several overlapping protected ranges, each with its
+own editors and exemptions. Before writing, you can rehearse which cells the
+current caller may actually write with
+:meth:`~gspread.worksheet.Worksheet.rehearse_write_access`. It returns a
+:class:`~gspread.worksheet.WriteAccessRehearsal` that splits the cells into
+three groups:
+
+* ``allowed_cells`` - every protected range covering the cell permits the
+  write;
+* ``denied_cells`` - at least one covering range explicitly excludes the
+  caller;
+* ``insufficient_evidence_cells`` - the metadata is not enough to decide
+  (unknown caller identity, a Google Group whose membership cannot be
+  verified, or a range without editors metadata).
+
+.. code:: python
+
+   rehearsal = worksheet.rehearse_write_access('A1:C5')
+
+   rehearsal.allowed_cells
+   # ['D1', 'E2', ...]
+   rehearsal.denied_cells
+   # ['A1', ...]
+   rehearsal.insufficient_evidence_cells
+   # ['B2', ...]
+
+Each protected range is evaluated independently. An exemption granted on one
+range never cancels a restriction imposed by another range, so a single hard
+denial makes the cell ``denied`` even when an overlapping range allows it.
+The per-cell
+:class:`~gspread.worksheet.ProtectionVerdict` exposes the responsible
+protected-range IDs in ``blocking_protected_range_ids`` and
+``evidence_protected_range_ids``.
+
+Group editors can only be checked when you tell gspread which Google Groups
+the caller belongs to. Group addresses not listed there produce
+insufficient evidence rather than a denial:
+
+.. code:: python
+
+   rehearsal = worksheet.rehearse_write_access(
+       'A1:C5',
+       known_group_emails=['data-team@googlegroups.com'],
+   )
+
+For repeated checks use
+:meth:`~gspread.worksheet.Worksheet.rehearse_write_access_cached`, which
+reuses the fetched permission metadata. The cache is bound to the caller's
+credentials: when the credentials change (for example after an OAuth token
+refresh), the cached allowance is no longer treated as a guarantee. gspread
+re-fetches the protected ranges and raises
+:class:`~gspread.exceptions.StaleProtectionMetadataError`, whose
+``rehearsal`` attribute already holds the freshly computed result:
+
+.. code:: python
+
+   from gspread.exceptions import StaleProtectionMetadataError
+
+   try:
+       rehearsal = worksheet.rehearse_write_access_cached('A1:C5')
+   except StaleProtectionMetadataError as error:
+       # metadata was re-fetched automatically; use the fresh rehearsal
+       rehearsal = error.rehearsal
+
+
 Serializing Values the Standard ``json`` Module Cannot Encode
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

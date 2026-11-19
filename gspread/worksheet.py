@@ -6,6 +6,8 @@ This module contains common worksheets' models.
 
 """
 
+import base64
+import json
 import re
 import warnings
 from collections import Counter
@@ -30,7 +32,7 @@ from typing import (
 )
 
 from .cell import Cell
-from .exceptions import GSpreadException
+from .exceptions import GSpreadException, StaleProtectionMetadataError
 from .http_client import DefaultSerializerType, HTTPClient, ParamsType
 from .urls import WORKSHEET_DRIVE_URL
 from .utils import (
@@ -80,6 +82,109 @@ BatchData = TypedDict("BatchData", {"range": str, "values": List[List[Any]]})
 
 JSONResponse = MutableMapping[str, Any]
 ValueRangeType = TypeVar("ValueRangeType", bound="ValueRange")
+
+
+class ProtectionVerdict:
+    """Write-access decision for a single cell, derived from the protected
+    ranges declared on the worksheet and the caller's permission metadata.
+
+    :ivar str cell: Cell label in A1 notation, e.g. ``"B7"``.
+    :ivar str status: One of ``"allowed"``, ``"denied"`` or
+        ``"insufficient_evidence"``.
+    :ivar list[str] blocking_protected_range_ids: IDs of the protected ranges
+        that currently deny this cell write. Each entry is independently
+        enforced: an exemption on another range can never cancel it.
+    :ivar list[str] evidence_protected_range_ids: IDs of the protected ranges
+        covering the cell whose editors could not be evaluated (e.g. an email
+        that belongs to an unknown group, or a missing editors block). The
+        cell is therefore allowed only provisionally.
+    :ivar list[str] reasons: Human-readable explanations behind the verdict.
+    """
+
+    ALLOWED = "allowed"
+    DENIED = "denied"
+    INSUFFICIENT_EVIDENCE = "insufficient_evidence"
+
+    def __init__(
+        self,
+        cell: str,
+        status: str,
+        blocking_protected_range_ids: Optional[Sequence[str]] = None,
+        evidence_protected_range_ids: Optional[Sequence[str]] = None,
+        reasons: Optional[Sequence[str]] = None,
+    ) -> None:
+        self.cell = cell
+        self.status = status
+        self.blocking_protected_range_ids = list(blocking_protected_range_ids or [])
+        self.evidence_protected_range_ids = list(evidence_protected_range_ids or [])
+        self.reasons = list(reasons or [])
+
+    def __repr__(self) -> str:
+        return "<{} {} {}>".format(
+            self.__class__.__name__, repr(self.cell), self.status
+        )
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, ProtectionVerdict):
+            return NotImplemented
+        return (
+            self.cell == other.cell
+            and self.status == other.status
+            and self.blocking_protected_range_ids
+            == other.blocking_protected_range_ids
+            and self.evidence_protected_range_ids
+            == other.evidence_protected_range_ids
+            and self.reasons == other.reasons
+        )
+
+
+class WriteAccessRehearsal:
+    """The outcome of rehearsing which cells of a range may be written.
+
+    :ivar list[ProtectionVerdict] verdicts: One verdict per cell, in row
+        major order.
+    :ivar bool stale: ``True`` when the permission metadata was cached and
+        the caller's credentials have since changed. In that case no verdict
+        should be acted upon without re-fetching.
+    """
+
+    def __init__(
+        self, verdicts: Sequence[ProtectionVerdict], stale: bool = False
+    ) -> None:
+        self.verdicts = list(verdicts)
+        self.stale = stale
+
+    def _cells(self, status: str) -> List[str]:
+        return [
+            verdict.cell for verdict in self.verdicts if verdict.status == status
+        ]
+
+    @property
+    def allowed_cells(self) -> List[str]:
+        """Cells writable under every protected range covering them."""
+        return self._cells(ProtectionVerdict.ALLOWED)
+
+    @property
+    def denied_cells(self) -> List[str]:
+        """Cells blocked by at least one protected range. A single denial is
+        enough; exemptions granted on other ranges cannot override it."""
+        return self._cells(ProtectionVerdict.DENIED)
+
+    @property
+    def insufficient_evidence_cells(self) -> List[str]:
+        """Cells whose accessibility cannot be proven from the available
+        permission metadata."""
+        return self._cells(ProtectionVerdict.INSUFFICIENT_EVIDENCE)
+
+    def __repr__(self) -> str:
+        return "<{} allowed={} denied={} insufficient_evidence={} stale={}>".format(
+            self.__class__.__name__,
+            len(self.allowed_cells),
+            len(self.denied_cells),
+            len(self.insufficient_evidence_cells),
+            self.stale,
+        )
+
 
 
 class ValueRange(list):
@@ -196,6 +301,7 @@ class Worksheet:
         self.spreadsheet_id = spreadsheet_id
         self.client = client
         self._properties = properties
+        self._protection_cache: Optional[Dict[str, Any]] = None
 
         # kept for backward compatibility - publicly available
         # do not use if possible.
@@ -2075,6 +2181,315 @@ class Worksheet:
         num_new_cols = len(values)
         self._properties["gridProperties"]["columnCount"] += num_new_cols
         return res
+
+    # ------------------------------------------------------------------
+    # protected-range write access rehearsal
+    # ------------------------------------------------------------------
+
+    def _protection_cache_key(self) -> Tuple[Any, ...]:
+        """Identity of the permission metadata currently in effect.
+
+        A cached rehearsal is only reusable while this key is unchanged.
+        Token refreshes rotate the access token, so they invalidate the
+        cache: a previous "allowed" verdict is a snapshot, not a
+        server-side guarantee.
+        """
+        auth = getattr(self.client, "auth", None)
+        return (
+            getattr(auth, "token", None),
+            getattr(auth, "_refresh_token", None),
+            getattr(auth, "service_account_email", None),
+        )
+
+    def _get_caller_identity(self) -> Optional[str]:
+        """Best-effort email of the account making the calls.
+
+        Service-account credentials expose ``service_account_email`` while
+        OAuth user credentials expose the token payload's ``email`` claim.
+        Returns ``None`` when the identity cannot be determined, in which
+        case every non-warning protected range leaves the affected cells
+        with insufficient evidence.
+        """
+        auth = getattr(self.client, "auth", None)
+        service_account_email = getattr(auth, "service_account_email", None)
+        if isinstance(service_account_email, str) and service_account_email:
+            return service_account_email
+
+        token = getattr(auth, "token", None)
+        if isinstance(token, str):
+            try:
+                payload = token.split(".")[1]
+                payload += "=" * (-len(payload) % 4)
+                claims = json.loads(base64.urlsafe_b64decode(payload))
+                email = claims.get("email")
+                if isinstance(email, str):
+                    return email
+            except (IndexError, ValueError, TypeError):
+                pass
+
+        return None
+
+    def get_protected_ranges(self) -> List[MutableMapping[str, Any]]:
+        """Fetches the protected ranges declared on this worksheet.
+
+        Always queries the server for fresh metadata; the result is not
+        cached here so callers never mistake a stale snapshot for a current
+        permission.
+        """
+        metadata = self.client.fetch_sheet_metadata(
+            self.spreadsheet_id,
+            params={"fields": "sheets.properties,sheets.protectedRanges"},
+        )
+
+        try:
+            sheet = finditem(
+                lambda sheet: sheet["properties"]["sheetId"] == self.id,
+                metadata["sheets"],
+            )
+        except StopIteration:
+            return []
+
+        return list(sheet.get("protectedRanges", []))
+
+    @staticmethod
+    def _range_covers_cell(grid_range: Mapping[str, Any], row: int, col: int) -> bool:
+        """Whether a zero-based ``GridRange`` covers the one-based cell."""
+        start_row = grid_range.get("startRowIndex", 0)
+        end_row = grid_range.get("endRowIndex", float("inf"))
+        start_col = grid_range.get("startColumnIndex", 0)
+        end_col = grid_range.get("endColumnIndex", float("inf"))
+
+        return start_row <= row - 1 < end_row and start_col <= col - 1 < end_col
+
+    def _evaluate_protected_range(
+        self,
+        protected_range: Mapping[str, Any],
+        caller_email: Optional[str],
+        known_group_emails: Sequence[str],
+    ) -> Tuple[bool, Optional[str]]:
+        """Evaluates one protected range for the current caller.
+
+        Returns a tuple ``(denies, reason)`` where ``denies`` is ``False``
+        when the caller may edit this range and ``True`` when it may not.
+        ``reason`` is ``None`` on an explicit allowance, otherwise an
+        explanation: a string beginning with ``"insufficient_evidence:"``
+        marks a range whose editors cannot be fully evaluated, anything
+        else is a hard denial.
+        """
+        range_id = protected_range.get("protectedRangeId", "?")
+
+        if protected_range.get("warningOnly", False):
+            return False, None
+
+        # The server computes this flag for the credentials used to fetch
+        # the metadata, so a True value is an explicit allowance even when
+        # the caller's email cannot be decoded locally.
+        if protected_range.get("requestingUserCanEdit", False):
+            return False, None
+
+        editors = protected_range.get("editors")
+        if not editors:
+            return (
+                True,
+                "insufficient_evidence: protected range {} has no editors"
+                " metadata".format(range_id),
+            )
+
+        allowed_users = list(editors.get("users") or [])
+        allowed_groups = list(editors.get("groups") or [])
+
+        if caller_email and caller_email in allowed_users:
+            return False, None
+
+        # A group the caller is known to belong to grants the same edit
+        # access as being listed directly as a user editor.
+        if any(group in known_group_emails for group in allowed_groups):
+            return False, None
+
+        unknown_groups = [
+            group for group in allowed_groups if group not in known_group_emails
+        ]
+        if unknown_groups:
+            return (
+                True,
+                "insufficient_evidence: membership of group(s) {} for caller"
+                " {} is unknown on protected range {}".format(
+                    ", ".join(sorted(unknown_groups)),
+                    caller_email or "<unknown>",
+                    range_id,
+                ),
+            )
+
+        return (
+            True,
+            "caller {} is not an editor (users: {}, groups: {}) of protected"
+            " range {}".format(
+                caller_email or "<unknown>",
+                ", ".join(allowed_users) or "<none>",
+                ", ".join(allowed_groups) or "<none>",
+                range_id,
+            ),
+        )
+
+    @cast_to_a1_notation
+    def rehearse_write_access(
+        self,
+        name: str,
+        known_group_emails: Optional[Sequence[str]] = None,
+    ) -> WriteAccessRehearsal:
+        """Rehearses which cells of ``name`` are writable by this caller.
+
+        Every protected range is evaluated independently. A cell is only
+        :attr:`~gspread.worksheet.ProtectionVerdict.ALLOWED` when *every*
+        protected range covering it permits the write. An exemption granted
+        on one range can never cancel a restriction imposed by another
+        range; ranges do not offset each other.
+
+        Verdicts:
+
+        * ``allowed`` - no covering protected range blocks the caller.
+        * ``denied`` - at least one covering range explicitly excludes the
+          caller (hard denial). A single hard denial is conclusive even if
+          other covering ranges allow the write.
+        * ``insufficient_evidence`` - every blocking signal is unverifiable
+          (unknown caller identity, unknown group membership, or a range
+          without editors metadata). If a hard denial coexists with missing
+          evidence, the verdict stays ``denied``.
+
+        :param str name: A range in A1 notation, e.g. ``'A1:C5'``. Numeric
+            boundaries are accepted like the other range methods.
+        :param list known_group_emails: (optional) Google Group addresses
+            the caller is known to belong to. Group editors not listed here
+            cannot be verified and yield insufficient evidence rather than
+            a denial.
+        :rtype: :class:`~gspread.worksheet.WriteAccessRehearsal`
+        """
+        known_groups: List[str] = list(known_group_emails or [])
+        caller_email = self._get_caller_identity()
+        protected_ranges = self.get_protected_ranges()
+
+        start_label, _, end_label = name.partition(":")
+        start_row, start_col = a1_to_rowcol(start_label)
+        end_row, end_col = a1_to_rowcol(end_label or start_label)
+        if start_row > end_row:
+            start_row, end_row = end_row, start_row
+        if start_col > end_col:
+            start_col, end_col = end_col, start_col
+
+        verdicts: List[ProtectionVerdict] = []
+
+        for row in range(start_row, end_row + 1):
+            for col in range(start_col, end_col + 1):
+                cell = rowcol_to_a1(row, col)
+                blocking_ids: List[str] = []
+                evidence_ids: List[str] = []
+                hard_denial = False
+                reasons: List[str] = []
+
+                for protected_range in protected_ranges:
+                    grid_range = protected_range.get("range") or {}
+                    if not self._range_covers_cell(grid_range, row, col):
+                        continue
+
+                    range_id = str(protected_range.get("protectedRangeId", "?"))
+                    denies, reason = self._evaluate_protected_range(
+                        protected_range, caller_email, known_groups
+                    )
+                    if not denies:
+                        continue
+
+                    if reason and reason.startswith("insufficient_evidence:"):
+                        evidence_ids.append(range_id)
+                    else:
+                        hard_denial = True
+                        blocking_ids.append(range_id)
+                    if reason:
+                        reasons.append(reason)
+
+                if hard_denial:
+                    status = ProtectionVerdict.DENIED
+                elif evidence_ids:
+                    status = ProtectionVerdict.INSUFFICIENT_EVIDENCE
+                else:
+                    status = ProtectionVerdict.ALLOWED
+
+                verdicts.append(
+                    ProtectionVerdict(
+                        cell=cell,
+                        status=status,
+                        blocking_protected_range_ids=blocking_ids,
+                        evidence_protected_range_ids=evidence_ids,
+                        reasons=reasons,
+                    )
+                )
+
+        return WriteAccessRehearsal(verdicts)
+
+    @cast_to_a1_notation
+    def rehearse_write_access_cached(
+        self,
+        name: str,
+        known_group_emails: Optional[Sequence[str]] = None,
+    ) -> WriteAccessRehearsal:
+        """Same as :meth:`rehearse_write_access` but reuses cached metadata.
+
+        The cache is keyed on the caller's effective credentials, the
+        requested range and the supplied group memberships. When the
+        credentials have changed since the cache was populated (for example
+        an OAuth token refresh), the cached permission metadata is
+        discarded and the relevant areas are re-fetched: a cached
+        ``allowed`` verdict is never treated as a server-side guarantee.
+
+        :raises gspread.exceptions.StaleProtectionMetadataError: when stale
+            cached metadata is detected. The exception carries a fresh
+            :class:`~gspread.worksheet.WriteAccessRehearsal` in its
+            ``rehearsal`` attribute, computed from re-fetched metadata.
+        """
+        known_groups = tuple(known_group_emails or [])
+        credential_key = self._protection_cache_key()
+        cache_key = (credential_key, name, known_groups)
+        cached = getattr(self, "_protection_cache", None)
+
+        if cached is not None and cached.get("key") == cache_key:
+            return cached["rehearsal"]
+
+        # Only a credential rotation counts as staleness. Asking for a
+        # different range or different group memberships is a plain miss.
+        stale = (
+            cached is not None
+            and cached.get("credential_key") != credential_key
+        )
+        rehearsal = self.rehearse_write_access(
+            name, known_group_emails=list(known_groups)
+        )
+
+        # The cached object reflects current metadata and is therefore not
+        # stale. The object attached to the exception keeps ``stale=True`` to
+        # explain why it was recomputed.
+        fresh_rehearsal = WriteAccessRehearsal(rehearsal.verdicts, stale=False)
+        self._protection_cache = {
+            "key": cache_key,
+            "credential_key": credential_key,
+            "name": name,
+            "rehearsal": fresh_rehearsal,
+        }
+
+        if stale:
+            error = StaleProtectionMetadataError(
+                "cached protection metadata was fetched with different"
+                " credentials; the relevant protected ranges were"
+                " re-fetched and the rehearsal recomputed"
+            )
+            error.rehearsal = WriteAccessRehearsal(
+                rehearsal.verdicts, stale=True
+            )
+            raise error
+
+        return fresh_rehearsal
+
+    def clear_write_access_cache(self) -> None:
+        """Drops any cached protected-range rehearsal."""
+        self._protection_cache = None
 
     @cast_to_a1_notation
     def add_protected_range(

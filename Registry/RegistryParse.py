@@ -729,16 +729,34 @@ class DBIndirectBlock(Record):
         """
         Get the data pointed to by the indirect block. It may be large.
         Return a byte string.
+
+        Each pointer references an HBIN cell whose body contributes up to
+        0x3fd8 bytes.  Reading stops at the first unavailable or short
+        fragment rather than taking bytes from an unrelated cell.
         """
         b = bytearray()
         count = 0
-        while length > 0:
-            off = self.abs_offset_from_hbin_offset(self.unpack_dword(4 * count))
-            size = min(0x3fd8, length)
-            b += HBINCell(self._buf, off, self).raw_data()[0:size]
+        pointer_count = (self.parent().size() - 4) // 4
 
+        while length > 0 and count < pointer_count:
+            off = self.abs_offset_from_hbin_offset(self.unpack_dword(4 * count))
+            if off + 4 > len(self._buf):
+                break
+
+            cell = HBINCell(self._buf, off, self)
+            if cell.is_free():
+                break
+
+            wanted = min(0x3fd8, length)
+            available = max(0, cell.size() - 4)
+            take = min(wanted, available)
+            b += cell.raw_data()[0:take]
             count += 1
-            length -= size
+            length -= take
+
+            if take < wanted:
+                break
+
         return bytes(b)
 
 
@@ -807,6 +825,605 @@ def decode_utf16le(s):
     s = s.decode("utf16")
     s = s.partition('\x00')[0]
     return s
+
+
+class SourceRange(namedtuple("SourceRange", ["offset", "length"])):
+    """
+    A half-open byte range in the hive file.
+    """
+    __slots__ = ()
+
+    @property
+    def end(self):
+        return self.offset + self.length
+
+    @property
+    def file_offset(self):
+        return self.offset
+
+    @property
+    def physical_offset(self):
+        return self.offset
+
+    def to_dict(self):
+        return {"offset": self.offset, "length": self.length, "end": self.end}
+
+
+class MissingRange(namedtuple("MissingRange", ["offset", "length", "reason"])):
+    """
+    A half-open logical range of value data that could not be read from the hive.
+    """
+    __slots__ = ()
+
+    @property
+    def end(self):
+        return self.offset + self.length
+
+    def to_dict(self):
+        return {
+            "offset": self.offset,
+            "length": self.length,
+            "end": self.end,
+            "reason": self.reason,
+        }
+
+
+class DataFragment(object):
+    """
+    One physically stored portion of a value's data.
+
+    `logical_offset` is the offset of this fragment within the value's declared
+    data.  `source_range` is where the bytes live in the hive file, when they
+    are present.
+    """
+    def __init__(self, logical_offset, length, source_range, kind,
+                 cell_offset=None, cell_size=None, available_length=None,
+                 complete=True, reason=None):
+        self.logical_offset = logical_offset
+        self.length = length
+        self.source_range = source_range
+        self.kind = kind
+        self.cell_offset = cell_offset
+        self.cell_size = cell_size
+        self.available_length = length if available_length is None else available_length
+        self.complete = complete
+        self.reason = reason
+
+    @property
+    def offset(self):
+        return self.source_range.offset if self.source_range is not None else None
+
+    @property
+    def end(self):
+        return self.logical_offset + self.length
+
+    def to_dict(self):
+        return {
+            "logical_offset": self.logical_offset,
+            "length": self.length,
+            "logical_end": self.end,
+            "offset": self.offset,
+            "cell_offset": self.cell_offset,
+            "cell_size": self.cell_size,
+            "available_length": self.available_length,
+            "kind": self.kind,
+            "complete": self.complete,
+            "reason": self.reason,
+        }
+
+
+class DataStorage(object):
+    """
+    A description of where a VK record's data lives.
+
+    This models all three layouts used by the registry:
+      - resident data packed into the VK record's data-offset field,
+      - one HBIN cell containing the data,
+      - a DB record plus DB indirect cells for large data.
+    """
+    def __init__(self, declared_raw_length, declared_length):
+        self.declared_raw_length = declared_raw_length
+        self.declared_length = declared_length
+        self.inline = False
+        self.storage_kind = "unavailable"
+        self.data_offset = None
+        self.cell_offset = None
+        self.cell_size = None
+        self.db_offset = None
+        self.indirect_cell_offset = None
+        self.fragments = []
+        self.padding_ranges = []
+        self.padding_start = None
+        self.padding_data = b""
+        self.problems = []
+        self.data = b""
+        self.proven_prefix_length = 0
+        self.available_length = 0
+        self.unexplained = []
+
+    @property
+    def resident(self):
+        return self.inline
+
+    @property
+    def kind(self):
+        return self.storage_kind
+
+    @property
+    def truncated(self):
+        return self.proven_prefix_length < self.declared_length
+
+    @property
+    def complete(self):
+        return not self.truncated
+
+    @property
+    def contradictions(self):
+        return list(self.problems)
+
+    @property
+    def indirect_fragments(self):
+        return [f for f in self.fragments if f.kind == "db-indirect"]
+
+    @property
+    def unexplained_ranges(self):
+        return list(self.unexplained)
+
+    def ranges_for(self, logical_start, logical_end):
+        """
+        Translate a half-open logical byte range into physical hive ranges.
+        """
+        if logical_end <= logical_start:
+            return []
+
+        ranges = []
+        for fragment in self.fragments:
+            if fragment.length <= 0 or fragment.source_range is None:
+                continue
+            frag_start = fragment.logical_offset
+            frag_end = fragment.logical_offset + fragment.length
+            start = max(logical_start, frag_start)
+            end = min(logical_end, frag_end)
+            if end <= start:
+                continue
+            offset = fragment.source_range.offset + (start - frag_start)
+            length = end - start
+            if ranges:
+                previous = ranges[-1]
+                if previous.end == offset:
+                    ranges[-1] = SourceRange(previous.offset, previous.length + length)
+                    continue
+            ranges.append(SourceRange(offset, length))
+        return ranges
+
+    def missing_ranges_for(self, logical_start, logical_end):
+        if logical_end <= logical_start:
+            return []
+
+        covered = []
+        for source in self.ranges_for(logical_start, logical_end):
+            for fragment in self.fragments:
+                if fragment.length <= 0 or fragment.source_range is None:
+                    continue
+                if source.offset >= fragment.source_range.offset and \
+                        source.offset + source.length <= fragment.source_range.end:
+                    frag_start = fragment.logical_offset + \
+                        (source.offset - fragment.source_range.offset)
+                    covered.append((frag_start, frag_start + source.length))
+                    break
+
+        missing = []
+        position = logical_start
+        for start, end in sorted(covered):
+            if start > position:
+                missing.append(MissingRange(position, start - position, "unavailable bytes"))
+            position = max(position, end)
+        if position < logical_end:
+            missing.append(MissingRange(position, logical_end - position, "unavailable bytes"))
+        return missing
+
+    def to_dict(self):
+        return {
+            "declared_raw_length": self.declared_raw_length,
+            "declared_length": self.declared_length,
+            "declared_length_hex": hex(self.declared_raw_length),
+            "inline": self.inline,
+            "resident": self.inline,
+            "storage": self.storage_kind,
+            "data_offset": self.data_offset,
+            "cell_offset": self.cell_offset,
+            "cell_size": self.cell_size,
+            "db_offset": self.db_offset,
+            "indirect_cell_offset": self.indirect_cell_offset,
+            "available_length": self.available_length,
+            "proven_prefix_length": self.proven_prefix_length,
+            "complete": self.complete,
+            "truncated": self.truncated,
+            "problems": list(self.problems),
+            "contradictions": list(self.problems),
+            "fragments": [f.to_dict() for f in self.fragments],
+            "indirect_fragments": [f.to_dict() for f in self.indirect_fragments],
+            "padding": [r.to_dict() for r in self.padding_ranges],
+            "unexplained": [r.to_dict() for r in self.unexplained],
+            "unexplained_ranges": [r.to_dict() for r in self.unexplained],
+        }
+
+
+class MultiSZItem(object):
+    """
+    One string in a REG_MULTI_SZ sequence.
+    """
+    def __init__(self, index, value, logical_start, logical_end, ranges,
+                 terminated, complete, separator_ranges=None):
+        self.index = index
+        self.value = value
+        self.string = value
+        self.text = value
+        self.logical_start = logical_start
+        self.logical_end = logical_end
+        self.ranges = list(ranges)
+        self.terminated = terminated
+        self.complete = complete
+        self.separator_ranges = list(separator_ranges or [])
+
+    @property
+    def start(self):
+        return self.logical_start
+
+    @property
+    def end(self):
+        return self.logical_end
+
+    @property
+    def physical_ranges(self):
+        return list(self.ranges)
+
+    @property
+    def source_ranges(self):
+        return list(self.ranges)
+
+    @property
+    def byte_length(self):
+        return self.logical_end - self.logical_start
+
+    def to_dict(self):
+        return {
+            "index": self.index,
+            "value": self.value,
+            "string": self.value,
+            "logical_start": self.logical_start,
+            "logical_end": self.logical_end,
+            "byte_length": self.byte_length,
+            "ranges": [r.to_dict() for r in self.ranges],
+            "physical_ranges": [r.to_dict() for r in self.ranges],
+            "source_ranges": [r.to_dict() for r in self.ranges],
+            "terminated": self.terminated,
+            "complete": self.complete,
+            "separator_ranges": [r.to_dict() for r in self.separator_ranges],
+        }
+
+
+class MultiSZValue(list):
+    """
+    A REG_MULTI_SZ value.
+
+    This is a list of strings for backwards compatibility, with forensic
+    metadata attached:
+
+      - `items`: the strings as MultiSZItem objects, including source ranges,
+      - `terminated`: whether the empty-string sequence terminator was found,
+      - `terminator_ranges`: physical ranges of that terminator,
+      - `residual`: declared bytes following the terminator,
+      - `padding`: allocated bytes outside the declared data,
+      - `storage`: the DataStorage description.
+    """
+    def __init__(self, items, terminated, terminator_start=None,
+                 terminator_end=None, storage=None, data=b"",
+                 declared_length=None, residual=b"",
+                 residual_ranges=None, padding=b"",
+                 padding_ranges=None, unexplained=None,
+                 problems=None, raw=b""):
+        self.items = tuple(items)
+        list.__init__(self, [item.value for item in items])
+        self.terminated = terminated
+        self.is_terminated = terminated
+        self.terminator_start = terminator_start
+        self.terminator_end = terminator_end
+        self.storage = storage
+        self.raw_data = raw
+        self.data = data
+        self.declared_length = declared_length
+        self.residual = residual
+        self.residual_bytes = residual
+        self.residual_ranges = list(residual_ranges or [])
+        self.padding = padding
+        self.padding_bytes = padding
+        self.padding_ranges = list(padding_ranges or [])
+        self.unexplained = list(unexplained or [])
+        self.problems = list(problems or [])
+
+    @property
+    def strings(self):
+        return list(self)
+
+    @property
+    def sequence(self):
+        return list(self)
+
+    @property
+    def terminated_by_empty_string(self):
+        return self.terminated
+
+    @property
+    def terminator_ranges(self):
+        if self.terminator_start is None or self.terminator_end is None:
+            return []
+        if self.storage is None:
+            return [SourceRange(
+                self.terminator_start,
+                self.terminator_end - self.terminator_start)]
+        return self.storage.ranges_for(self.terminator_start, self.terminator_end)
+
+    @property
+    def termination_ranges(self):
+        return self.terminator_ranges
+
+    @property
+    def terminator_range(self):
+        ranges = self.terminator_ranges
+        return ranges[0] if ranges else None
+
+    @property
+    def residual_range(self):
+        return list(self.residual_ranges)
+
+    @property
+    def physical_ranges(self):
+        return [[r.to_dict() for r in item.ranges] for item in self.items]
+
+    def item_ranges(self, index):
+        return list(self.items[index].ranges)
+
+    def to_dict(self):
+        return {
+            "strings": list(self),
+            "sequence": list(self),
+            "terminated": self.terminated,
+            "terminator_start": self.terminator_start,
+            "terminator_end": self.terminator_end,
+            "terminator_ranges": [r.to_dict() for r in self.terminator_ranges],
+            "items": [item.to_dict() for item in self.items],
+            "declared_length": self.declared_length,
+            "storage": self.storage.to_dict() if self.storage is not None else None,
+            "residual": {
+                "length": len(self.residual),
+                "hex": binascii.hexlify(self.residual).decode("ascii"),
+                "ranges": [r.to_dict() for r in self.residual_ranges],
+            },
+            "padding": {
+                "length": len(self.padding),
+                "hex": binascii.hexlify(self.padding).decode("ascii"),
+                "ranges": [r.to_dict() for r in self.padding_ranges],
+            },
+            "unexplained": [r.to_dict() for r in self.unexplained],
+            "unexplained_ranges": [r.to_dict() for r in self.unexplained],
+            "problems": list(self.problems),
+            "raw": binascii.hexlify(self.raw_data).decode("ascii"),
+        }
+
+    def export(self):
+        return self.to_dict()
+
+    def as_dict(self):
+        return self.to_dict()
+
+    def repair(self):
+        """
+        Return a newly constructed, legal sequence only when the repair is
+        unambiguous.  The original bytes and metadata are never modified.
+        """
+        original = binascii.hexlify(self.raw_data).decode("ascii")
+        if self.terminated:
+            return {
+                "applied": False,
+                "reason": "sequence is already terminated",
+                "original": original,
+            }
+        if self.storage is not None and not self.storage.complete:
+            return {
+                "applied": False,
+                "reason": "value data is missing or contradictory",
+                "original": original,
+            }
+        if self.unexplained:
+            return {
+                "applied": False,
+                "reason": "unexplained ranges prevent an unambiguous repair",
+                "original": original,
+            }
+        if len(self.raw_data) % 2 != 0:
+            return {
+                "applied": False,
+                "reason": "odd trailing byte cannot be repaired unambiguously",
+                "original": original,
+            }
+        repaired = self.raw_data + b"\x00\x00"
+        parsed = parse_multisz(repaired)
+        return {
+            "applied": True,
+            "reason": "appended the missing empty-string terminator",
+            "original": original,
+            "repaired": binascii.hexlify(repaired).decode("ascii"),
+            "strings": list(parsed),
+        }
+
+    @property
+    def repaired_value(self):
+        repair = self.repair()
+        return repair.get("strings") if repair.get("applied") else None
+
+
+def _merge_ranges(ranges):
+    merged = []
+    for source in ranges:
+        if merged and merged[-1].end == source.offset:
+            merged[-1] = SourceRange(merged[-1].offset, merged[-1].length + source.length)
+        else:
+            merged.append(source)
+    return merged
+
+
+def _decode_utf16le_tolerant(data):
+    try:
+        return data.decode("utf-16le", "surrogatepass")
+    except UnicodeDecodeError:
+        return data.decode("utf-16le", "replace")
+
+
+def parse_multisz(data, storage=None, declared_length=None):
+    """
+    Parse a REG_MULTI_SZ byte string.
+
+    Strings are separated by one UTF-16LE NUL code unit.  The sequence ends at
+    the first empty string; that empty string is the terminator and is never
+    returned as a data element.  Bytes following the terminator are retained
+    as `residual`, and are never parsed as additional strings.
+
+    If `storage` is provided, it supplies the bytes, declared length, padding,
+    and any missing ranges.  Parsing stops at the first missing fragment or
+    contradiction, keeping the proven prefix and recording the rest of the
+    logical data as unexplained.
+    """
+    if storage is not None:
+        data = storage.data
+        if declared_length is None:
+            declared_length = storage.declared_length
+    if declared_length is None:
+        declared_length = len(data)
+
+    gaps = []
+    if storage is not None:
+        gaps = sorted(storage.unexplained, key=lambda gap: gap.offset)
+    first_gap = gaps[0].offset if gaps else None
+
+    items = []
+    terminated = False
+    terminator_start = None
+    terminator_end = None
+    current_start = 0
+    position = 0
+    stopped_at_gap = False
+
+    while position + 1 < len(data):
+        if first_gap is not None and position >= first_gap:
+            stopped_at_gap = True
+            break
+
+        code_unit = data[position:position + 2]
+        position += 2
+
+        if code_unit != b"\x00\x00":
+            continue
+
+        if position - 2 == current_start:
+            # An empty string (one NUL code unit) is the sequence terminator.
+            # Any further NUL bytes are residual and are not parsed.
+            terminator_start = current_start
+            terminator_end = position
+            terminated = True
+            break
+
+        content_end = position - 2
+        value = _decode_utf16le_tolerant(data[current_start:content_end])
+        ranges = _logical_ranges(storage, current_start, content_end)
+        separator_ranges = _logical_ranges(storage, content_end, position)
+        items.append(MultiSZItem(
+            len(items), value, current_start, content_end,
+            _merge_ranges(ranges), True, True, separator_ranges))
+        current_start = position
+
+    if not terminated and not stopped_at_gap and first_gap is None and \
+            current_start < len(data):
+        # Data ended without a terminator.  Keep the bytes that form complete
+        # code units as a final, explicitly unterminated item.
+        content_end = len(data) - (len(data) % 2)
+        if content_end > current_start:
+            value = _decode_utf16le_tolerant(data[current_start:content_end])
+            ranges = _logical_ranges(storage, current_start, content_end)
+            items.append(MultiSZItem(
+                len(items), value, current_start, content_end,
+                _merge_ranges(ranges), False, False))
+
+    if stopped_at_gap:
+        proven_end = first_gap
+    elif terminated:
+        proven_end = terminator_end
+    else:
+        proven_end = len(data) - (len(data) % 2)
+
+    residual = b""
+    residual_ranges = []
+    if terminated:
+        residual = data[terminator_end:]
+        residual_ranges = _logical_ranges(storage, terminator_end, len(data))
+
+    padding = b""
+    padding_ranges = []
+    if storage is not None:
+        padding_ranges = list(storage.padding_ranges)
+        padding_parts = []
+        for padding_range in padding_ranges:
+            padding_parts.append(storage.padding_data[
+                padding_range.offset - storage.padding_start:
+                padding_range.end - storage.padding_start])
+        padding = b"".join(padding_parts)
+
+    unexplained = []
+    for gap in gaps:
+        if gap.offset >= proven_end:
+            unexplained.append(gap)
+    if stopped_at_gap:
+        tail_start = max(proven_end, first_gap)
+        if tail_start < declared_length:
+            unexplained.append(MissingRange(
+                tail_start, declared_length - tail_start,
+                "parsing stopped at a missing or contradictory fragment"))
+    if not terminated and first_gap is None and len(data) % 2 != 0:
+        unexplained.append(MissingRange(
+            len(data) - 1, 1, "incomplete UTF-16LE code unit"))
+
+    problems = []
+    if not terminated:
+        problems.append("missing empty-string terminator")
+    if len(data) % 2 != 0:
+        problems.append("value data has an odd byte length")
+    if stopped_at_gap:
+        problems.append("value data is missing or contradictory")
+    if storage is not None:
+        for problem in storage.problems:
+            if problem not in problems:
+                problems.append(problem)
+    if terminated and residual:
+        problems.append("bytes remain after the sequence terminator")
+
+    return MultiSZValue(
+        items, terminated, terminator_start, terminator_end,
+        storage=storage, data=data, declared_length=declared_length,
+        residual=residual, residual_ranges=residual_ranges,
+        padding=padding, padding_ranges=padding_ranges,
+        unexplained=unexplained, problems=problems, raw=data)
+
+
+def _logical_ranges(storage, logical_start, logical_end):
+    if logical_end <= logical_start:
+        return []
+    if storage is not None:
+        return storage.ranges_for(logical_start, logical_end)
+    return [SourceRange(logical_start, logical_end - logical_start)]
+
+
+decode_multisz = parse_multisz
+decode_multi_sz = parse_multisz
 
 
 class VKRecord(Record):
@@ -1031,6 +1648,201 @@ class VKRecord(Record):
         else:
             return self.abs_offset_from_hbin_offset(self.unpack_dword(0x8))
 
+    def data_storage(self):
+        """
+        Describe how the value's data is stored and where each byte comes from.
+
+        The returned DataStorage contains the declared raw and effective
+        lengths, the storage layout (resident, external cell, or DB indirect),
+        the physical fragments, allocation padding, and any ranges that could
+        not be explained.
+        """
+        storage = DataStorage(self.raw_data_length(), self.data_length())
+        raw_length = storage.declared_raw_length
+        length = storage.declared_length
+
+        if raw_length >= 0x80000000 or raw_length < 5:
+            # Small values and values with the high bit set keep their data
+            # in the VK record's four-byte data-offset field.
+            storage.inline = True
+            storage.storage_kind = "resident"
+            storage.data_offset = self.absolute_offset(0x8)
+            storage.available_length = min(length, 4)
+            storage.fragments.append(DataFragment(
+                0, storage.available_length,
+                SourceRange(storage.data_offset, storage.available_length),
+                "resident", complete=storage.available_length == length))
+            if storage.available_length < length:
+                storage.problems.append(
+                    "resident data is longer than the four bytes available in the VK record")
+                storage.unexplained.append(MissingRange(
+                    storage.available_length, length - storage.available_length,
+                    "resident data exceeds the inline field"))
+            storage.data = self._buf[storage.data_offset:storage.data_offset + storage.available_length]
+            storage.proven_prefix_length = storage.available_length
+            return storage
+
+        storage.storage_kind = "external"
+        storage.data_offset = self.abs_offset_from_hbin_offset(self.unpack_dword(0x8))
+
+        if storage.data_offset + 4 > len(self._buf):
+            storage.storage_kind = "unavailable"
+            storage.problems.append("data cell is outside the hive")
+            storage.unexplained.append(MissingRange(0, length, "data cell is outside the hive"))
+            return storage
+
+        cell = HBINCell(self._buf, storage.data_offset, self)
+        storage.cell_offset = cell.offset()
+        storage.cell_size = cell.size()
+        available = max(0, cell.size() - 4)
+        storage.available_length = available
+
+        if cell.is_free():
+            storage.storage_kind = "unavailable"
+            storage.problems.append("data cell is free")
+            storage.unexplained.append(MissingRange(0, length, "data cell is free"))
+            return storage
+
+        if 0x3fd8 < length < 0x80000000:
+            storage.storage_kind = "db"
+            self._read_indirect_data(storage, cell, length)
+        else:
+            data_start = cell.data_offset()
+            if length > available:
+                storage.problems.append(
+                    "declared length exceeds the data cell's available bytes")
+                storage.unexplained.append(MissingRange(
+                    available, length - available, "data cell is too small"))
+            read_length = min(length, available)
+            storage.fragments.append(DataFragment(
+                0, read_length, SourceRange(data_start, read_length),
+                "external-cell", cell_offset=cell.offset(),
+                cell_size=cell.size(), available_length=available,
+                complete=read_length == length))
+            storage.data = self._buf[data_start:data_start + read_length]
+            storage.proven_prefix_length = read_length
+            if available > length:
+                storage.padding_start = data_start + length
+                storage.padding_data = self._buf[
+                    storage.padding_start:cell.data_offset() + available]
+                storage.padding_ranges.append(
+                    SourceRange(storage.padding_start, available - length))
+
+        return storage
+
+    def _read_indirect_data(self, storage, cell, length):
+        """
+        Read the DB record and its indirect cells, recording each fragment.
+        """
+        storage.db_offset = cell.offset()
+        if cell.data_id() != b"db":
+            storage.problems.append("large data is not referenced through a DB record")
+            available = max(0, min(length, cell.size() - 4))
+            data_start = cell.data_offset()
+            storage.fragments.append(DataFragment(
+                0, available, SourceRange(data_start, available),
+                "external-cell", cell_offset=cell.offset(),
+                cell_size=cell.size(), available_length=cell.size() - 4,
+                complete=available == length))
+            storage.data = self._buf[data_start:data_start + available]
+            storage.proven_prefix_length = available
+            if available < length:
+                storage.unexplained.append(MissingRange(
+                    available, length - available,
+                    "large data not referenced through a DB record"))
+            return
+
+        db = DBRecord(self._buf, cell.data_offset(), cell)
+        indirect_offset = db.abs_offset_from_hbin_offset(db.unpack_dword(0x4))
+        storage.indirect_cell_offset = indirect_offset
+        if indirect_offset + 4 > len(self._buf):
+            storage.problems.append("DB indirect cell is outside the hive")
+            storage.unexplained.append(MissingRange(
+                0, length, "DB indirect cell is outside the hive"))
+            return
+
+        indirect_cell = HBINCell(self._buf, indirect_offset, db)
+        if indirect_cell.is_free():
+            storage.problems.append("DB indirect cell is free")
+            storage.unexplained.append(MissingRange(0, length, "DB indirect cell is free"))
+            return
+
+        indirect = DBIndirectBlock(self._buf, indirect_cell.data_offset(), indirect_cell)
+        pointer_count = (indirect_cell.size() - 4) // 4
+        logical_offset = 0
+        pieces = []
+
+        for index in range(pointer_count):
+            if logical_offset >= length:
+                break
+            relative_offset = indirect.unpack_dword(4 * index)
+            fragment_offset = indirect.abs_offset_from_hbin_offset(relative_offset)
+            wanted = min(0x3fd8, length - logical_offset)
+
+            if fragment_offset + 4 > len(self._buf):
+                storage.problems.append(
+                    "DB indirect fragment %d is outside the hive" % index)
+                storage.unexplained.append(MissingRange(
+                    logical_offset, length - logical_offset,
+                    "DB indirect fragment is outside the hive"))
+                break
+
+            fragment_cell = HBINCell(self._buf, fragment_offset, indirect)
+            if fragment_cell.is_free():
+                storage.problems.append(
+                    "DB indirect fragment %d points to a free cell" % index)
+                storage.unexplained.append(MissingRange(
+                    logical_offset, length - logical_offset,
+                    "DB indirect fragment is free"))
+                break
+
+            available = max(0, fragment_cell.size() - 4)
+            read_length = min(wanted, available)
+            data_start = fragment_cell.data_offset()
+            storage.fragments.append(DataFragment(
+                logical_offset, read_length, SourceRange(data_start, read_length),
+                "db-indirect", cell_offset=fragment_cell.offset(),
+                cell_size=fragment_cell.size(), available_length=available,
+                complete=read_length == wanted))
+            pieces.append(self._buf[data_start:data_start + read_length])
+            logical_offset += read_length
+
+            if read_length < wanted:
+                storage.problems.append(
+                    "DB indirect fragment %d does not contain its declared share" % index)
+                storage.unexplained.append(MissingRange(
+                    logical_offset, length - logical_offset,
+                    "DB indirect fragment is too small"))
+                break
+
+        storage.data = b"".join(pieces)
+        storage.proven_prefix_length = len(storage.data)
+        if len(storage.data) < length:
+            if not storage.unexplained:
+                storage.unexplained.append(MissingRange(
+                    len(storage.data), length - len(storage.data),
+                    "DB indirect data ended before the declared length"))
+            if not any("declared length" in problem for problem in storage.problems):
+                storage.problems.append(
+                    "declared length exceeds the DB indirect data")
+        elif storage.fragments and storage.fragments[-1].cell_size is not None:
+            last = storage.fragments[-1]
+            if last.cell_size - 4 > last.length:
+                padding_start = last.source_range.offset + last.length
+                storage.padding_start = padding_start
+                storage.padding_data = self._buf[
+                    padding_start:last.cell_offset + last.cell_size]
+                storage.padding_ranges.append(SourceRange(
+                    padding_start, last.cell_size - 4 - last.length))
+
+    def multisz(self):
+        """
+        Parse this value as REG_MULTI_SZ, preserving physical source ranges.
+        """
+        storage = self.data_storage()
+        return parse_multisz(storage.data, storage=storage,
+                             declared_length=storage.declared_length)
+
     def raw_data(self, overrun=0):
         """
         Get the unparsed raw data.
@@ -1080,18 +1892,13 @@ class VKRecord(Record):
         elif data_type == RegDWord:
             ret = self.unpack_binary(0x8, 0x4)
         elif data_type == RegMultiSZ:
-            if data_length >= 0x80000000:
-                # this means data_length < 5, so it must be 4, and
-                # be composed of completely \x00, so the strings are empty
-                ret = b""
-            elif 0x3fd8 < data_length < 0x80000000:
-                d = HBINCell(self._buf, data_offset, self)
-                if d.data_id() == b"db":
-                    ret = d.child().large_data(data_length + overrun)
-                else:
-                    ret = d.raw_data()[:data_length + overrun]
-            else:
-                ret = self._buf[data_offset + 4:data_offset + 4 + data_length + overrun]
+            storage = self.data_storage()
+            ret = storage.data
+            if overrun > 0 and storage.fragments:
+                last = storage.fragments[-1]
+                if last.source_range is not None:
+                    start = last.source_range.end
+                    ret += self._buf[start:start + overrun]
         elif data_type == RegQWord:
             d = HBINCell(self._buf, data_offset, self)
             data_offset = d.data_offset()
@@ -1187,8 +1994,7 @@ class VKRecord(Record):
         elif data_type == RegDWord:
             return struct.unpack_from(str("<I"), d, 0)[0]
         elif data_type == RegMultiSZ:
-            s = d.decode("utf16")
-            return s.split("\x00")
+            return self.multisz()
         elif data_type == RegQWord:
             return struct.unpack_from(str("<Q"), d, 0)[0]
         elif data_type == RegBigEndian:

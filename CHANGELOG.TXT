@@ -1,3 +1,11 @@
+Unreleased
+  - fix REG_MULTI_SZ parsing so the empty-string terminator is not returned
+    as a data element and residual bytes are not parsed as strings
+  - add forensic REG_MULTI_SZ export with physical source ranges, fragment
+    layout, terminator state, residual bytes, and allocation padding
+  - report missing or contradictory large-data fragments without inventing
+    data, and only repair an unambiguously missing terminator
+
 1.2.0
   - [DEPRECATED] records() in HBINBlock, use the more correct cells() instead, by @NiKiZe
   - fix bug in parsing of resident values with length zero, reported and patched by @BridgeyTheGeek

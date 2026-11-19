@@ -67,6 +67,33 @@ Advanced users who wish to study the structure of the Windows
 Registry may find the `Registry.RegistryParse` module useful.
 This module implements all known structures of the Windows Registry.
 
+REG_MULTI_SZ values
+-------------------
+
+A `REG_MULTI_SZ` sequence is terminated by an empty string.  The
+terminator is not a data element, so `value()` returns only the strings
+before it.  Bytes after the terminator and bytes allocated beyond the
+declared value length are not treated as additional strings.
+
+For forensic work, `RegistryValue.export()` (or
+`RegistryValue.multisz()`) reports the termination state, each string's
+physical byte ranges, the fragment layout (resident, external cell, or
+DB indirect for large data), residual bytes after the terminator, and
+allocation padding:
+
+    value = key.value("MultiString")
+    if value.value_type() == Registry.RegMultiSZ:
+        report = value.export()
+        print(report["multisz"]["strings"])
+        print(report["multisz"]["terminator_ranges"])
+        print(report["multisz"]["residual"])
+
+If a large value's fragments are missing or contradictory, the parse
+keeps the proven prefix and lists the logical ranges it could not
+explain.  `MultiSZValue.repair()` only constructs a new legal value when
+the missing terminator is the sole and unambiguous defect; the original
+bytes remain available as `raw_data` and in the export.
+
 Wanted
 ------
   - Bug reports.

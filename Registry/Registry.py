@@ -20,6 +20,7 @@ from __future__ import print_function
 
 import sys
 import ntpath
+import binascii
 from enum import Enum
 
 from . import RegistryParse
@@ -227,6 +228,46 @@ class RegistryValue(object):
 
     def raw_data(self, overrun=0):
         return self._vkrecord.raw_data(overrun)
+
+    def data_storage(self):
+        """
+        Describe the value's declared length, storage layout, and physical
+        byte ranges.  See RegistryParse.DataStorage.
+        """
+        return self._vkrecord.data_storage()
+
+    def multisz(self):
+        """
+        Parse a REG_MULTI_SZ value with source ranges and termination state.
+        Returns a RegistryParse.MultiSZValue.
+        """
+        return self._vkrecord.multisz()
+
+    def multi_sz(self):
+        return self.multisz()
+
+    def export(self):
+        """
+        Return a JSON-serializable description of this value.
+
+        REG_MULTI_SZ values include their termination state, source ranges,
+        residual bytes, and allocated padding.  Other types include their
+        declared length and storage layout, with binary data hex-encoded.
+        """
+        result = {
+            "name": self.name(),
+            "type": self.value_type(),
+            "type_name": self.value_type_str(),
+            "storage": self.data_storage().to_dict(),
+        }
+        if self.value_type() == RegistryParse.RegMultiSZ:
+            result["multisz"] = self.multisz().to_dict()
+            result["value"] = list(self.multisz())
+        else:
+            value = self.value()
+            result["value"] = binascii.hexlify(value).decode("ascii") \
+                if isinstance(value, bytes) else value
+        return result
 
     def timestamp(self):
         """

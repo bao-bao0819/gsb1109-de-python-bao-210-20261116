@@ -7,6 +7,15 @@ Change log
 v0.14
 -----
 
+- Attribute parsing now splits the column-9 string on its (still percent-encoded)
+  raw text and only percent-decodes afterwards, so an encoded separator such as
+  ``%2C`` is treated as a comma *within a single value* rather than as a list
+  delimiter. A new dialect entry, ``quoted value markers``, records the quoting
+  of each attribute independently. Files that mix quoted and unquoted values
+  (including across the occurrences of a repeated key) now round-trip faithfully
+  instead of having the first value's convention imposed on the whole feature or
+  file; when no single rule can describe a file, literal quote characters are
+  still never left in parsed values.
 - If a value contained a semicolon there would be unexpected behavior (reported
   in `#212 <https://github.com/daler/gffutils/issues/212>`__). This is solved
   by adding a new entry to the dialect, ``semicolon in quotes```, and running

@@ -644,7 +644,7 @@ attributes to have the same format.  To help with this, we can use the
 ... 'Transcript "B0019.1" ; WormPep "WP:CE40797" ; Note "amx-2" ; Prediction_status "Partially_confirmed" ; Gene "WBGene00000138" ; CDS "B0019.1" ; WormPep "WP:CE40797" ; Note "amx-2" ; Prediction_status "Partially_confirmed" ; Gene "WBGene00000138"',
 ... )
 >>> print({k: v for k, v in sorted(dialect.items())})
-{'field separator': ' ; ', 'fmt': 'gtf', 'keyval separator': ' ', 'leading semicolon': False, 'multival separator': ',', 'order': ['Transcript', 'WormPep', 'Note', 'Prediction_status', 'Gene', 'CDS'], 'quoted GFF2 values': True, 'repeated keys': True, 'semicolon in quotes': False, 'trailing semicolon': False}
+{'field separator': ' ; ', 'fmt': 'gtf', 'keyval separator': ' ', 'leading semicolon': False, 'multival separator': ',', 'order': ['Transcript', 'WormPep', 'Note', 'Prediction_status', 'Gene', 'CDS'], 'quoted GFF2 values': True, 'quoted value markers': None, 'repeated keys': True, 'semicolon in quotes': False, 'trailing semicolon': False}
 
 >>> db.dialect = dialect
 

@@ -120,7 +120,21 @@ dialect = {
     #   gene_id "GENE1"
     # vs
     #   gene_id GENE1
+    #
+    # This is the dialect-wide default; see "quoted value markers" for how
+    # per-attribute quoting is tracked so that files mixing quoted and
+    # unquoted values round-trip.
     "quoted GFF2 values": False,
+    # Per-attribute record of how values were quoted in the original file.
+    # None means the file was consistent (or a dialect was supplied), so the
+    # boolean "quoted GFF2 values" alone is used. Otherwise this is a dict of
+    # attribute key -> marker, where the marker is '"' when that key's values
+    # were double-quoted and None when they were not. For repeated keys whose
+    # occurrences quote inconsistently, the marker is a list aligned with the
+    # occurrences. Keeping this per key (rather than guessing one rule from the
+    # first value) is what allows mixed-quoting files to be reconstructed
+    # faithfully.
+    "quoted value markers": None,
     # Sometimes there's extra space surrounding the semicolon, e.g.,
     #
     #   ID=001;Name=gene1

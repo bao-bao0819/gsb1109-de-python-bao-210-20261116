@@ -1,4 +1,5 @@
 import copy
+import collections
 import sys
 import os
 import simplejson as json
@@ -73,6 +74,11 @@ def _choose_dialect(features):
     # for the final dialect.
     count = {k: {} for k in constants.dialect.keys()}
 
+    # Per-key quoting markers are dictionaries (and therefore unhashable, so
+    # they can't participate in the vote counting above). Collect every
+    # feature's observation of each key separately.
+    marker_observations = collections.defaultdict(list)
+
     for feature in features:
 
         # Number of attributes is currently being used as the weight for
@@ -83,7 +89,29 @@ def _choose_dialect(features):
         # " field separators.
         weight = len(feature.attributes)
 
+        explicit_markers = feature.dialect.get("quoted value markers") or {}
+
+        # Reconstruct the per-key quoting convention for this feature. An
+        # explicit per-key marker wins; otherwise the feature's boolean
+        # applies to every key. Doing this for all features (rather than
+        # trusting the first feature's boolean) keeps a later feature from
+        # being forced into a quoting convention it never used.
+        feature_quoted = feature.dialect["quoted GFF2 values"]
+        for key in feature.attributes:
+            # Keys without values (e.g. the empty key from a trailing
+            # semicolon) carry no quoting information.
+            if not feature.attributes[key]:
+                continue
+            if key in explicit_markers:
+                marker = explicit_markers[key]
+            else:
+                marker = '"' if feature_quoted else None
+            marker_observations[key].append(marker)
+
         for k, v in feature.dialect.items():
+            if k == "quoted value markers":
+                # Aggregated above as per-key conventions.
+                continue
             if isinstance(v, list):
                 v = tuple(v)
             val = count[k].get(v, 0)
@@ -96,12 +124,50 @@ def _choose_dialect(features):
     final_dialect = {}
     for k, v in count.items():
 
+        # Quoting markers are aggregated separately above (and are unhashable
+        # dictionaries, so they have no vote entries).
+        if k == "quoted value markers":
+            continue
+
         # Tuples of (entry, total weight) in descending sort
         vs = sorted(v.items(), key=lambda x: x[1], reverse=True)
 
         # So the first tuple's first item is the winning value for this dialect
         # key.
         final_dialect[k] = vs[0][0]
+
+    # Only retain quoting markers that disagree with the dialect-wide boolean,
+    # keeping the dialect compact. If every key follows the winning convention
+    # there is nothing per-key to remember.
+    quoted_default = final_dialect["quoted GFF2 values"]
+    final_markers = {}
+    for marker_key, observations in marker_observations.items():
+        # Keep a marker only when every feature observed the same convention
+        # for this key. Per-occurrence lists must match element-for-element;
+        # otherwise the convention is feature-specific, in which case no
+        # file-wide marker is recorded and the dialect-wide boolean applies.
+        first = observations[0]
+        agreed = True
+        for obs in observations[1:]:
+            if isinstance(first, list) or isinstance(obs, list):
+                if not (
+                    isinstance(first, list)
+                    and isinstance(obs, list)
+                    and first == obs
+                ):
+                    agreed = False
+                    break
+            elif first != obs:
+                agreed = False
+                break
+        if not agreed:
+            continue
+        if isinstance(first, list):
+            if any((m == '"') != quoted_default for m in first):
+                final_markers[marker_key] = first
+        elif (first == '"') != quoted_default:
+            final_markers[marker_key] = first
+    final_dialect["quoted value markers"] = final_markers or None
 
     # For backwards compatibility, to figure out the field order to use for the
     # dialect we append additional fields as they are observed, giving priority

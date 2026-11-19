@@ -207,17 +207,18 @@ attrs = [
     ),
     # jgi_gff2.txt
     #
-    # This file is inconsitent with how it quotes values -- integers are not
-    # quoted but string values are.  Only way to make this be invariant is to
-    # keep track of the "flavor" of each attribute; not sure it's worth the
-    # effort / processing time.
+    # This file is inconsistent with how it quotes values -- integers are not
+    # quoted but string values are. Per-key quoting markers retain each
+    # attribute's convention, so the line now round-trips exactly instead of
+    # forcing the first value's quoting onto the whole feature.
     dict(
         str='name "fgenesh1_pg.C_chr_1000007"; transcriptId 873',
         attrs={"name": ["fgenesh1_pg.C_chr_1000007"], "transcriptId": ["873"]},
-        ok='name "fgenesh1_pg.C_chr_1000007"; transcriptId "873"',
+        ok=None,
         dialect_mods={
             "order": ["name", "transcriptId"],
             "quoted GFF2 values": True,
+            "quoted value markers": {"name": '"', "transcriptId": None},
             "keyval separator": " ",
             "fmt": "gtf",
             "field separator": "; ",
@@ -313,6 +314,53 @@ attrs = [
             "quoted GFF2 values": True,
             "keyval separator": " ",
             "fmt": "gtf",
+        },
+    ),
+    # An encoded comma (%2C) is part of a single value, not a list separator.
+    # Structural splitting happens before percent-decoding, so it is neither
+    # split on parse nor changed on reconstruction.
+    dict(
+        str="Note=a%2Cb;ID=x",
+        attrs={"Note": ["a,b"], "ID": ["x"]},
+        ok=None,
+        dialect_mods={"order": ["Note", "ID"]},
+    ),
+    # A real list comma still splits, while an encoded one stays in its value.
+    dict(
+        str="Note=one,two%2Cthree,four",
+        attrs={"Note": ["one", "two,three", "four"]},
+        ok=None,
+        dialect_mods={"order": ["Note"]},
+    ),
+    # Mixed quoting across distinct keys: keep each key's own convention rather
+    # than letting the first value guess the rule for the whole feature.
+    dict(
+        str='a "1"; b 2; c "3"',
+        attrs={"a": ["1"], "b": ["2"], "c": ["3"]},
+        ok=None,
+        dialect_mods={
+            "order": ["a", "b", "c"],
+            "quoted GFF2 values": True,
+            "quoted value markers": {"a": '"', "b": None, "c": '"'},
+            "keyval separator": " ",
+            "fmt": "gtf",
+            "field separator": "; ",
+        },
+    ),
+    # Mixed quoting across the occurrences of a repeated key: markers are kept
+    # in occurrence order and the value order is preserved.
+    dict(
+        str='db_xref "g01"; db_xref XYZ; db_xref "last"',
+        attrs={"db_xref": ["g01", "XYZ", "last"]},
+        ok=None,
+        dialect_mods={
+            "order": ["db_xref"],
+            "quoted GFF2 values": True,
+            "quoted value markers": {"db_xref": ['"', None, '"']},
+            "keyval separator": " ",
+            "fmt": "gtf",
+            "field separator": "; ",
+            "repeated keys": True,
         },
     ),
 ]

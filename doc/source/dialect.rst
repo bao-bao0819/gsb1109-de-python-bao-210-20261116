@@ -56,3 +56,16 @@ In contrast, a GFF dialect might look like this::
 
 As other real-world files are brought to the attention of the developers, it's
 likely that more entries will be added to the dialect.
+
+Most dialect entries describe a single, file-wide convention. The
+``quoted GFF2 values`` entry says whether values are generally double-quoted,
+but real files sometimes mix quoted and unquoted values (even within one
+feature, such as ``name "x"; transcriptId 873``). Rather than letting the first
+value's convention be applied to the whole file, the boolean
+``quoted GFF2 values`` is supplemented by ``quoted value markers``. When the
+quoting is consistent this is ``None``; otherwise it maps each attribute key to
+``'"'`` (that key's values were quoted) or ``None`` (they were not). For a
+repeated key whose own occurrences disagree, the value is an ordered list of
+those markers. These markers, together with the fact that percent-decoding
+(``%2C`` and friends) happens only after all structural splitting, are what keep
+attribute parsing round-trippable.

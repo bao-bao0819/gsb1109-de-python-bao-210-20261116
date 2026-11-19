@@ -167,6 +167,75 @@ def test_inconsistent_dialect():
     ]
 
 
+def test_mixed_quoting_roundtrip():
+    """
+    A file that mixes quoted and unquoted values must round-trip exactly. In
+    particular, the first feature's quoting convention cannot be applied to
+    features later in the file, and per-key markers keep each attribute's own
+    convention.
+    """
+    # Every line uses the "; " field separator and has multiple attributes so
+    # the field-separator and ordering heuristics are unambiguous; this leaves
+    # only the quoting convention under test.
+    lines = [
+        'chr1\t.\tgene\t1\t100\t.\t+\t.\tgene_id "gene1"; gene_name "g";',
+        'chr1\t.\tmRNA\t1\t100\t.\t+\t.\tgene_id "gene1"; transcript_id t1;',
+        'chr1\t.\texon\t1\t50\t.\t+\t.\tgene_id "gene1"; name "fgenesh"; transcriptId 873;',
+    ]
+    data = "\n".join(lines) + "\n"
+    db = create.create_db(data, ":memory:", from_string=True, keep_order=True)
+    observed = [str(f).split("\t")[8] for f in db.all_features()]
+    assert observed == [line.split("\t")[8] for line in lines]
+
+    # The file-level dialect remembers that transcript_id/transcriptId were
+    # unquoted even though gene_id/gene_name/name were quoted.
+    assert db.dialect["quoted GFF2 values"] is True
+    assert db.dialect["quoted value markers"]["transcript_id"] is None
+    assert db.dialect["quoted value markers"]["transcriptId"] is None
+    assert "gene_id" not in db.dialect["quoted value markers"]
+
+
+def test_encoded_comma_is_not_a_separator():
+    """
+    Percent-encoded separators are decoded only after all structural splitting,
+    so an encoded comma (%2C) remains part of its value and round-trips
+    unchanged, both alone and alongside real list commas.
+    """
+    single = "Note=a%2Cb;ID=x"
+    attrs, dialect = parser._split_keyvals(single)
+    assert attrs == {"Note": ["a,b"], "ID": ["x"]}
+    assert parser._reconstruct(attrs, dialect, keep_order=True) == single
+
+    mixed = "Note=one,two%2Cthree,four"
+    attrs, dialect = parser._split_keyvals(mixed)
+    assert attrs == {"Note": ["one", "two,three", "four"]}
+    assert parser._reconstruct(attrs, dialect, keep_order=True) == mixed
+
+
+def test_inconsistent_repeated_key_quoting_keeps_clean_values():
+    """
+    When the same repeated key is quoted in opposite orders across features, no
+    single per-occurrence rule can describe the whole file. The parser must
+    still extract clean values (literal quote characters must never leak into
+    the parsed dictionary); only the re-quoting falls back to the file-wide
+    convention.
+    """
+    data = "\n".join(
+        [
+            'chr1\t.\ta\t1\t2\t.\t+\t.\tx "1"; x 2',
+            'chr1\t.\ta\t1\t2\t.\t+\t.\tx 3; x "4"',
+        ]
+    ) + "\n"
+    db = create.create_db(data, ":memory:", from_string=True)
+    # No reliable per-occurrence marker can be shared across the two features.
+    assert db.dialect["quoted value markers"] is None
+    values = [list(f.attributes["x"]) for f in db.all_features()]
+    assert values == [["1", "2"], ["3", "4"]]
+    for feature in db.all_features():
+        for val in feature.attributes["x"]:
+            assert not val.startswith('"') and not val.endswith('"')
+
+
 def test_attributes():
     s = "chr2L	FlyBase	mRNA	7529	9484	.	+	.	ID=FBtr0300690;Name=CG11023-RC;Parent=FBgn0031208;"
     f = feature.feature_from_line(s)

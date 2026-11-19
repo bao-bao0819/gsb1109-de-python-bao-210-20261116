@@ -184,10 +184,12 @@ def _split_keyvals(keyval_str, dialect=None):
         keys = [i[0] for i in key_val_tuples]
         dialect["repeated keys"] = len(keys) != len(set(keys))
 
-        # For dialect detection, this will help figure out if there is
-        # inconsistent quoting across values. It will only be used in the loop
-        # below if infer_dialect is True
-        quoted_values = []
+    # Track the quoting of every key/value occurrence individually. A single
+    # feature may mix quoted and unquoted values (e.g. jgi_gff2.txt), and each
+    # key may itself be quoted inconsistently across its repeated occurrences.
+    # The structure is key -> list of per-occurrence quote markers, where '"'
+    # means the value was wrapped in double quotes and None means it was not.
+    quote_markers = collections.defaultdict(list)
 
     # Now work splitting the keys if needed.
     for i in key_val_tuples:
@@ -249,17 +251,22 @@ def _split_keyvals(keyval_str, dialect=None):
         if key not in quals:
             quals[key] = []
 
-        # This will run on every value, accumulating in quoted_values to check
-        # later for consistency
-        if infer_dialect:
-            quoted = len(val) > 0 and val[0] == '"' and val[-1] == '"'
-            quoted_values.append(quoted)
-            dialect["quoted GFF2 values"] = quoted
+        # Record how *this* value was actually quoted. Markers are only kept
+        # for values that survive into the parsed dictionary, so for repeated
+        # keys they line up one-to-one with the stored occurrences.
+        text_quoted = len(val) > 0 and val[0] == '"' and val[-1] == '"'
 
-        if dialect["quoted GFF2 values"] and val:
+        # Always follow the actual text when deciding what to unquote. This is
+        # safe regardless of how the dialect was chosen: a value that carries
+        # quotes has them removed, and a value without them is never touched.
+        # It also keeps literal quote characters out of the parsed dictionary
+        # when a file-level dialect's markers do not line up with this
+        # particular feature.
+        if text_quoted and val:
             val = val.strip('"')
 
         if val:
+            marker = '"' if text_quoted else None
             # For repeated keys dialect, don't split on an internal comma. That is,
             #
             #   attributes = 'db_xref="g01,g02"; db_xref="XYZ"'
@@ -272,6 +279,7 @@ def _split_keyvals(keyval_str, dialect=None):
             #
             if dialect.get("repeated keys"):
                 quals[key].append(val)
+                quote_markers[key].append(marker)
 
             # Otherwise, split but only if it's a comma without a space. So:
             #
@@ -296,19 +304,48 @@ def _split_keyvals(keyval_str, dialect=None):
                     quals[key].append(val)
                 else:
                     quals[key].extend(val.split(","))
+                # One marker per original key/val occurrence, even though an
+                # unquoted value may have been split into several list values.
+                quote_markers[key].append(marker)
 
-    # If there was inconsistent quoting, we fall back to "not quoted" so
-    # as to avoid incorrectly stripping off first and last quotes.
-    if infer_dialect and len(set(quoted_values)) > 1:
-        # Prior behavior was to use whatever the first value used
-        dialect["quoted GFF2 values"] = quoted_values[0]
+    # Build the dialect's quoting information. All structural splitting above
+    # ran on the still-encoded raw text, so an encoded "%2C" could never have
+    # been mistaken for a list separator. What remains is to summarize how
+    # quoting was used so the attributes can be reconstructed later.
+    if infer_dialect:
+        all_markers = [m for markers in quote_markers.values() for m in markers]
+        if all_markers and len(set(all_markers)) == 1:
+            # Every non-empty value used the same quoting convention.
+            dialect["quoted GFF2 values"] = all_markers[0] == '"'
+            dialect["quoted value markers"] = None
+        elif not all_markers:
+            # No values at all (e.g. bare flags like "ID;"), nothing to record.
+            dialect["quoted GFF2 values"] = False
+            dialect["quoted value markers"] = None
+        else:
+            # Mixed quoting. Keep a per-key record instead of letting the first
+            # value's convention decide the rule for the whole feature.
+            dialect["quoted GFF2 values"] = all_markers[0] == '"'
+            per_key = {}
+            for key, markers in quote_markers.items():
+                if len(set(markers)) == 1:
+                    per_key[key] = markers[0]
+                else:
+                    # Repeated key whose own occurrences disagree: retain the
+                    # candidates in occurrence order.
+                    per_key[key] = markers
+            dialect["quoted value markers"] = per_key
 
-        # Though there could be an argument for considering quotes in mixed
-        # cases to be part of the string, though technically they should be
-        # %-encoded if so.
-        # dialect["quoted GFF2 values"] = False
+    # Note for the supplied-dialect branch: the shared file-level dialect is
+    # intentionally not mutated here. Stripping follows the actual text of each
+    # value so quoted and unquoted values are both extracted correctly, while
+    # reconstruction consults the supplied dialect's markers (with the boolean
+    # "quoted GFF2 values" flag as fallback).
 
-    # Handle unquoting of %-encoded values
+    # Handle unquoting of %-encoded values. This deliberately happens last,
+    # after every structural split is finished, so percent-encoded separators
+    # (e.g. "%2C" for a comma that is part of a value) are decoded into the
+    # value rather than being treated as delimiters.
     if not constants.ignore_url_escape_characters and dialect["fmt"] == "gff3":
         for key, vals in quals.items():
             unquoted = [parse.unquote(v) for v in vals]
@@ -383,7 +420,29 @@ def _reconstruct(keyvals, dialect, keep_order=False, sort_attribute_values=False
     if keep_order:
         items.sort(key=sort_key)
 
+    markers = dialect.get("quoted value markers")
+
+    def _is_quoted(key, occurrence):
+        # Per-key markers win when the file mixed quoting conventions. Otherwise
+        # fall back to the dialect-wide boolean.
+        if not markers or key not in markers:
+            return dialect["quoted GFF2 values"]
+        marker = markers[key]
+        if isinstance(marker, list):
+            # Repeated key with per-occurrence markers; guard against the stored
+            # list being shorter than the number of items being emitted.
+            if occurrence >= len(marker):
+                return dialect["quoted GFF2 values"]
+            marker = marker[occurrence]
+        return marker == '"'
+
+    # Index of each emitted key/val pair for a given key, so repeated keys that
+    # were quoted inconsistently can consult the right per-occurrence marker.
+    occurrence_counts = collections.defaultdict(int)
+
     for key, val in items:
+        occurrence = occurrence_counts[key]
+        occurrence_counts[key] += 1
 
         # Multival sep is usually a comma:
         if val:
@@ -394,8 +453,9 @@ def _reconstruct(keyvals, dialect, keep_order=False, sort_attribute_values=False
 
             if val_str:
 
-                # Surround with quotes if needed
-                if dialect["quoted GFF2 values"]:
+                # Surround with quotes if needed, honoring the per-key (or
+                # per-occurrence) quoting recorded during parsing.
+                if _is_quoted(key, occurrence):
                     val_str = '"%s"' % val_str
 
                 # Typically "=" for GFF3 or " " otherwise

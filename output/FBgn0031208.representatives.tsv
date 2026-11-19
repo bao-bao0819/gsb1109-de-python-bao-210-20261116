@@ -1,0 +1,4 @@
+gene_id	seqid	strand	representative_id	tied_representatives	source	source_rank	completeness_class	tx_len_bp	cds_len_bp	n_exons	n_cds	gene_exon_union_bp	all_tx_exon_sum_bp	n_candidates	n_excluded	evidence
+FBgn0031208	chr2L	+	FBtr0300689	1	FlyBase	0	complete_coding	1880	855	2	2	1880	3682	2	0	source=FlyBase(rank=0);class=complete_coding;tx_len=1880bp;cds_len=855bp;exons=2;phase=ok;boundary=not_assessable
+Fk_gene_1	chr2L	-	NONE	0	.	.	.	0	0	0	0	1001	1001	1	1	no eligible candidate; see excluded table
+Fk_gene_2	chr2L	-	transcript_Fk_gene_2	1	FAKE	1	non_coding	1001	0	1	0	1001	1001	1	0	source=FAKE(rank=1);class=non_coding;tx_len=1001bp;cds_len=0bp;exons=1;phase=ok;boundary=not_assessable

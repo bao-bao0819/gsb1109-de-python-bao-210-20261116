@@ -1,0 +1,9 @@
+gene_id	seqid	strand	representative_id	tied_representatives	source	source_rank	completeness_class	tx_len_bp	cds_len_bp	n_exons	n_cds	gene_exon_union_bp	all_tx_exon_sum_bp	n_candidates	n_excluded	evidence
+gA	chr1	+	gA-t1	1	ensembl	0	complete_coding	600	400	2	2	600	1000	2	0	source=ensembl(rank=0);class=complete_coding;tx_len=600bp;cds_len=400bp;exons=2;phase=ok;boundary=5p+3p
+gB	chr1	+	gB-t1	2	ensembl	0	complete_coding	500	400	2	2	650	1000	2	0	source=ensembl(rank=0);class=complete_coding;tx_len=500bp;cds_len=400bp;exons=2;phase=ok;boundary=5p+3p
+gB	chr1	+	gB-t2	2	ensembl	0	complete_coding	500	400	1	1	650	1000	2	0	source=ensembl(rank=0);class=complete_coding;tx_len=500bp;cds_len=400bp;exons=1;phase=ok;boundary=5p+3p
+gC	chr1	+	gC-t1	1	ensembl	0	complete_coding	600	400	2	2	900	1500	2	0	source=ensembl(rank=0);class=complete_coding;tx_len=600bp;cds_len=400bp;exons=2;phase=ok;boundary=5p+3p
+gD	chr1	+	gD-t1	1	ensembl	0	complete_coding	500	300	2	2	3000	3500	2	1	source=ensembl(rank=0);class=complete_coding;tx_len=500bp;cds_len=300bp;exons=2;phase=ok;boundary=5p+3p
+gE	chr1	+	gE-t1	1	ensembl	0	complete_coding	400	300	1	1	500	900	2	1	source=ensembl(rank=0);class=complete_coding;tx_len=400bp;cds_len=300bp;exons=1;phase=ok;boundary=5p+3p
+gF	chr1	+	NONE	0	.	.	.	0	0	0	0	400	400	1	1	no eligible candidate; see excluded table
+gG	chr1	+	gG-t1	1	ensembl	0	non_coding	300	0	1	0	300	500	2	0	source=ensembl(rank=0);class=non_coding;tx_len=300bp;cds_len=0bp;exons=1;phase=ok;boundary=not_assessable

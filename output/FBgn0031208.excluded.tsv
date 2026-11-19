@@ -1,0 +1,2 @@
+gene_id	transcript_id	source	source_rank	tx_len_bp	cds_len_bp	n_exons	reasons	detail
+Fk_gene_1	transcript_Fk_gene_1	FAKE	1	1001	1001	1	missing_phase	source=FAKE(rank=1);class=complete_coding;tx_len=1001bp;cds_len=1001bp;exons=1;phase=missing;boundary=not_assessable

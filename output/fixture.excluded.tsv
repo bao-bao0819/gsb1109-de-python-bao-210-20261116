@@ -1,0 +1,4 @@
+gene_id	transcript_id	source	source_rank	tx_len_bp	cds_len_bp	n_exons	reasons	detail
+gD	gD-t2	ensembl	0	3000	500	1	incomplete_boundary_3p	source=ensembl(rank=0);class=complete_coding;tx_len=3000bp;cds_len=500bp;exons=1;phase=ok;boundary=incomplete
+gE	gE-t2	refseq	1	500	400	1	missing_phase	source=refseq(rank=1);class=complete_coding;tx_len=500bp;cds_len=400bp;exons=1;phase=missing;boundary=5p+3p
+gF	gF-t1	ensembl	0	400	300	1	missing_phase	source=ensembl(rank=0);class=complete_coding;tx_len=400bp;cds_len=300bp;exons=1;phase=missing;boundary=5p+3p

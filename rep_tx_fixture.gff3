@@ -1,0 +1,84 @@
+##gff-version 3
+# Synthetic fixture exercising representative-transcript rules.
+# gA: two complete ensembl txs, longer wins.
+chr1	ensembl	gene	1000	2299	.	+	.	ID=gA
+chr1	ensembl	mRNA	1000	2299	.	+	.	ID=gA-t1;Parent=gA
+chr1	ensembl	exon	1000	1299	.	+	.	Parent=gA-t1
+chr1	ensembl	exon	2000	2299	.	+	.	Parent=gA-t1
+chr1	ensembl	CDS	1100	1299	.	+	0	Parent=gA-t1
+chr1	ensembl	CDS	2000	2199	.	+	0	Parent=gA-t1
+chr1	ensembl	start_codon	1100	1102	.	+	0	Parent=gA-t1
+chr1	ensembl	stop_codon	2197	2199	.	+	0	Parent=gA-t1
+chr1	ensembl	mRNA	1000	2199	.	+	.	ID=gA-t2;Parent=gA
+chr1	ensembl	exon	1000	1199	.	+	.	Parent=gA-t2
+chr1	ensembl	exon	2000	2199	.	+	.	Parent=gA-t2
+chr1	ensembl	CDS	1050	1199	.	+	0	Parent=gA-t2
+chr1	ensembl	CDS	2000	2099	.	+	0	Parent=gA-t2
+chr1	ensembl	start_codon	1050	1052	.	+	0	Parent=gA-t2
+chr1	ensembl	stop_codon	2097	2099	.	+	0	Parent=gA-t2
+# gB: equal source+completeness+length -> tie; exons shared -> union once.
+chr1	ensembl	gene	10000	10649	.	+	.	ID=gB
+chr1	ensembl	mRNA	10000	10649	.	+	.	ID=gB-t1;Parent=gB
+chr1	ensembl	exon	10000	10249	.	+	.	Parent=gB-t1
+chr1	ensembl	exon	10400	10649	.	+	.	Parent=gB-t1
+chr1	ensembl	CDS	10050	10249	.	+	0	Parent=gB-t1
+chr1	ensembl	CDS	10400	10599	.	+	0	Parent=gB-t1
+chr1	ensembl	start_codon	10050	10052	.	+	0	Parent=gB-t1
+chr1	ensembl	stop_codon	10597	10599	.	+	0	Parent=gB-t1
+chr1	ensembl	mRNA	10000	10499	.	+	.	ID=gB-t2;Parent=gB
+chr1	ensembl	exon	10000	10499	.	+	.	Parent=gB-t2
+chr1	ensembl	CDS	10050	10449	.	+	0	Parent=gB-t2
+chr1	ensembl	start_codon	10050	10052	.	+	0	Parent=gB-t2
+chr1	ensembl	stop_codon	10447	10449	.	+	0	Parent=gB-t2
+# gC: complete augustus tx is longer, but ensembl formal record wins on source.
+chr1	ensembl	gene	20000	20899	.	+	.	ID=gC
+chr1	ensembl	mRNA	20000	20699	.	+	.	ID=gC-t1;Parent=gC
+chr1	ensembl	exon	20000	20299	.	+	.	Parent=gC-t1
+chr1	ensembl	exon	20400	20699	.	+	.	Parent=gC-t1
+chr1	ensembl	CDS	20100	20299	.	+	0	Parent=gC-t1
+chr1	ensembl	CDS	20400	20599	.	+	0	Parent=gC-t1
+chr1	ensembl	start_codon	20100	20102	.	+	0	Parent=gC-t1
+chr1	ensembl	stop_codon	20597	20599	.	+	0	Parent=gC-t1
+chr1	augustus	mRNA	20000	20899	.	+	.	ID=gC-t2;Parent=gC
+chr1	augustus	exon	20000	20899	.	+	.	Parent=gC-t2
+chr1	augustus	CDS	20100	20799	.	+	0	Parent=gC-t2
+chr1	augustus	start_codon	20100	20102	.	+	0	Parent=gC-t2
+chr1	augustus	stop_codon	20797	20799	.	+	0	Parent=gC-t2
+# gD: abnormally long readthrough lacks stop_codon -> excluded; short wins.
+chr1	ensembl	gene	30000	32999	.	+	.	ID=gD
+chr1	ensembl	mRNA	30000	30649	.	+	.	ID=gD-t1;Parent=gD
+chr1	ensembl	exon	30000	30249	.	+	.	Parent=gD-t1
+chr1	ensembl	exon	30400	30649	.	+	.	Parent=gD-t1
+chr1	ensembl	CDS	30100	30249	.	+	0	Parent=gD-t1
+chr1	ensembl	CDS	30400	30549	.	+	0	Parent=gD-t1
+chr1	ensembl	start_codon	30100	30102	.	+	0	Parent=gD-t1
+chr1	ensembl	stop_codon	30547	30549	.	+	0	Parent=gD-t1
+chr1	ensembl	mRNA	30000	32999	.	+	.	ID=gD-t2;Parent=gD
+chr1	ensembl	exon	30000	32999	.	+	.	Parent=gD-t2
+chr1	ensembl	CDS	30100	30599	.	+	0	Parent=gD-t2
+chr1	ensembl	start_codon	30100	30102	.	+	0	Parent=gD-t2
+# gE: refseq candidate missing CDS phase -> excluded.
+chr1	ensembl	gene	40000	40499	.	+	.	ID=gE
+chr1	ensembl	mRNA	40000	40399	.	+	.	ID=gE-t1;Parent=gE
+chr1	ensembl	exon	40000	40399	.	+	.	Parent=gE-t1
+chr1	ensembl	CDS	40050	40349	.	+	0	Parent=gE-t1
+chr1	ensembl	start_codon	40050	40052	.	+	0	Parent=gE-t1
+chr1	ensembl	stop_codon	40347	40349	.	+	0	Parent=gE-t1
+chr1	refseq	mRNA	40000	40499	.	+	.	ID=gE-t2;Parent=gE
+chr1	refseq	exon	40000	40499	.	+	.	Parent=gE-t2
+chr1	refseq	CDS	40050	40449	.	+	.	Parent=gE-t2
+chr1	refseq	start_codon	40050	40052	.	+	0	Parent=gE-t2
+chr1	refseq	stop_codon	40447	40449	.	+	0	Parent=gE-t2
+# gF: only candidate missing phase -> gene has no representative.
+chr1	ensembl	gene	50000	50399	.	+	.	ID=gF
+chr1	ensembl	mRNA	50000	50399	.	+	.	ID=gF-t1;Parent=gF
+chr1	ensembl	exon	50000	50399	.	+	.	Parent=gF-t1
+chr1	ensembl	CDS	50050	50349	.	+	.	Parent=gF-t1
+chr1	ensembl	start_codon	50050	50052	.	+	0	Parent=gF-t1
+chr1	ensembl	stop_codon	50347	50349	.	+	0	Parent=gF-t1
+# gG: non-coding gene, longer ncRNA wins.
+chr1	ensembl	gene	60000	60299	.	+	.	ID=gG
+chr1	ensembl	ncRNA	60000	60299	.	+	.	ID=gG-t1;Parent=gG
+chr1	ensembl	exon	60000	60299	.	+	.	Parent=gG-t1
+chr1	ensembl	ncRNA	60000	60199	.	+	.	ID=gG-t2;Parent=gG
+chr1	ensembl	exon	60000	60199	.	+	.	Parent=gG-t2

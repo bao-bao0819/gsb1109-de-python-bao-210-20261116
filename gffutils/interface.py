@@ -1998,6 +1998,36 @@ class FeatureDB(object):
         ]
         return "\t".join(map(str, fields))
 
+    def explain_junctions(self, junctions, **kwargs):
+        """
+        Find transcript(s) that jointly explain each molecule's junctions.
+
+        This is a convenience wrapper around
+        :func:`gffutils.junctions.explain_junctions`.  All junctions from one
+        molecule must be explained by a single transcript; per-junction
+        matches are reported as evidence only.
+
+        Parameters
+        ----------
+        junctions : iterable of :class:`gffutils.junctions.Junction`
+            Typically the result of :func:`gffutils.read_junctions`.
+        **kwargs
+            Passed to :func:`gffutils.junctions.explain_junctions`, e.g.
+            ``allow_exon_skipping=True`` or
+            ``transcript_featuretype="mRNA"``.
+
+        Returns
+        -------
+        :class:`gffutils.junctions.JunctionReport`
+        """
+        from gffutils import junctions as _junctions
+
+        return _junctions.explain_junctions(self, junctions, **kwargs)
+
+    def resolve_junction_groups(self, junctions, **kwargs):
+        """Alias for :meth:`FeatureDB.explain_junctions`."""
+        return self.explain_junctions(junctions, **kwargs)
+
     def seqids(self):
         """
         Yield the unique sequence IDs (chromosomes, contigs) observed in the

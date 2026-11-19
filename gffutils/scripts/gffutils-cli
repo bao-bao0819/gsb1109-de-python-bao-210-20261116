@@ -271,6 +271,44 @@ def convert(filename):
     raise NotImplementedError('implementation in progress')
 
 
+# explain-junctions subcommand -----------------------------------------------
+@arg('db', help=db_help)
+@arg('junctions', help='''Offline junction table (tab-delimited with a header).
+     Must include molecule, start and end columns.''')
+@arg('--coordinate', help='''Coordinate convention: "intron" (default) or
+     "donor_acceptor".''')
+@arg('--transcript-featuretype',
+     help='''Only test transcripts of this featuretype (e.g. "mRNA").''')
+@arg('--allow-exon-skipping', help='''Allow an observed junction to span
+     annotated internal exons when its donor and acceptor boundaries match.''')
+@arg('--ignore-seqid', help='''Do not require matching seqid values.''')
+@arg('--require-order', help='''Require an explicit order for molecules with
+     more than one junction.''')
+@arg('--evidence', help='''Also report per-junction supporting transcripts.''')
+def explain_junctions(db, junctions, *, coordinate=None,
+                      transcript_featuretype=None, allow_exon_skipping=False,
+                      ignore_seqid=False, require_order=False, evidence=False):
+    """
+    Explain junction groups by a single compatible transcript per molecule.
+
+    Each molecule's junctions are evaluated together.  A molecule is reported
+    as "unique" or "shared" only when one or more transcripts are compatible
+    with every junction; otherwise it is "none".  Per-junction matches alone
+    never count as an explanation.
+    """
+    db = gffutils.FeatureDB(db)
+    parsed = gffutils.read_junctions(junctions, coordinate=coordinate)
+    report = gffutils.explain_junctions(
+        db,
+        parsed,
+        transcript_featuretype=transcript_featuretype,
+        allow_exon_skipping=allow_exon_skipping,
+        require_seqid=not ignore_seqid,
+        require_order=require_order,
+    )
+    print(gffutils.junctions.format_report(report, show_evidence=evidence))
+
+
 # search subcommand -----------------------------------------------------------
 @arg('db', help=db_help)
 @arg('text', help='''Text to search for. Case-insensitive; use sql LIKE
@@ -297,6 +335,7 @@ if __name__ == "__main__":
         common,
         clean,
         search,
+        explain_junctions,
         sanitize,
         rmdups
     ])

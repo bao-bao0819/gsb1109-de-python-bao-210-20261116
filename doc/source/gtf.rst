@@ -18,6 +18,26 @@ imported into a database**, and adds new "derived" features for each gene and
 transcript.  That way, a gene can be easily accessed by its ID, just like for
 GFF files.
 
+These inferred records are not explicitly present in the source data, so they
+are stored under a separate evidence boundary. Their
+``features.evidence_scope`` is ``"derived"`` (features read directly from the
+file are ``"source"``), and the matching row in the ``feature_evidence``
+table records the inference basis, a rationale and the ids of the child
+features the extent was derived from. Query and count methods accept an
+``evidence`` argument so statistics can use source-only records
+(``evidence="source"``), derived-only records (``evidence="derived"``), or
+every record (the default).
+
+If a formal source-provided gene or transcript carrying the same ID is added
+later (for example through :meth:`gffutils.FeatureDB.update`), the two
+records are never merged or overwritten. The derived placeholder is kept
+under a distinct ID, both evidence rows are retained and cross-referenced,
+and the derived row is marked ``reconciled``. Use
+:meth:`gffutils.FeatureDB.evidence_for`,
+:meth:`gffutils.FeatureDB.evidence_conflicts` and
+:meth:`gffutils.FeatureDB.reconcile_identity` to inspect and coordinate the
+identities. See :doc:`database-schema` for the full schema.
+
 However, not all files meet the official GTF specifications where each feature
 has `transcript_id` to indicate its parent feature and `gene_id` to indicate
 its "grandparent" feature.  To accommodate this, :mod:`gffutils` provides some

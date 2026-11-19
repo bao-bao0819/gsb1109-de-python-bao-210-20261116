@@ -128,6 +128,7 @@ def make_query(
     order_by=None,
     reverse=False,
     completely_within=False,
+    evidence=None,
 ):
     """
     Multi-purpose, bare-bones ORM function.
@@ -158,9 +159,18 @@ def make_query(
     and the strand will be appended to the args.
 
     `args` can be pre-filled with args that are passed to `other` and `extra`.
+
+    evidence : None or str
+        When None or ``"all"`` no provenance filtering is applied. Otherwise
+        the value must be one of :data:`gffutils.constants.EVIDENCE_SCOPES`
+        (``"source"`` or ``"derived"``), restricting results to records of
+        that evidence boundary.
     """
 
-    _QUERY = "{_SELECT} {OTHER} {EXTRA} {FEATURETYPE} " "{LIMIT} {STRAND} {ORDER_BY}"
+    _QUERY = (
+        "{_SELECT} {OTHER} {EXTRA} {FEATURETYPE} "
+        "{EVIDENCE} {LIMIT} {STRAND} {ORDER_BY}"
+    )
 
     # Construct a dictionary `d` that will be used later as _QUERY.format(**d).
     # Default is just _SELECT, which returns all records in the features table.
@@ -170,6 +180,7 @@ def make_query(
         _SELECT=constants._SELECT,
         OTHER="",
         FEATURETYPE="",
+        EVIDENCE="",
         LIMIT="",
         STRAND="",
         ORDER_BY="",
@@ -209,6 +220,21 @@ def make_query(
                 ",".join(["?" for _ in featuretype])
             )
             args.extend(featuretype)
+
+    # EVIDENCE appears between FEATURETYPE and LIMIT in _QUERY, so its args
+    # must be appended in the same order.
+    if evidence and evidence != constants.EVIDENCE_ALL:
+        if evidence not in constants.EVIDENCE_SCOPES:
+            raise ValueError(
+                "evidence must be one of %s or %r, got %r"
+                % (
+                    constants.EVIDENCE_SCOPES,
+                    constants.EVIDENCE_ALL,
+                    evidence,
+                )
+            )
+        d["EVIDENCE"] = "features.evidence_scope = ?"
+        args.append(evidence)
 
     if limit:
         # Restrict to a genomic region.  Makes use of the UCSC binning strategy
@@ -283,7 +309,7 @@ def make_query(
     where = False
     if "where" in d["OTHER"].lower():
         where = True
-    for i in ["EXTRA", "FEATURETYPE", "LIMIT", "STRAND"]:
+    for i in ["EXTRA", "FEATURETYPE", "EVIDENCE", "LIMIT", "STRAND"]:
         if d[i]:
             if not where:
                 d[i] = "WHERE " + d[i]

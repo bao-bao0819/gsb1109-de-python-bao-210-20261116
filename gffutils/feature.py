@@ -44,6 +44,7 @@ class Feature(object):
         file_order=None,
         keep_order=False,
         sort_attribute_values=False,
+        evidence_scope=None,
     ):
         """
         Represents a feature from the database.
@@ -145,6 +146,16 @@ class Feature(object):
             important for checking against expected values. Disabled by
             default, since it can be time-consuming over many features.
 
+        evidence_scope : str or None
+            Provenance boundary of the record. One of the values in
+            :data:`gffutils.constants.EVIDENCE_SCOPES`: ``"source"`` for a
+            record explicitly provided in the input data, or ``"derived"``
+            for a record inferred by gffutils (for example a gene or
+            transcript whose extent was built from child features). None
+            defaults to ``"source"``. The matching evidence details (basis,
+            rationale, derived-from ids) live in the ``feature_evidence``
+            table rather than on the feature itself.
+
         """
         # start/end can be provided as int-like, ".", or None, but will be
         # converted to int or None
@@ -204,6 +215,14 @@ class Feature(object):
         self.file_order = file_order
         self.keep_order = keep_order
         self.sort_attribute_values = sort_attribute_values
+        if evidence_scope is None:
+            evidence_scope = constants.EVIDENCE_SOURCE
+        elif evidence_scope not in constants.EVIDENCE_SCOPES:
+            raise ValueError(
+                "evidence_scope must be one of %s, got %r"
+                % (constants.EVIDENCE_SCOPES, evidence_scope)
+            )
+        self.evidence_scope = evidence_scope
 
     def calc_bin(self, _bin=None):
         """
@@ -300,6 +319,11 @@ class Feature(object):
     def __len__(self):
         return self.stop - self.start + 1
 
+    @property
+    def is_derived(self):
+        """True when the record was inferred rather than source-provided."""
+        return self.evidence_scope == constants.EVIDENCE_DERIVED
+
     # aliases for official GFF field names; this way x.chrom == x.seqid; and
     # x.stop == x.end.
     @property
@@ -347,7 +371,11 @@ class Feature(object):
                 helpers._jsonify(self.attributes),
                 helpers._jsonify(self.extra),
                 self.calc_bin(),
+                self.evidence_scope,
             )
+        evidence_scope = self.evidence_scope
+        if isinstance(evidence_scope, bytes):
+            evidence_scope = evidence_scope.decode(encoding)
         return (
             self.id.decode(encoding),
             self.seqid.decode(encoding),
@@ -361,6 +389,7 @@ class Feature(object):
             helpers._jsonify(self.attributes).decode(encoding),
             helpers._jsonify(self.extra).decode(encoding),
             self.calc_bin(),
+            evidence_scope,
         )
 
     def sequence(self, fasta, use_strand=True):

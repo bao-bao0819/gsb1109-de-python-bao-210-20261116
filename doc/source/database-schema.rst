@@ -23,6 +23,7 @@ CREATE TABLE features (
     attributes text,
     extra text,
     bin int,
+    evidence_scope text not null default 'source',
     primary key (id)
     );
 <BLANKLINE>
@@ -52,6 +53,32 @@ CREATE TABLE duplicates (
     idspecid text,
     newid text,
     primary key (newid)
+    );
+<BLANKLINE>
+-- Provenance for features that were not explicitly present in the source
+-- data. Each row is one piece of evidence for a feature, identified by the
+-- pair (id, scope):
+--
+--   scope         'source'  = explicitly provided in the input data
+--                 'derived' = inferred by gffutils (e.g. an inferred gene or
+--                             transcript built from child features)
+--   basis         short machine-readable code describing how the record was
+--                 produced (e.g. 'inferred_transcript_extent')
+--   rationale     human-readable explanation of the inference
+--   derived_from  JSON list of feature ids the inference was based on
+--   conflicts_with canonical id of the other-scope record sharing the same
+--                 biological identity, when a source/derived conflict exists
+--   status        'active' or 'reconciled' once a formal record arrives
+<BLANKLINE>
+CREATE TABLE feature_evidence (
+    id text not null,
+    scope text not null,
+    basis text,
+    rationale text,
+    derived_from text,
+    conflicts_with text,
+    status text not null default 'active',
+    primary key (id, scope)
     );
 <BLANKLINE>
 <BLANKLINE>
@@ -97,6 +124,47 @@ original file (and any additional information added by the user).
 :bin:
     The genomic bin, according to the `UCSC binning
     <http://genome.cshlp.org/content/12/6/996/F7.expansion.html>`_ strategy.
+
+:evidence_scope:
+    Provenance boundary of the record. ``"source"`` means the feature was
+    explicitly provided in the input data; ``"derived"`` means gffutils
+    inferred it (for example an inferred GTF gene or transcript built from
+    child features). The detailed basis, rationale and child ids supporting
+    an inference are stored in the ``feature_evidence`` table.
+
+`feature_evidence` table
+------------------------
+Every feature has exactly one row here describing how it was established.
+A source-provided record and a derived record that describe the same
+biological identity are stored as separate features with separate evidence
+rows rather than being merged or overwritten.
+
+:id:
+    Foreign key to ``features.id``.
+
+:scope:
+    ``"source"`` for explicitly provided records, ``"derived"`` for records
+    inferred by gffutils.
+
+:basis:
+    Machine-readable code describing how the record was produced, for
+    example ``inferred_gene_extent`` or ``input_record``.
+
+:rationale:
+    Human-readable explanation of the inference.
+
+:derived_from:
+    JSON list of feature ids the derived record was built from; empty for
+    source records.
+
+:conflicts_with:
+    The other-scope record sharing the same biological identity, when a
+    source/derived conflict exists.
+
+:status:
+    ``"active"`` while the derived placeholder stands alone, or
+    ``"reconciled"`` once a formal source record has arrived and the
+    identities have been coordinated.
 
 `relations` table
 -----------------

@@ -4,6 +4,22 @@ Change log
 ==========
 
 
+Unreleased
+----------
+
+- Coverage-based blank-region extraction.  ``FeatureDB.interfeatures`` (and
+  the new ``FeatureDB.uncovered_intervals``, ``FeatureDB.coverage_gaps`` and
+  ``FeatureDB.blank_intervals`` aliases) now compute the union of the input
+  intervals before emitting gaps.  Nested and overlapping features no longer
+  produce spurious gaps or negative-length intervals, and input order no
+  longer affects the result.  Each returned feature exposes ``left_support``
+  and ``right_support`` (plus aliases such as ``left_support_ids`` and
+  ``boundary_support``) describing which features support each boundary.
+  ``ignore_strand``, ``strand`` and ``merge_criteria`` control strand
+  conventions, while ``chromsizes``/``bounds``/``sequence_bounds`` provide
+  caller-defined sequence endpoints for leading and trailing intervals.
+
+
 v0.14
 -----
 

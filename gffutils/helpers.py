@@ -418,6 +418,27 @@ def merge_attributes(attr1, attr2, numeric_sort=False):
     return final_d
 
 
+def uncovered_intervals(features, **kwargs):
+    """
+    Yield maximal inclusive intervals not covered by any of `features`.
+
+    See :func:`gffutils.uncovered.uncovered_intervals` for all options.
+    """
+    from gffutils import uncovered as uncovered_module
+
+    return uncovered_module.uncovered_intervals(features, **kwargs)
+
+
+def coverage_gaps(features, **kwargs):
+    """Alias for :func:`uncovered_intervals`."""
+    return uncovered_intervals(features, **kwargs)
+
+
+def blank_intervals(features, **kwargs):
+    """Alias for :func:`uncovered_intervals`."""
+    return uncovered_intervals(features, **kwargs)
+
+
 def dialect_compare(dialect1, dialect2):
     """
     Compares two dialects.

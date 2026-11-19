@@ -3,6 +3,15 @@ from gffutils.interface import FeatureDB
 from gffutils.feature import Feature
 from gffutils.iterators import DataIterator
 from gffutils.helpers import example_filename
+from gffutils.uncovered import (
+    SupportIds,
+    SupportList,
+    blank_intervals,
+    coverage_gaps,
+    intervals,
+    uncovered_intervals,
+    uncovered_regions,
+)
 from gffutils.exceptions import FeatureNotFoundError, DuplicateIDError
 from gffutils.version import version as __version__
 
@@ -15,4 +24,11 @@ __all__ = [
     "example_filename",
     "FeatureNotFoundError",
     "DuplicateIDError",
+    "SupportIds",
+    "SupportList",
+    "blank_intervals",
+    "coverage_gaps",
+    "intervals",
+    "uncovered_regions",
+    "uncovered_intervals",
 ]

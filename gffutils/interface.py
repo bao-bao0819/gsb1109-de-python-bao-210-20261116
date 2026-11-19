@@ -819,6 +819,14 @@ class FeatureDB(object):
         dialect=None,
         attribute_func=None,
         update_attributes=None,
+        include_ends=None,
+        chromsizes=None,
+        bounds=None,
+        sequence_bounds=None,
+        ignore_strand=True,
+        strand=None,
+        include_support_attributes=False,
+        merge_criteria=None,
     ):
         """
         Construct new features representing the space between features.
@@ -827,18 +835,26 @@ class FeatureDB(object):
         return the introns.  If `features` is a list of genes, then this method
         will return the intergenic regions.
 
-        Providing N features will return N - 1 new features.
+        Coverage is computed from the union of the input features, so nested
+        and overlapping features are handled correctly and the input does not
+        need to be sorted.  The result is the set of maximal uncovered
+        intervals, independent of input row order.
 
-        This method purposefully does *not* do any merging or sorting of
-        coordinates. So nested or overlapping features may not behave as you
-        might expect. You may want to use :meth:`FeatureDB.merge` first, and
-        when selecting features use the `order_by` kwarg, e.g.,
-        `db.features_of_type('gene', order_by=('seqid', 'start'))`.
+        Providing N non-overlapping, non-nested features will return N - 1 new
+        features.  Overlapping or nested features can result in fewer
+        intervals (or none at all).
+
+        Each returned feature records the features supporting its left and
+        right boundaries in ``left_support`` / ``right_support`` (and the
+        aliases ``left_features`` / ``right_features``).  These attributes are
+        always available as Python properties; use
+        `include_support_attributes=True` to additionally write them into the
+        feature's attributes.
 
         Parameters
         ----------
         features : iterable of :class:`feature.Feature` instances
-            Sorted, merged iterable
+            Iterable of features.  It does not need to be sorted or merged.
 
         new_featuretype : string or None
             The new features will all be of this type, or, if None (default)
@@ -846,12 +862,12 @@ class FeatureDB(object):
             features, e.g., `inter_exon_exon`.
 
         merge_attributes : bool
-            If True, new features' attributes will be a merge of the neighboring
-            features' attributes.  This is useful if you have provided a list of
-            exons; the introns will then retain the transcript and/or gene
-            parents as a single item. Otherwise, if False, the attribute will
-            be a comma-separated list of values, potentially listing the same
-            gene ID twice.
+            If True, new features' attributes will be a merge of the
+            supporting features' attributes.  This is useful if you have
+            provided a list of exons; the introns will then retain the
+            transcript and/or gene parents as a single item. Otherwise, if
+            False, the attribute will be a comma-separated list of values,
+            potentially listing the same gene ID twice.
 
         numeric_sort : bool
             If True, then merged attributes that can be cast to float will be
@@ -862,141 +878,104 @@ class FeatureDB(object):
             merged exon_number attribute of ['9', '10'] (numerically sorted)
             rather than ['10', '9'] (alphabetically sorted).
 
+        dialect : dict or None
+            Dialect to use for returned features.  Defaults to the database's
+            dialect.
+
         attribute_func : callable or None
             If None, then nothing special is done to the attributes.  If
-            callable, then the callable accepts two attribute dictionaries and
-            returns a single attribute dictionary.  If `merge_attributes` is
-            True, then `attribute_func` is called before `merge_attributes`.
-            This could be useful for manually managing IDs for the new
-            features.
+            callable, then the callable accepts an attribute dictionary and
+            returns a new attribute dictionary.  It is applied to each
+            supporting feature before attributes are merged.  This could be
+            useful for manually managing IDs for the new features.
 
         update_attributes : dict
             After attributes have been modified and merged, this dictionary can
             be used to replace parts of the attributes dictionary.
 
+        include_ends : bool
+            If True, also return the leading and trailing uncovered intervals
+            for each sequence.  Requires sequence endpoints via `chromsizes`
+            (or `bounds`); endpoints that are unknown are skipped.
+
+        chromsizes, bounds, sequence_bounds : mapping, iterable, filename, or None
+            Caller-supplied sequence endpoints.  Values may be lengths or
+            ``(start, end)`` tuples.  When endpoints are provided, leading and
+            trailing uncovered intervals are included by default.
+
+        ignore_strand : bool
+            If True (default), coverage is the union across strands.  If
+            False, gaps are computed separately for each strand.
+
+        strand : None, "+", "-", or "."
+            If not None, only features on this strand are considered.
+
+        merge_criteria : iterable or None
+            Passed through to coverage grouping.  If the criteria include
+            ``gffutils.merge_criteria.strand``, coverage is computed per
+            strand (equivalent to ``ignore_strand=False``).
+
+        include_support_attributes : bool
+            If True, ``left_support`` and ``right_support`` are added to the
+            attributes dictionary of each returned feature.
+
         Returns
         -------
         A generator that yields :class:`Feature` objects
         """
+        import gffutils.uncovered as uncovered_module
 
-        def _init_interfeature(f):
-            """
-            Used to initialize a new interfeature that is ready to be updated
-            in-place.
-            """
-            keys = [
-                "id",
-                "seqid",
-                "source",
-                "featuretype",
-                "start",
-                "end",
-                "score",
-                "strand",
-                "frame",
-                "attributes",
-                "bin",
-            ]
-            d = dict(zip(keys, f.astuple()))
-            d["source"] = "gffutils_derived"
-            return d
+        features = list(features)
+        feature_returner = self._feature_returner
+        if dialect is not None:
+            base_returner = self._feature_returner
 
-        def _prep_for_yield(d):
-            """
-            Finalize the interfeature by adjusting coords, recalculating the
-            bin, and creating a feature using self._feature_returner.
+            def feature_returner(**kwargs):
+                kwargs.setdefault("dialect", dialect)
+                return base_returner(**kwargs)
 
-            If start is greater than stop (which happens when trying to get
-            interfeatures for overlapping features), then return None.
-            """
-            d["start"] += 1
-            d["end"] -= 1
-            new_bin = bins.bins(d["start"], d["end"], one=True)
-            d["bin"] = new_bin
+        return uncovered_module.uncovered_intervals(
+            features,
+            new_featuretype=new_featuretype,
+            merge_attributes=merge_attributes,
+            numeric_sort=numeric_sort,
+            attribute_func=attribute_func,
+            update_attributes=update_attributes,
+            include_ends=include_ends,
+            chromsizes=chromsizes,
+            bounds=bounds,
+            sequence_bounds=sequence_bounds,
+            ignore_strand=ignore_strand,
+            strand=strand,
+            include_support_attributes=include_support_attributes,
+            merge_criteria=merge_criteria,
+            feature_returner=feature_returner,
+            attribute_support="representative",
+        )
 
-            if d["start"] > d["end"]:
-                return None
+    def uncovered_intervals(self, features=None, **kwargs):
+        """
+        Yield maximal intervals not covered by `features`.
 
-            new_feature = self._feature_returner(**d)
+        This is the coverage-based counterpart to :meth:`interfeatures`; it
+        accepts the same keyword arguments plus ``sequence_bounds``.  If
+        `features` is None, all features in the database are used.
+        """
+        import gffutils.uncovered as uncovered_module
 
-            # concat list of ID to create uniq IDs because feature with
-            # multiple values for their ID are no longer permitted since v0.11
-            if "ID" in new_feature.attributes and len(new_feature.attributes["ID"]) > 1:
-                new_id = "-".join(new_feature.attributes["ID"])
-                new_feature.attributes["ID"] = [new_id]
-            return new_feature
+        if features is None:
+            features = self.all_features(order_by=("seqid", "start"))
+        return uncovered_module.uncovered_intervals(
+            features, feature_returner=self._feature_returner, **kwargs
+        )
 
-        # If not provided, use a no-op function instead.
-        if not attribute_func:
+    def coverage_gaps(self, features=None, **kwargs):
+        """Alias for :meth:`uncovered_intervals`."""
+        return self.uncovered_intervals(features, **kwargs)
 
-            def attribute_func(a):
-                return a
-
-        for i, f in enumerate(features):
-            # First feature: initialize an interfeature and continue to the next.
-            if i == 0:
-                interfeature = _init_interfeature(f)
-                last_feature = f
-                nfeatures = 1
-                continue
-
-            # Yield the last interfeature (if we saw at least 2 features) and
-            # start a new interfeature on this chrom.
-            if f.chrom != last_feature.chrom:
-                if nfeatures > 1:
-                    new_feature = _prep_for_yield(interfeature)
-                    if new_feature:
-                        yield new_feature
-                interfeature = _init_interfeature(f)
-                last_feature = f
-                nfeatures = 1
-                continue
-
-            # Otherwise, we've already seen a feature on this chrom so
-            # this is the second.
-            nfeatures += 1
-
-            # Adjust the interfeature dict in-place with coords...
-            interfeature["start"] = last_feature.stop
-            interfeature["end"] = f.start
-
-            # ...featuretype
-            if new_featuretype is None:
-                interfeature["featuretype"] = "inter_%s_%s" % (
-                    last_feature.featuretype,
-                    f.featuretype,
-                )
-            else:
-                interfeature["featuretype"] = new_featuretype
-
-            # ...strand
-            if last_feature.strand != f.strand:
-                interfeature["strand"] = "."
-            else:
-                interfeature["strand"] = f.strand
-
-            # and attributes
-            if merge_attributes:
-                new_attributes = helpers.merge_attributes(
-                    attribute_func(last_feature.attributes),
-                    attribute_func(f.attributes),
-                    numeric_sort=numeric_sort,
-                )
-            else:
-                new_attributes = {}
-
-            if update_attributes:
-                new_attributes.update(update_attributes)
-
-            interfeature["attributes"] = new_attributes
-
-            # Ready to yield
-            new_feature = _prep_for_yield(interfeature)
-            if new_feature:
-                yield new_feature
-            nfeatures = 1
-
-            last_feature = f
+    def blank_intervals(self, features=None, **kwargs):
+        """Alias for :meth:`uncovered_intervals`."""
+        return self.uncovered_intervals(features, **kwargs)
 
     def delete(self, features, make_backup=True, **kwargs):
         """

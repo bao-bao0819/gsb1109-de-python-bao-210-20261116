@@ -432,9 +432,7 @@ def test_issue_197():
     assert [str(i) for i in obs] == [
         "tig00000492\tgffutils_derived\tintergenic_space\t47236\t47350\t.\t-\t.\tID=ctg492.gene0001-ctg492.gene0002;Name=gene0001,gene0002",
         "tig00000492\tgffutils_derived\tintergenic_space\t48257\t49999\t.\t-\t.\tID=ctg492.gene0002-gene0;Name=gene0002",
-        "tig00000492\tgffutils_derived\tintergenic_space\t50050\t50054\t.\t-\t.\tID=gene3-gene4",
-        "tig00000492\tgffutils_derived\tintergenic_space\t50071\t50071\t.\t-\t.\tID=gene4-gene5",
-        "tig00000492\tgffutils_derived\tintergenic_space\t50076\t50089\t.\t-\t.\tID=gene5-gene6",
+        "tig00000492\tgffutils_derived\tintergenic_space\t50086\t50089\t.\t-\t.\tID=gene00-gene6",
     ]
 
 

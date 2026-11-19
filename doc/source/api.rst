@@ -72,6 +72,7 @@ Operate on features:
     :nosignatures:
 
     FeatureDB.interfeatures
+    FeatureDB.uncovered_intervals
     FeatureDB.children_bp
     FeatureDB.merge
     FeatureDB.create_introns
@@ -133,6 +134,7 @@ Utilities
 
     helpers.asinterval
     helpers.merge_attributes
+    helpers.uncovered_intervals
     helpers.sanitize_gff_db
     helpers.annotate_gff_db
     helpers.infer_dialect

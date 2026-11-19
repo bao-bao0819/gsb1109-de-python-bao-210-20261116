@@ -1,5 +1,15 @@
 # -*- coding: latin-1 -*-
 #
+from .completeness import (
+    CompletenessDeclaration,
+    MissingScope,
+    PartialValidationReport,
+    PartialValidator,
+    ProvenConformance,
+    ProvenViolation,
+    UnknownItem,
+    validate_partial,
+)
 from .entrypoints import shacl_rules, validate, validate_each
 from .rule_expand_runner import RuleExpandRunner
 from .shape import Shape
@@ -19,4 +29,12 @@ __all__ = [
     '__version__',
     'Shape',
     'ShapesGraph',
+    'CompletenessDeclaration',
+    'MissingScope',
+    'PartialValidationReport',
+    'PartialValidator',
+    'ProvenConformance',
+    'ProvenViolation',
+    'UnknownItem',
+    'validate_partial',
 ]

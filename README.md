@@ -283,6 +283,34 @@ PySHACL v0.27.0 and above has two powerful new features:
     a highly-targeted mode, it feeds those focus nodes directly into those given Shapes for validation.
   - In this mode, the selected SHACL Shape does not need to specify any focus-targeting mechanisms of its own.
 
+## Partial Validation with Completeness Declarations
+When you only receive a slice of the entities (and the missing relations may live in graphs that were not
+shipped), plain closed-world validation cannot tell "violated" apart from "not yet received". The
+`pyshacl.completeness` module separates the two:
+
+- `CompletenessDeclaration` states which scopes of the input are complete (closed-world applies _only_ to
+  the declared scopes): per subject, per class of subjects, per predicate, or the whole graph.
+- `validate_partial(data_graph, shacl_graph, focus_nodes=..., completeness=...)` validates just the
+  requested entity slice and returns a three-valued `PartialValidationReport`:
+  - `violations` — provable violations that no additional data can retract (growth-stable constraints
+    such as `sh:maxCount`/`sh:datatype`, or constraints whose scopes are fully declared complete),
+  - `conformances` — provably satisfied constraint instances,
+  - `unknowns` — undecidable instances, each carrying the `missing` scope (focus node × predicate) a
+    query would still need to become decidable.
+- `PartialValidator` supports incremental refinement: `add_data()` merges another slice of data (and
+  optionally widens the declarations), and re-validation only re-evaluates the previous unknowns —
+  proven results are final and carried over.
+
+```python
+from pyshacl import CompletenessDeclaration, validate_partial
+
+completeness = CompletenessDeclaration().declare(subject=ex_Alice, predicate=ex_name)
+report = validate_partial(data_graph, shacl_graph, focus_nodes=[ex_Alice], completeness=completeness)
+print(report.summary())
+for unknown in report.unknowns:
+    print("undecided:", unknown.component, "needs:", unknown.missing)
+```
+
 ## SPARQL Remote Graph Mode
 
 _**PySHACL now has a built-in SPARQL Remote Graph Mode, which allows you to validate a data graph that is stored on a remote server.**_

@@ -30,11 +30,12 @@ from typing import (
 )
 
 from .cell import Cell
-from .exceptions import GSpreadException
+from .exceptions import AmbiguousMetadataMatch, GSpreadException
 from .http_client import DefaultSerializerType, HTTPClient, ParamsType
 from .urls import WORKSHEET_DRIVE_URL
 from .utils import (
     DateTimeOption,
+    DeveloperMetadataMatch,
     Dimension,
     GridRangeType,
     InsertDataOption,
@@ -54,6 +55,8 @@ from .utils import (
     combined_merge_values,
     convert_colors_to_hex_value,
     convert_hex_to_colors_dict,
+    dedupe_developer_metadata,
+    developer_metadata_from_dict,
     fill_gaps,
     find_table,
     finditem,
@@ -2548,6 +2551,90 @@ class Worksheet:
             elem
             for elem in self._finder(filter, query, case_sensitive, in_row, in_column)
         ]
+
+    def _fetch_developer_metadata(self) -> List[DeveloperMetadataMatch]:
+        """Fetches all developer metadata entries located on this worksheet
+        and parses them into auditable matches, deduplicated by metadata
+        identity.
+        """
+        metadata = self.client.fetch_sheet_metadata(
+            self.spreadsheet_id,
+            params={
+                "fields": "sheets.properties.sheetId,sheets.developerMetadata,developerMetadata"
+            },
+        )
+
+        raw_entries: List[Mapping[str, Any]] = []
+
+        for sheet in metadata.get("sheets", []):
+            properties = sheet.get("properties", {})
+            if properties.get("sheetId") == self.id:
+                raw_entries.extend(sheet.get("developerMetadata", []))
+
+        # spreadsheet-level entries may still be located on this worksheet
+        for entry in metadata.get("developerMetadata", []):
+            location = entry.get("location", {})
+            dimension_range = location.get("dimensionRange", {})
+            if self.id in (location.get("sheetId"), dimension_range.get("sheetId")):
+                raw_entries.append(entry)
+
+        return dedupe_developer_metadata(
+            developer_metadata_from_dict(entry) for entry in raw_entries
+        )
+
+    def findall_developer_metadata(self, key: str) -> List[DeveloperMetadataMatch]:
+        """Finds all developer metadata entries with the given key located
+        on this worksheet.
+
+        The same key may be marked on an entire row, on multiple ranges or
+        with different visibility scopes: each distinct entry is returned as
+        its own :class:`gspread.utils.DeveloperMetadataMatch`, keeping its
+        metadata identity and exact location so the result can be audited.
+
+        Entries are deduplicated by metadata identity, never by key/value:
+        after copying a range of the spreadsheet, the copied entries carry
+        new metadata IDs and are returned as distinct records even though
+        their keys and values are identical.
+
+        Use :func:`gspread.utils.covered_dimension_indexes` on the result to
+        account for the covered rows/columns without counting overlapping
+        ranges twice.
+
+        :param str key: the developer metadata key to look up.
+        :returns: the list of all matching entries or empty list otherwise
+        :rtype: list
+
+        .. versionadded:: 6.3.0
+        """
+        return [
+            match for match in self._fetch_developer_metadata() if match.key == key
+        ]
+
+    def find_developer_metadata(self, key: str) -> Optional[DeveloperMetadataMatch]:
+        """Finds the unique developer metadata entry with the given key
+        located on this worksheet.
+
+        Returns the match only when exactly one distinct metadata identity
+        matches the key. Returns ``None`` when nothing matches.
+
+        :param str key: the developer metadata key to look up.
+        :returns: the unique matching entry or None otherwise
+        :rtype: :class:`gspread.utils.DeveloperMetadataMatch`
+        :raises ~gspread.exceptions.AmbiguousMetadataMatch: when multiple
+            distinct entries match the key. The conflicting entries are
+            available on the exception's ``matches`` attribute.
+
+        .. versionadded:: 6.3.0
+        """
+        matches = self.findall_developer_metadata(key)
+
+        if len(matches) > 1:
+            raise AmbiguousMetadataMatch(key, matches)
+
+        if matches:
+            return matches[0]
+
+        return None
 
     def freeze(
         self, rows: Optional[int] = None, cols: Optional[int] = None

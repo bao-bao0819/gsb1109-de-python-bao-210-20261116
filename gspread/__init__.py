@@ -15,6 +15,7 @@ from .auth import (
 from .cell import Cell
 from .client import Client
 from .exceptions import (
+    AmbiguousMetadataMatch,
     GSpreadException,
     IncorrectCellLabel,
     NoValidUrlKeyFound,
@@ -55,6 +56,7 @@ __all__ = [
     "ValueRange",
 
     # from .exceptions
+    "AmbiguousMetadataMatch",
     "GSpreadException",
     "IncorrectCellLabel",
     "NoValidUrlKeyFound",

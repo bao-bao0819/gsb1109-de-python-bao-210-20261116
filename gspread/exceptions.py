@@ -6,7 +6,7 @@ Exceptions used in gspread.
 
 """
 
-from typing import Any, Mapping
+from typing import Any, List, Mapping
 
 from requests import Response
 
@@ -72,3 +72,19 @@ class APIError(GSpreadException):
 
 class SpreadsheetNotFound(GSpreadException):
     """Trying to open non-existent or inaccessible spreadsheet."""
+
+
+class AmbiguousMetadataMatch(GSpreadException):
+    """A unique developer metadata lookup matched multiple distinct entries.
+
+    The conflicting entries are available on the ``matches`` attribute so
+    the ambiguity can be inspected and resolved.
+    """
+
+    def __init__(self, key: str, matches: List[Any]):
+        super().__init__(
+            "Ambiguous developer metadata lookup for key {!r}: "
+            "{} distinct entries match".format(key, len(matches))
+        )
+        self.key = key
+        self.matches = matches

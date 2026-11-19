@@ -2074,3 +2074,177 @@ class WorksheetTest(GspreadTest):
         # Further ensure we are able to access the exception's properties after pickling
         reloaded_exception = pickle.loads(pickle.dumps(ex.exception))  # nosec
         self.assertEqual(reloaded_exception.args[0]["status"], "INVALID_ARGUMENT")
+
+
+class StubMetadataHTTPClient(gspread.http_client.HTTPClient):
+    """HTTP client stub returning a canned spreadsheet metadata payload."""
+
+    def __init__(self, payload):
+        from requests import Session
+
+        super().__init__(auth=None, session=Session())
+        self._payload = payload
+
+    def fetch_sheet_metadata(self, id, params=None):
+        return self._payload
+
+
+def _metadata_entry(metadata_id, key, value, location):
+    return {
+        "metadataId": metadata_id,
+        "metadataKey": key,
+        "metadataValue": value,
+        "location": location,
+    }
+
+
+def _row_location(sheet_id, start_index, end_index):
+    return {
+        "locationType": "ROW",
+        "dimensionRange": {
+            "sheetId": sheet_id,
+            "dimension": "ROWS",
+            "startIndex": start_index,
+            "endIndex": end_index,
+        },
+    }
+
+
+class WorksheetDeveloperMetadataTest(GspreadTest):
+    """Test for gspread.Worksheet developer metadata lookup."""
+
+    SHEET_ID = 7
+
+    def make_worksheet(self, payload):
+        client = StubMetadataHTTPClient(payload)
+        return Worksheet(
+            spreadsheet=None,
+            properties={
+                "sheetId": self.SHEET_ID,
+                "title": "Sheet1",
+                "index": 0,
+                "gridProperties": {"rowCount": 100, "columnCount": 26},
+            },
+            spreadsheet_id="spreadsheet-id",
+            client=client,
+        )
+
+    def make_payload(self):
+        return {
+            "sheets": [
+                {
+                    "properties": {"sheetId": self.SHEET_ID},
+                    "developerMetadata": [
+                        _metadata_entry(
+                            1, "orderId", "A-1", _row_location(self.SHEET_ID, 2, 3)
+                        ),
+                        # same key/value as metadata 1 but a distinct identity,
+                        # as produced by copying a range of the spreadsheet
+                        _metadata_entry(
+                            2, "orderId", "A-1", _row_location(self.SHEET_ID, 5, 8)
+                        ),
+                        _metadata_entry(
+                            3,
+                            "other",
+                            "x",
+                            {
+                                "locationType": "COLUMN",
+                                "dimensionRange": {
+                                    "sheetId": self.SHEET_ID,
+                                    "dimension": "COLUMNS",
+                                    "startIndex": 0,
+                                    "endIndex": 1,
+                                },
+                            },
+                        ),
+                    ],
+                },
+                {
+                    "properties": {"sheetId": 8},
+                    "developerMetadata": [
+                        _metadata_entry(4, "orderId", "B-1", _row_location(8, 0, 1)),
+                    ],
+                },
+            ],
+            "developerMetadata": [
+                # sheet-scoped entry located on this worksheet
+                _metadata_entry(
+                    5, "orderId", "C-1", {"locationType": "SHEET", "sheetId": 7}
+                ),
+                # spreadsheet-scoped entry: not located on any worksheet
+                _metadata_entry(
+                    6,
+                    "orderId",
+                    "D-1",
+                    {"locationType": "SPREADSHEET", "spreadsheet": True},
+                ),
+            ],
+        }
+
+    def test_findall_developer_metadata(self):
+        sheet = self.make_worksheet(self.make_payload())
+
+        matches = sheet.findall_developer_metadata("orderId")
+
+        # entries from the other worksheet and the spreadsheet-scoped
+        # entry are excluded
+        self.assertEqual([m.metadata_id for m in matches], [1, 2, 5])
+        self.assertEqual(
+            matches[0].location_type, utils.DeveloperMetadataLocationType.row
+        )
+        self.assertEqual(matches[0].start_index, 2)
+        self.assertEqual(matches[0].end_index, 3)
+        self.assertEqual(matches[2].location_type, "SHEET")
+        self.assertEqual(matches[2].sheet_id, self.SHEET_ID)
+
+    def test_findall_developer_metadata_unknown_key(self):
+        sheet = self.make_worksheet(self.make_payload())
+
+        self.assertEqual(sheet.findall_developer_metadata("missing"), [])
+
+    def test_find_developer_metadata_unique(self):
+        sheet = self.make_worksheet(self.make_payload())
+
+        match = sheet.find_developer_metadata("other")
+
+        self.assertIsNotNone(match)
+        self.assertEqual(match.metadata_id, 3)
+        self.assertEqual(match.location_type, "COLUMN")
+
+    def test_find_developer_metadata_no_match(self):
+        sheet = self.make_worksheet(self.make_payload())
+
+        self.assertIsNone(sheet.find_developer_metadata("missing"))
+
+    def test_find_developer_metadata_ambiguous(self):
+        sheet = self.make_worksheet(self.make_payload())
+
+        with self.assertRaises(gspread.AmbiguousMetadataMatch) as ctx:
+            sheet.find_developer_metadata("orderId")
+
+        # same key/value on entries 1 and 2 does not merge them into
+        # a single record: all distinct identities are reported
+        self.assertEqual(ctx.exception.key, "orderId")
+        self.assertEqual([m.metadata_id for m in ctx.exception.matches], [1, 2, 5])
+
+    def test_findall_developer_metadata_dedupes_repeated_entries(self):
+        payload = self.make_payload()
+        # the same entry reported twice (e.g. under the sheet and at
+        # spreadsheet level) is a single record
+        repeated = _metadata_entry(
+            5, "orderId", "C-1", {"locationType": "SHEET", "sheetId": 7}
+        )
+        payload["sheets"][0]["developerMetadata"].append(repeated)
+        sheet = self.make_worksheet(payload)
+
+        matches = sheet.findall_developer_metadata("orderId")
+
+        self.assertEqual([m.metadata_id for m in matches], [1, 2, 5])
+
+    def test_covered_dimension_indexes_no_double_counting(self):
+        sheet = self.make_worksheet(self.make_payload())
+
+        matches = sheet.findall_developer_metadata("orderId")
+
+        # row ranges [2, 3) and [5, 8) plus a sheet-scoped entry
+        self.assertEqual(utils.covered_dimension_indexes(matches), [2, 5, 6, 7])

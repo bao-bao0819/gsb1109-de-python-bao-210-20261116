@@ -10,6 +10,7 @@ import enum
 import re
 from collections import defaultdict
 from collections.abc import Sequence
+from dataclasses import dataclass
 from functools import wraps
 from itertools import chain
 from typing import (
@@ -173,6 +174,134 @@ class TableDirection(StrEnum):
     table = "TABLE"
     down = "DOWN"
     right = "RIGHT"
+
+
+class DeveloperMetadataVisibility(StrEnum):
+    document = "DOCUMENT"
+    sheet = "SHEET"
+
+
+class DeveloperMetadataLocationType(StrEnum):
+    row = "ROW"
+    column = "COLUMN"
+    sheet = "SHEET"
+    spreadsheet = "SPREADSHEET"
+
+
+@dataclass(frozen=True)
+class DeveloperMetadataMatch:
+    """A single developer metadata entry located in a spreadsheet.
+
+    This is an auditable match result: it keeps both the metadata identity
+    (``metadata_id``, ``key``, ``value``, ``visibility``) and the exact
+    location (``location_type``, ``sheet_id``, ``start_index``, ``end_index``)
+    the entry was found at, so a lookup can be traced back and reviewed.
+
+    ``start_index``/``end_index`` are 0-based, ``end_index`` is exclusive.
+    They are only set for row/column locations.
+    """
+
+    metadata_id: int
+    key: str
+    value: str
+    visibility: str
+    location_type: str
+    sheet_id: Optional[int]
+    start_index: Optional[int]
+    end_index: Optional[int]
+
+    @property
+    def identity(self) -> Tuple[int, str, Optional[int], Optional[int], Optional[int]]:
+        """Uniquely identifies this entry by its metadata identity and its
+        location, never by its key/value pair.
+
+        Copying a range of a spreadsheet creates new metadata entries with
+        new metadata IDs, so two entries sharing the same key and value are
+        still distinct records.
+        """
+        return (
+            self.metadata_id,
+            self.location_type,
+            self.sheet_id,
+            self.start_index,
+            self.end_index,
+        )
+
+
+def developer_metadata_from_dict(raw: Mapping[str, Any]) -> DeveloperMetadataMatch:
+    """Builds a :class:`DeveloperMetadataMatch` from a raw API
+    ``DeveloperMetadata`` resource.
+
+    :param dict raw: a ``DeveloperMetadata`` resource as returned by the API.
+    :returns: the parsed match
+    :rtype: :class:`DeveloperMetadataMatch`
+    """
+    location = raw.get("location", {})
+    dimension_range = location.get("dimensionRange", {})
+
+    return DeveloperMetadataMatch(
+        metadata_id=raw["metadataId"],
+        key=raw.get("metadataKey", ""),
+        value=raw.get("metadataValue", ""),
+        visibility=raw.get("visibility", DeveloperMetadataVisibility.document),
+        location_type=location.get(
+            "locationType", DeveloperMetadataLocationType.spreadsheet
+        ),
+        sheet_id=dimension_range.get("sheetId", location.get("sheetId")),
+        start_index=dimension_range.get("startIndex"),
+        end_index=dimension_range.get("endIndex"),
+    )
+
+
+def dedupe_developer_metadata(
+    matches: Iterable[DeveloperMetadataMatch],
+) -> List[DeveloperMetadataMatch]:
+    """Removes duplicate entries, keeping the first occurrence of each
+    distinct metadata identity.
+
+    Entries are considered identical only when both their metadata ID and
+    their location match (see :meth:`DeveloperMetadataMatch.identity`).
+    Entries that merely share the same key and value - e.g. after a range
+    of the spreadsheet was copied - are distinct records and are all kept.
+
+    :param matches: the entries to deduplicate
+    :returns: the deduplicated entries, in their original order
+    :rtype: list
+    """
+    seen = set()
+    unique = []
+    for match in matches:
+        if match.identity in seen:
+            continue
+        seen.add(match.identity)
+        unique.append(match)
+
+    return unique
+
+
+def covered_dimension_indexes(
+    matches: Iterable[DeveloperMetadataMatch],
+) -> List[int]:
+    """Returns the sorted list of unique 0-based dimension indexes (rows or
+    columns, depending on the matches' location type) covered by the given
+    entries.
+
+    Overlapping ranges are accounted for only once, so bookkeeping over the
+    result never counts the same row or column twice. Entries without a
+    dimension range (sheet or spreadsheet scoped locations) cover no
+    discrete index and are ignored.
+
+    :param matches: the entries to inspect
+    :returns: sorted list of unique covered 0-based indexes
+    :rtype: list
+    """
+    covered = set()  # type: set[int]
+    for match in matches:
+        if match.start_index is None or match.end_index is None:
+            continue
+        covered.update(range(match.start_index, match.end_index))
+
+    return sorted(covered)
 
 
 def convert_credentials(credentials: Credentials) -> Credentials:

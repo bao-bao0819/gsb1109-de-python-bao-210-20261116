@@ -690,3 +690,119 @@ class UtilsTest(unittest.TestCase):
         table = utils.find_table(values, "A1", utils.TableDirection.table)
 
         self.assertListEqual(table, [], "resulting table should be empty")
+
+    def test_developer_metadata_from_dict_row_location(self):
+        raw = {
+            "metadataId": 42,
+            "metadataKey": "orderId",
+            "metadataValue": "A-1",
+            "visibility": "SHEET",
+            "location": {
+                "locationType": "ROW",
+                "dimensionRange": {
+                    "sheetId": 7,
+                    "dimension": "ROWS",
+                    "startIndex": 2,
+                    "endIndex": 5,
+                },
+            },
+        }
+
+        match = utils.developer_metadata_from_dict(raw)
+
+        self.assertEqual(match.metadata_id, 42)
+        self.assertEqual(match.key, "orderId")
+        self.assertEqual(match.value, "A-1")
+        self.assertEqual(match.visibility, utils.DeveloperMetadataVisibility.sheet)
+        self.assertEqual(match.location_type, utils.DeveloperMetadataLocationType.row)
+        self.assertEqual(match.sheet_id, 7)
+        self.assertEqual(match.start_index, 2)
+        self.assertEqual(match.end_index, 5)
+
+    def test_developer_metadata_from_dict_defaults(self):
+        raw = {"metadataId": 1, "metadataKey": "k"}
+
+        match = utils.developer_metadata_from_dict(raw)
+
+        self.assertEqual(match.value, "")
+        self.assertEqual(match.visibility, utils.DeveloperMetadataVisibility.document)
+        self.assertEqual(
+            match.location_type, utils.DeveloperMetadataLocationType.spreadsheet
+        )
+        self.assertIsNone(match.sheet_id)
+        self.assertIsNone(match.start_index)
+        self.assertIsNone(match.end_index)
+
+    def test_dedupe_developer_metadata_same_identity(self):
+        raw = {
+            "metadataId": 1,
+            "metadataKey": "orderId",
+            "metadataValue": "A-1",
+            "location": {
+                "locationType": "ROW",
+                "dimensionRange": {"sheetId": 7, "startIndex": 0, "endIndex": 1},
+            },
+        }
+        first = utils.developer_metadata_from_dict(raw)
+        second = utils.developer_metadata_from_dict(raw)
+
+        unique = utils.dedupe_developer_metadata([first, second, first])
+
+        self.assertEqual(unique, [first])
+
+    def test_dedupe_developer_metadata_copied_records_stay_distinct(self):
+        # same key and value but different metadata IDs, as produced
+        # when a range of the spreadsheet is copied: distinct records
+        def make_raw(metadata_id, start_index):
+            return {
+                "metadataId": metadata_id,
+                "metadataKey": "orderId",
+                "metadataValue": "A-1",
+                "location": {
+                    "locationType": "ROW",
+                    "dimensionRange": {
+                        "sheetId": 7,
+                        "startIndex": start_index,
+                        "endIndex": start_index + 1,
+                    },
+                },
+            }
+
+        original = utils.developer_metadata_from_dict(make_raw(1, 0))
+        copied = utils.developer_metadata_from_dict(make_raw(2, 10))
+
+        unique = utils.dedupe_developer_metadata([original, copied])
+
+        self.assertEqual(unique, [original, copied])
+
+    def test_covered_dimension_indexes_overlapping_ranges(self):
+        def make_match(start_index, end_index):
+            return utils.developer_metadata_from_dict(
+                {
+                    "metadataId": start_index,
+                    "metadataKey": "orderId",
+                    "location": {
+                        "locationType": "ROW",
+                        "dimensionRange": {
+                            "sheetId": 7,
+                            "startIndex": start_index,
+                            "endIndex": end_index,
+                        },
+                    },
+                }
+            )
+
+        matches = [make_match(0, 3), make_match(2, 5), make_match(2, 5)]
+
+        self.assertEqual(utils.covered_dimension_indexes(matches), [0, 1, 2, 3, 4])
+
+    def test_covered_dimension_indexes_ignores_sheet_scope(self):
+        sheet_scoped = utils.developer_metadata_from_dict(
+            {
+                "metadataId": 1,
+                "metadataKey": "orderId",
+                "location": {"locationType": "SHEET", "sheetId": 7},
+            }
+        )
+
+        self.assertEqual(utils.covered_dimension_indexes([sheet_scoped]), [])

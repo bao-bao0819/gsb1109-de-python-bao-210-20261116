@@ -1,6 +1,7 @@
 # -*- coding: latin-1 -*-
 #
 from .entrypoints import shacl_rules, validate, validate_each
+from .evidence import EvidencePackage, extract_evidence
 from .rule_expand_runner import RuleExpandRunner
 from .shape import Shape
 from .shapes_graph import ShapesGraph
@@ -16,6 +17,8 @@ __all__ = [
     'shacl_rules',
     'Validator',
     'RuleExpandRunner',
+    'EvidencePackage',
+    'extract_evidence',
     '__version__',
     'Shape',
     'ShapesGraph',

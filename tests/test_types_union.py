@@ -8,6 +8,7 @@ import pytest
 
 from dissect.cstruct import compiler
 from dissect.cstruct.cstruct import cstruct
+from dissect.cstruct.exception import UnknownIdentifierError
 from dissect.cstruct.types import structure
 from dissect.cstruct.types.base import Array, BaseType
 from dissect.cstruct.types.structure import Field, Union, UnionProxy
@@ -347,6 +348,79 @@ def test_union_definition_dynamic(cs: cstruct, compiled: bool) -> None:
 
     with pytest.raises(NotImplementedError, match="Writing dynamic unions is not yet supported"):
         obj.dumps()
+
+
+def test_union_member_expression_enclosing_context(cs: cstruct, compiled: bool) -> None:
+    """Test that expressions in union members bind to the enclosing structure, not to union members."""
+    cdef = """
+    struct rec {
+        uint8   len;
+        union {
+            struct {
+                uint8   len;
+                char    data[3];
+            } a;
+            char    b[len];
+        } u;
+        char    payload[len];
+    };
+    """
+    cs.load(cdef, compiled=compiled)
+
+    buf = b"\x02\x09xyzPQ"
+    obj = cs.rec(buf)
+
+    # The expression of member b binds to the enclosing structure's len, not to the len of member a
+    assert obj.u.a.len == 9
+    assert obj.u.a.data == b"xyz"
+    assert obj.u.b == b"\x09x"
+    # The expression of payload binds to the enclosing structure's len, the union can't provide it
+    assert obj.payload == b"PQ"
+    # A dynamic union ends after its longest member
+    assert obj.u.__dynamic_sizes__ == {"b": 2}
+
+    # Parsing another record doesn't reuse the context of a previous record
+    other = cs.rec(b"\x03\x01abcQRS")
+    assert other.u.b == b"\x01ab"
+    assert other.payload == b"QRS"
+
+
+def test_union_member_expression_unknown_identifier(cs: cstruct, compiled: bool) -> None:
+    """Test that an expression in a union member that can't be resolved raises an error."""
+    cdef = """
+    struct rec {
+        union {
+            char    a[len];
+            uint32  b;
+        } u;
+    };
+    """
+    cs.load(cdef, compiled=compiled)
+
+    with pytest.raises(UnknownIdentifierError, match="Unknown identifier: 'len'"):
+        cs.rec(b"\x05hello")
+
+
+def test_union_dynamic_stream_position(cs: cstruct, compiled: bool) -> None:
+    """Test that a dynamic union leaves the stream after its longest member."""
+    cdef = """
+    struct rec {
+        uint8   tag;
+        union {
+            struct {
+                uint8   len;
+                char    data[3];
+            } a;
+            char    b[tag];
+        } u;
+        uint8   after;
+    };
+    """
+    cs.load(cdef, compiled=compiled)
+
+    obj = cs.rec(b"\x02\x09xyz\xaa")
+    assert obj.u.b == b"\x09x"
+    assert obj.after == 0xAA
 
 
 def test_union_update(cs: cstruct, compiled: bool) -> None:

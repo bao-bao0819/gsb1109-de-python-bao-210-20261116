@@ -639,6 +639,12 @@ class UnionMetaType(StructureMetaType):
             offset = 0
             buf = io.BytesIO(stream.read(cls.__size__))
 
+        # Expressions in union members can reference values from the enclosing context, but values of the union
+        # members themselves are kept in a local scope and never leak into the enclosing context
+        read_context = ChainMap(result, context) if context else result
+
+        # The furthest position read by any member, which is where a dynamic union ends
+        end = offset
         for field in cls.__fields__:
             field_type = field.type
 
@@ -647,11 +653,16 @@ class UnionMetaType(StructureMetaType):
                 start = field.offset
 
             buf.seek(offset + start)
-            value = field_type._read(buf, context=result, endian=endian)
+            value = field_type._read(buf, context=read_context, endian=endian)
 
             result[field._name] = value
             if field.type.__dynamic__:
-                sizes[field._name] = buf.tell() - start
+                sizes[field._name] = buf.tell() - offset - start
+            end = max(end, buf.tell())
+
+        if cls.__size__ is None:
+            # Members of a dynamic union can have different lengths, so continue after the longest member
+            buf.seek(end)
 
         return result, sizes
 

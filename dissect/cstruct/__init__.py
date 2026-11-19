@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from dissect.cstruct.addressspace import AddressSpace, FileRange, MappedStream, Mapping
 from dissect.cstruct.bitbuffer import BitBuffer
 from dissect.cstruct.cstruct import cstruct, ctypes, ctypes_type
 from dissect.cstruct.dump import dumpstruct, hexdump
 from dissect.cstruct.exception import (
+    AddressMappingError,
+    AmbiguousMappingError,
     Error,
     NullPointerDereference,
     ParserError,
@@ -54,6 +57,9 @@ from dissect.cstruct.util import (
 
 __all__ = [
     "LEB128",
+    "AddressMappingError",
+    "AddressSpace",
+    "AmbiguousMappingError",
     "Array",
     "BaseType",
     "BitBuffer",
@@ -63,8 +69,11 @@ __all__ = [
     "Error",
     "Expression",
     "Field",
+    "FileRange",
     "Flag",
     "Int",
+    "MappedStream",
+    "Mapping",
     "MetaType",
     "NullPointerDereference",
     "Packed",

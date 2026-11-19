@@ -9,6 +9,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 
 - Declarative syntax for structures and unions in `dissect.cstruct.declarative`, using classes with type annotations.
+- Virtual address spaces in `dissect.cstruct.addressspace`: `AddressSpace`, `Mapping`, `MappedStream` and `FileRange`
+  resolve pointer virtual addresses to actual file ranges through per-image mappings. Objects may span mappings but
+  not address holes, overlapping mappings with differing bytes raise `AmbiguousMappingError`, and
+  `Pointer.ranges()` reports the backing file ranges of a dereferenced object.
 
 ### Changed
 

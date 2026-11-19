@@ -3,7 +3,7 @@ from __future__ import annotations
 from functools import cache
 from typing import TYPE_CHECKING, Any, BinaryIO, Generic, TypeVar
 
-from dissect.cstruct.exception import NullPointerDereference
+from dissect.cstruct.exception import AddressMappingError, NullPointerDereference
 from dissect.cstruct.types.base import BaseType, normalize_endianness
 from dissect.cstruct.types.char import Char
 from dissect.cstruct.types.void import Void
@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
     from typing_extensions import Self
 
+    from dissect.cstruct.addressspace import FileRange, MappedStream
     from dissect.cstruct.cstruct import AllowedEndianness, Endianness
 
 T = TypeVar("T", bound=BaseType)
@@ -97,6 +98,10 @@ class Pointer(int, BaseType, Generic[T]):
     def dereference(self, *, endian: AllowedEndianness | None = None) -> T | None:
         """Dereference the pointer and read the value it points to.
 
+        When the pointer is backed by a :class:`~dissect.cstruct.addressspace.MappedStream`, virtual addresses are
+        resolved through that image's mappings and objects already parsed at the same virtual address (shared
+        targets and reference cycles) are returned as the same Python object.
+
         Args:
             endian: Optional endianness to use when reading the value.
                     If not provided, the endianness used when reading the pointer itself will be used.
@@ -104,19 +109,83 @@ class Pointer(int, BaseType, Generic[T]):
         if self == 0 or self.__stream is None:
             raise NullPointerDereference
 
-        endian = normalize_endianness(endian) if endian is not None else self.__endian
+        effective_endian = normalize_endianness(endian) if endian is not None else self.__endian
         if issubclass(self.__type__, Void):
             return None
 
-        position = self.__stream.tell()
-        self.__stream.seek(self)
+        from dissect.cstruct.addressspace import MappedStream
 
+        if isinstance(self.__stream, MappedStream):
+            return self._dereference_mapped(self.__stream, effective_endian)
+        return self._dereference_plain(self.__stream, effective_endian)
+
+    def _dereference_plain(self, stream: BinaryIO, endian: Endianness) -> T:
+        position = stream.tell()
+        stream.seek(self)
+        try:
+            return self._read_target(stream, endian)
+        finally:
+            # Restore the stream position after reading the value
+            stream.seek(position)
+
+    def _dereference_mapped(self, stream: MappedStream, endian: Endianness) -> T:
+        vaddr = int(self)
+        if not stream.address_space.contains(vaddr):
+            raise AddressMappingError(
+                f"Pointer target {vaddr:#x} is not covered by any mapping"
+                + (f" in image {stream.address_space.version!r}" if stream.address_space.version is not None else "")
+            )
+
+        found, cached = stream.cached_object(self.__type__, vaddr)
+        if found:
+            return cached
+
+        position = stream.tell()
+        stream.seek(vaddr)
+        try:
+            value = self._read_target(stream, endian)
+        finally:
+            stream.seek(position)
+
+        stream.cache_object(self.__type__, vaddr, value)
+        return value
+
+    def _read_target(self, stream: BinaryIO, endian: Endianness) -> T:
         if issubclass(self.__type__, Char):
             # This makes the assumption that a char pointer is a null-terminated string
-            value = self.__type__._read_0(self.__stream, context=self.__context, endian=endian)
-        else:
-            value = self.__type__._read(self.__stream, context=self.__context, endian=endian)
+            return self.__type__._read_0(stream, context=self.__context, endian=endian)
+        return self.__type__._read(stream, context=self.__context, endian=endian)
 
-        # Restore the stream position after reading the value
-        self.__stream.seek(position)
-        return value
+    def ranges(self, *, endian: AllowedEndianness | None = None) -> tuple[FileRange, ...]:
+        """Dereference the pointer and return the actual file ranges the pointed-to object was read from.
+
+        Each range identifies a backing stream, the file offset and size, and the mapping that supplied the bytes.
+        An object that spans several mappings returns one range per mapping. Only works when the pointer was read from
+        a :class:`~dissect.cstruct.addressspace.MappedStream`.
+
+        Raises:
+            NullPointerDereference: If the pointer is null or was not read from a stream.
+            TypeError: If the pointer's stream has no address mappings.
+        """
+        from dissect.cstruct.addressspace import MappedStream
+
+        if self == 0 or self.__stream is None:
+            raise NullPointerDereference
+        if not isinstance(self.__stream, MappedStream):
+            raise TypeError("ranges() requires a pointer read from a MappedStream")
+        if issubclass(self.__type__, Void):
+            return ()
+
+        stream: MappedStream = self.__stream
+        effective_endian = normalize_endianness(endian) if endian is not None else self.__endian
+
+        # Read the object again so the recorded ranges cover the full object, independent of the dereference cache
+        marker = stream.mark()
+        position = stream.tell()
+        stream.seek(int(self))
+        try:
+            self._read_target(stream, effective_endian)
+        finally:
+            stream.seek(position)
+
+        return stream.ranges_since(marker)

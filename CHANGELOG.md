@@ -9,6 +9,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 
 - Declarative syntax for structures and unions in `dissect.cstruct.declarative`, using classes with type annotations.
+- LEB128 values read from a stream keep their original encoding (`raw`), so writing a parsed record is byte-for-byte
+  stable and existing signatures stay valid. Values expose their canonical encoding, signedness and whether the
+  original encoding was overlong.
+- LEB128 values have an `evidence_key` and `is_same_evidence` to distinguish collected evidence by encoding instead of
+  only by integer value, while `aggregation_key` supports aggregating by value.
+- `normalize_leb128` previews canonicalizing a LEB128 field, including associated length fields whose value depends on
+  the encoded size. Applying a preview refuses to change an existing signed range unless explicitly forced, because
+  that requires re-signing.
 
 ### Changed
 

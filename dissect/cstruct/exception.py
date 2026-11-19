@@ -25,6 +25,14 @@ class ArraySizeError(Error):
     pass
 
 
+class LEB128NormalizationError(Error):
+    pass
+
+
+class SignedRangeError(Error):
+    pass
+
+
 class ExpressionParserError(Error):
     pass
 

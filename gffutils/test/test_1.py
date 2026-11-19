@@ -591,8 +591,9 @@ def test_feature_merge():
     x.keep_order = True
     assert str(x) == 'chr1	a,b	testing	1	10	.	+	.	gene_id="fake"; n="1,2";', str(x)
 
-    # But when not using force_merge_fields, there should be separate entries;
-    # accessing fake and fake_1 should not give FeatureNotFound errors.
+    # But when not using force_merge_fields, GTF duplicates are isolated as
+    # separate entries; accessing fake and fake_1 should not give
+    # FeatureNotFound errors.
     db = gffutils.create_db(
         gtfdata,
         ":memory:",
@@ -605,17 +606,18 @@ def test_feature_merge():
     x = db["fake"]
     y = db["fake_1"]
 
-    db = gffutils.create_db(
-        gffdata,
-        ":memory:",
-        from_string=True,
-        merge_strategy="merge",
-        id_spec="gene_id",
-        keep_order=True,
-    )
-    assert len(list(db.all_features())) == 2
-    x = db["fake"]
-    y = db["fake_1"]
+    # For GFF3 however, lines sharing an ID describe a single discontinuous
+    # feature, so conflicting core fields (here, source) are an error rather
+    # than silently creating a suffixed ID.
+    with pytest.raises(gffutils.DuplicateIDError):
+        gffutils.create_db(
+            gffdata,
+            ":memory:",
+            from_string=True,
+            merge_strategy="merge",
+            id_spec="gene_id",
+            keep_order=True,
+        )
 
     with pytest.raises(ValueError):
         gffutils.create_db(
@@ -655,6 +657,158 @@ def test_feature_merge():
             x
         )
         assert len(w) == 2
+
+
+def test_gff3_multiline_feature_merge():
+    # Three GFF3 lines sharing an ID describe a single discontinuous feature
+    # per the GFF3 spec: segments may differ in start/end and each line
+    # contributes attributes, but core fields must agree.
+    gffdata = dedent(
+        """
+    chr1	src	gene	100	200	.	+	.	ID=g1;Name=first
+    chr1	src	gene	300	400	.	+	.	ID=g1
+    chr1	src	gene	500	600	.	+	.	ID=g1;Note=last
+    chr1	src	mRNA	100	600	.	+	.	ID=t1;Parent=g1
+    """
+    )
+    db = gffutils.create_db(
+        gffdata,
+        ":memory:",
+        from_string=True,
+        merge_strategy="merge",
+        keep_order=True,
+    )
+    assert db.dialect["fmt"] == "gff3"
+
+    # A single logical feature is created from the three segments...
+    genes = list(db.features_of_type("gene"))
+    assert len(genes) == 1
+    g = genes[0]
+    assert g.id == "g1"
+
+    # ...spanning all segments' ranges...
+    assert g.start == 100
+    assert g.end == 600
+
+    # ...and accumulating the attributes contributed by each line.
+    assert g["ID"] == ["g1"]
+    assert g["Name"] == ["first"]
+    assert g["Note"] == ["last"]
+
+    # Parent references still resolve to the single logical feature.
+    children = list(db.children("g1"))
+    assert [c.id for c in children] == ["t1"]
+    parents = list(db.parents("t1"))
+    assert [p.id for p in parents] == ["g1"]
+
+    # Exported lines keep pointing at the correct logical object: the merged
+    # feature is exported with its original ID, and the child's Parent still
+    # references it.
+    assert "ID=g1" in str(db["g1"])
+    assert "Parent=g1" in str(db["t1"])
+
+    # Round-trip: the exported features can be re-imported without ID
+    # collisions and yield the same logical feature.
+    exported = "\n".join(str(i) for i in db.all_features(order_by="start"))
+    db2 = gffutils.create_db(
+        exported,
+        ":memory:",
+        from_string=True,
+        merge_strategy="error",
+        dialect=db.dialect,
+    )
+    g2 = db2["g1"]
+    assert (g2.start, g2.end) == (100, 600)
+    assert [c.id for c in db2.children("g1")] == ["t1"]
+
+
+def test_gff3_multiline_conflicting_fields():
+    # Lines sharing an ID in GFF3 may only differ in start/end. Conflicts in
+    # strand, seqid, or other core fields must raise rather than silently
+    # continuing with a suffixed ID.
+    base = [
+        "chr1\tsrc\tgene\t100\t200\t.\t+\t.\tID=g1",
+        "chr1\tsrc\tgene\t300\t400\t.\t+\t.\tID=g1",
+    ]
+
+    # strand conflict
+    conflicting = base + ["chr1\tsrc\tgene\t500\t600\t.\t-\t.\tID=g1"]
+    with pytest.raises(gffutils.DuplicateIDError):
+        gffutils.create_db(
+            "\n".join(conflicting),
+            ":memory:",
+            from_string=True,
+            merge_strategy="merge",
+        )
+
+    # seqid conflict
+    conflicting = base + ["chr2\tsrc\tgene\t500\t600\t.\t+\t.\tID=g1"]
+    with pytest.raises(gffutils.DuplicateIDError):
+        gffutils.create_db(
+            "\n".join(conflicting),
+            ":memory:",
+            from_string=True,
+            merge_strategy="merge",
+        )
+
+    # core field (featuretype) conflict
+    conflicting = base + ["chr1\tsrc\tpseudogene\t500\t600\t.\t+\t.\tID=g1"]
+    with pytest.raises(gffutils.DuplicateIDError):
+        gffutils.create_db(
+            "\n".join(conflicting),
+            ":memory:",
+            from_string=True,
+            merge_strategy="merge",
+        )
+
+    # ...but explicitly declaring the differing field in force_merge_fields
+    # allows the merge to proceed.
+    db = gffutils.create_db(
+        "\n".join(base + ["chr1\tsrc\tgene\t500\t600\t.\t-\t.\tID=g1"]),
+        ":memory:",
+        from_string=True,
+        merge_strategy="merge",
+        force_merge_fields=["strand"],
+    )
+    g = db["g1"]
+    assert (g.start, g.end) == (100, 600)
+    assert g.strand == "+,-"
+
+
+def test_gtf_duplicate_ids_not_multiline():
+    # GTF has no concept of multi-line features: three lines sharing an ID
+    # are duplicates, isolated with unique IDs when merging...
+    gtfdata = dedent(
+        """
+    chr1	src	gene	100	200	.	+	.	gene_id "g1";
+    chr1	src	gene	300	400	.	+	.	gene_id "g1";
+    chr1	src	gene	500	600	.	+	.	gene_id "g1";
+    """
+    )
+    db = gffutils.create_db(
+        gtfdata,
+        ":memory:",
+        from_string=True,
+        merge_strategy="merge",
+        id_spec={"gene": "gene_id"},
+        disable_infer_genes=True,
+        disable_infer_transcripts=True,
+    )
+    assert db.dialect["fmt"] == "gtf"
+    assert len(list(db.all_features())) == 3
+    for expected_id in ["g1", "g1_1", "g1_2"]:
+        db[expected_id]
+
+    # ...and an error by default.
+    with pytest.raises(gffutils.DuplicateIDError):
+        gffutils.create_db(
+            gtfdata,
+            ":memory:",
+            from_string=True,
+            id_spec={"gene": "gene_id"},
+            disable_infer_genes=True,
+            disable_infer_transcripts=True,
+        )
 
 
 def test_add_relation():

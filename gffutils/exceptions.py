@@ -11,7 +11,15 @@ class FeatureNotFoundError(Exception):
         return self.feature_id
 
 
-class DuplicateIDError(Exception):
+class DuplicateIDError(ValueError):
+    """
+    Error to be raised when a duplicate ID is encountered and cannot be
+    reconciled (e.g. conflicting core fields for lines sharing an ID in
+    GFF3, or any duplicate ID when using merge_strategy="error").
+
+    Subclasses ValueError for backward compatibility.
+    """
+
     pass
 
 

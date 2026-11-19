@@ -194,6 +194,22 @@ looking like this::
 
    ID="exon_1"; Parent="transcript_1,transcript_2";  # db key: "exon_1"
 
+For GFF3 files, lines sharing an ID are treated as segments of a single
+discontinuous feature, as described in the GFF3 spec.  Such lines may
+differ in start and end (each line describes one segment), and the merged
+feature will span all segments while accumulating the attributes
+contributed by each line.  The remaining core fields (seqid, source,
+featuretype, score, strand, frame) must agree; if they conflict, a
+:class:`gffutils.DuplicateIDError` is raised rather than silently
+assigning a suffixed ID, so that parent references in any exported output
+continue to point at the correct logical feature.  Use
+`force_merge_fields` to explicitly allow specific fields to differ.
+
+GTF files have no concept of multi-line features, so duplicated IDs with
+differing fields are instead isolated: the first entry keeps the original
+primary key, and subsequent entries get unique, autoincremented primary
+keys (as with `merge_strategy="create_unique"` below).
+
 Using `merge_strategy="create_unique"`, then the second entry will have
 a unique, autoincremented primary key assigned to it, and both lines
 will be in the database, accessible by two different keys::

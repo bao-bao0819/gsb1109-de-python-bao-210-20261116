@@ -13,7 +13,7 @@ from gffutils import helpers
 from gffutils import feature
 from gffutils import interface
 from gffutils import iterators
-from gffutils.exceptions import EmptyInputError
+from gffutils.exceptions import EmptyInputError, DuplicateIDError
 
 import logging
 
@@ -250,6 +250,23 @@ class _DBCreator(object):
             Combine old and new attributes -- but only if everything else
             matches; otherwise error. This can be slow, but is thorough.
 
+            For GFF3 files, lines sharing an ID are interpreted as a single
+            discontinuous (multi-line) feature as described in the GFF3
+            spec: the start/end of each line may differ (they describe the
+            individual segments), and the merged feature spans all segments
+            while accumulating the attributes contributed by each line. All
+            other core fields (seqid, source, featuretype, score, strand,
+            frame) must agree -- if they conflict, a DuplicateIDError is
+            raised rather than silently creating a suffixed ID. Use
+            `force_merge_fields` to explicitly allow specific fields to
+            differ.
+
+            For other formats (e.g. GTF), which have no concept of
+            multi-line features, all non-attribute fields (including
+            start/end) must match for lines to be merged; otherwise the
+            duplicate is isolated by assigning it a unique, autoincremented
+            ID.
+
         "create_unique":
             Autoincrement based on the ID, always creating a new ID.
 
@@ -257,7 +274,7 @@ class _DBCreator(object):
             Replaces existing database feature with `f`.
         """
         if merge_strategy == "error":
-            raise ValueError("Duplicate ID {0.id}".format(f))
+            raise DuplicateIDError("Duplicate ID {0.id}".format(f))
 
         if merge_strategy == "warning":
             logger.warning(
@@ -274,6 +291,17 @@ class _DBCreator(object):
 
             # Recall that if we made it to this method, there was at least one
             # ID collision.
+
+            # GFF3 supports discontinuous (multi-line) features: multiple
+            # lines sharing the same ID collectively describe a single
+            # logical feature, where each line contributes one segment. For
+            # such features the start/end of each line are expected to
+            # differ, so they are excluded from the fields that must match.
+            # Other formats (e.g. GTF) have no such concept; there, a
+            # duplicated ID with differing fields is an error condition, and
+            # the duplicates are isolated from each other.
+            dialect = self.iterator.dialect or {}
+            is_gff3 = dialect.get("fmt") == "gff3"
 
             # This will eventually contain the features that match ID AND that
             # match non-attribute fields like start, stop, strand, etc.
@@ -293,6 +321,12 @@ class _DBCreator(object):
             _gffkeys_to_check = list(
                 set(constants._gffkeys[:-1]).difference(self.force_merge_fields)
             )
+            if is_gff3:
+                # Segments of a discontinuous GFF3 feature each have their
+                # own start/end, so these fields are not required to match.
+                _gffkeys_to_check = list(
+                    set(_gffkeys_to_check).difference(["start", "end"])
+                )
 
             for existing_feature in self._candidate_merges(f):
                 # Check other GFF fields (if not specified in
@@ -320,6 +354,23 @@ class _DBCreator(object):
                     )
 
             if len(features_to_merge) == 0:
+                if is_gff3:
+                    # Lines sharing an ID in GFF3 collectively describe a
+                    # single discontinuous feature, so their core fields
+                    # (seqid, source, featuretype, score, strand, frame) must
+                    # agree. They don't, so we cannot merge, and silently
+                    # assigning a suffixed ID would corrupt parent references
+                    # on export. Refuse to continue.
+                    raise DuplicateIDError(
+                        "ID {0.id} occurs on multiple lines with conflicting "
+                        "core fields (seqid, source, featuretype, score, "
+                        "strand, or frame). In GFF3, lines sharing an ID "
+                        "describe segments of a single discontinuous feature "
+                        "and may only differ in start/end. Use "
+                        "force_merge_fields to explicitly allow specific "
+                        "fields to differ, or merge_strategy='create_unique' "
+                        "to keep the lines as separate features.".format(f)
+                    )
                 # No merge candidates found, so we should make a new ID for
                 # this feature. This can happen when idspecs match, but other
                 # fields (like start/stop) are different.  Call this method
@@ -369,6 +420,16 @@ class _DBCreator(object):
                 for k, v in final_fields.items():
                     setattr(existing_feature, k, ",".join(sorted(map(str, v))))
 
+                if is_gff3:
+                    # The merged logical feature spans all of its segments,
+                    # preserving the range contributed by each line.
+                    segments = features_to_merge + [f]
+                    starts = [i.start for i in segments if i.start is not None]
+                    ends = [i.end for i in segments if i.end is not None]
+                    existing_feature.start = min(starts) if starts else None
+                    existing_feature.end = max(ends) if ends else None
+                    existing_feature.bin = existing_feature.calc_bin()
+
                 logger.debug("\nMERGED:\n%s" % existing_feature)
                 return existing_feature, merge_strategy
 
@@ -377,6 +438,46 @@ class _DBCreator(object):
             return f, merge_strategy
         else:
             raise ValueError("Invalid merge strategy '%s'" % (merge_strategy))
+
+    def _update_merged_feature(self, fixed, cursor):
+        """
+        Persist a feature that was just merged back to the database.
+
+        In addition to the merged attributes, the merged feature's extent
+        (start, end, and therefore bin) may have changed -- e.g. when
+        combining the segments of a discontinuous GFF3 feature -- so those
+        are updated as well, along with any `force_merge_fields`.
+        """
+        cursor.execute(
+            """
+            UPDATE features SET attributes = ?, start = ?, end = ?, bin = ?
+            WHERE id = ?
+            """,
+            (
+                helpers._jsonify(fixed.attributes),
+                fixed.start,
+                fixed.end,
+                fixed.bin,
+                fixed.id,
+            ),
+        )
+
+        # For any additional fields we're merging, update those as well.
+        if self.force_merge_fields:
+            _set_clause = ", ".join(
+                ["%s = ?" % field for field in self.force_merge_fields]
+            )
+            values = [
+                getattr(fixed, field) for field in self.force_merge_fields
+            ] + [fixed.id]
+            cursor.execute(
+                """
+                UPDATE features SET %s
+                WHERE id = ?
+                """
+                % _set_clause,
+                tuple(values),
+            )
 
     def _add_duplicate(self, idspecid, newid):
         """
@@ -626,31 +727,7 @@ class _GFFDBCreator(_DBCreator):
             except sqlite3.IntegrityError:
                 fixed, final_strategy = self._do_merge(f, self.merge_strategy)
                 if final_strategy == "merge":
-                    c.execute(
-                        """
-                        UPDATE features SET attributes = ?
-                        WHERE id = ?
-                        """,
-                        (helpers._jsonify(fixed.attributes), fixed.id),
-                    )
-
-                    # For any additional fields we're merging, update those as
-                    # well.
-                    if self.force_merge_fields:
-                        _set_clause = ", ".join(
-                            ["%s = ?" % field for field in self.force_merge_fields]
-                        )
-                        values = [
-                            getattr(fixed, field) for field in self.force_merge_fields
-                        ] + [fixed.id]
-                        c.execute(
-                            """
-                            UPDATE features SET %s
-                            WHERE id = ?
-                            """
-                            % _set_clause,
-                            tuple(values),
-                        )
+                    self._update_merged_feature(fixed, c)
 
                 elif final_strategy == "replace":
                     self._replace(f, c)
@@ -794,30 +871,7 @@ class _GTFDBCreator(_DBCreator):
             except sqlite3.IntegrityError:
                 fixed, final_strategy = self._do_merge(f, self.merge_strategy)
                 if final_strategy == "merge":
-                    c.execute(
-                        """
-                        UPDATE features SET attributes = ?
-                        WHERE id = ?
-                        """,
-                        (helpers._jsonify(fixed.attributes), fixed.id),
-                    )
-                    # For any additional fields we're merging, update those as
-                    # well.
-                    if self.force_merge_fields:
-                        _set_clause = ", ".join(
-                            ["%s = ?" % field for field in self.force_merge_fields]
-                        )
-                        values = [
-                            getattr(fixed, field) for field in self.force_merge_fields
-                        ] + [fixed.id]
-                        c.execute(
-                            """
-                            UPDATE features SET %s
-                            WHERE id = ?
-                            """
-                            % _set_clause,
-                            values,
-                        )
+                    self._update_merged_feature(fixed, c)
                 elif final_strategy == "replace":
                     self._replace(f, c)
                 elif final_strategy == "create_unique":
@@ -1227,11 +1281,21 @@ def create_db(
         key will be merged. WARNING: this can be quite slow when incorrectly
         used.
 
+        For GFF3 files, lines sharing an ID are treated as segments of a
+        single discontinuous feature (per the GFF3 spec): the lines may
+        differ in start/end, and the merged feature will span all segments
+        and accumulate the attributes of each line. If the core fields
+        (seqid, source, featuretype, score, strand, frame) conflict, a
+        :class:`gffutils.DuplicateIDError` is raised rather than silently
+        assigning a suffixed ID. For other formats (e.g. GTF), duplicated
+        IDs with differing fields are instead isolated by assigning unique,
+        autoincremented primary keys.
+
         Using `merge_strategy="create_unique"`, then the first entry will use
         the original primary key, but the second entry will have a unique,
         autoincremented primary key assigned to it
 
-        Using `merge_strategy="error"`, a :class:`gffutils.DuplicateID`
+        Using `merge_strategy="error"`, a :class:`gffutils.DuplicateIDError`
         exception will be raised.  This means you will have to edit the file
         yourself to fix the duplicated IDs.
 

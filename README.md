@@ -287,6 +287,36 @@ assert example.data == b"arbitrary length data"
 ### Custom definition parsers
 Don't like the C-like definition syntax? Write your own syntax parser!
 
+### Schema migration
+A firmware update can change the *interpretation* of fields without changing a record's byte span: enum members may
+be renamed, a raw integer may become an enum, length expressions may be rewritten and pointer target types may gain
+fields. In those cases the old parsed business values cannot be reused even though the structure size and every field
+offset are unchanged. The `dissect.cstruct.migration` module supports this workflow:
+
+1. `impact_report` compares an old and a new schema and returns an impact inventory covering field layout (offsets,
+   bit widths, alignment), array length expressions, enum/flag members and pointer target dependencies. The total
+   structure size is reported separately, because an unchanged byte span never rules out a semantic impact.
+2. `replay_records` replays only the affected records. Layout, enum and pointer impacts affect every record, while
+   length expression impacts are evaluated per record against the parsed controlling fields. Every replayed record is
+   parsed fresh under the new schema; old parsed values are never reused.
+3. `verify_replay` re-parses every record with the new schema and compares that full parse against the incremental
+   replay result, so a missed impact or a stale business value is reported instead of silently kept.
+
+```python
+from dissect.cstruct import cstruct, impact_report, migrate
+
+old_cs = cstruct().load("enum Status : uint8 { OFF = 0, ON = 1 }; struct record { Status state; };")
+new_cs = cstruct().load("enum Status : uint8 { OFF = 0, ENABLED = 1 }; struct record { Status state; };")
+
+report = impact_report(old_cs, new_cs, "record")
+assert report.size_unchanged  # the byte span is the same...
+assert report.affected         # ...but the field semantics changed
+
+result = migrate(old_cs, new_cs, "record", [b"\x01", b"\x00"])
+assert result.verification.ok
+assert result.replays[0].differences[0].path == "state"  # ON -> ENABLED, same raw byte 0x01
+```
+
 ## Copyright and license
 
 Dissect is released as open source by Fox-IT (<https://www.fox-it.com>) part of NCC Group Plc

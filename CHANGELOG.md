@@ -9,6 +9,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 
 - Declarative syntax for structures and unions in `dissect.cstruct.declarative`, using classes with type annotations.
+- Schema migration tooling in `dissect.cstruct.migration` for firmware updates that only change field semantics
+  without changing a record's byte span: `schema_signature`, `impact_report`, `replay_records`, `verify_replay`
+  and `migrate`.
 
 ### Changed
 

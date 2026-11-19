@@ -133,6 +133,7 @@ Utilities
 
     helpers.asinterval
     helpers.merge_attributes
+    helpers.merge_segments
     helpers.sanitize_gff_db
     helpers.annotate_gff_db
     helpers.infer_dialect

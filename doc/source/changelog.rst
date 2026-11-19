@@ -4,6 +4,19 @@ Change log
 ==========
 
 
+Unreleased
+----------
+
+- Added `gffutils.helpers.merge_segments`, which deterministically merges
+  adjacent segments whose strand, source, and key attributes are compatible,
+  within a caller-supplied maximum distance. It returns the merged intervals
+  along with the original segments contributing to each, and reports ranges
+  where more than one legal grouping exists (for example, segments chained
+  through a mutually-compatible middle segment whose endpoints are
+  incompatible) as disputes instead of resolving them based on the order in
+  which segments were yielded.
+
+
 v0.14
 -----
 

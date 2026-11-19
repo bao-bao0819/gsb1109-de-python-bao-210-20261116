@@ -4,6 +4,7 @@ import os
 import simplejson as json
 import time
 import tempfile
+from collections import namedtuple
 from gffutils import constants
 from gffutils import bins
 import gffutils
@@ -416,6 +417,299 @@ def merge_attributes(attr1, attr2, numeric_sort=False):
             new_values = sorted(set(values))
         final_d[key] = new_values
     return final_d
+
+
+MergedInterval = namedtuple(
+    "MergedInterval",
+    ["seqid", "source", "strand", "start", "end", "attributes", "components"],
+)
+MergedInterval.__doc__ = """
+A merged interval and the original segments that contributed to it.
+
+`components` is a tuple of the original segments, in canonical sorted
+order. `attributes` are the deterministically merged attributes of all
+components (see `merge_attributes`).
+"""
+
+DisputedRange = namedtuple(
+    "DisputedRange", ["seqid", "source", "strand", "start", "end", "segments", "reason"]
+)
+DisputedRange.__doc__ = """
+A range for which more than one legal grouping of segments exists.
+
+Rather than silently picking one grouping (which would make the result
+depend on the order segments were yielded, e.g. by database traversal),
+the range is reported here so the caller can resolve it. `segments` holds
+the involved segments in canonical sorted order.
+"""
+
+
+def _segment_attribute_values(segment, key):
+    """
+    Normalized, comparable form of one attribute of a segment.
+
+    Missing keys return None; otherwise a sorted tuple of string values.
+    """
+    attributes = getattr(segment, "attributes", None) or {}
+    try:
+        values = attributes.get(key)
+    except AttributeError:
+        values = None
+    if values is None:
+        return None
+    if not isinstance(values, (list, tuple, set)):
+        values = [values]
+    return tuple(sorted(str(v) for v in values))
+
+
+def _segment_sort_key(segment):
+    """
+    Canonical, fully deterministic sort key for segments.
+
+    Ensures the result of `merge_segments` never depends on the order in
+    which segments were provided (e.g. database traversal order).
+    """
+    attributes = getattr(segment, "attributes", None) or {}
+    try:
+        items = attributes.items()
+    except AttributeError:
+        items = []
+    normalized_attributes = tuple(
+        sorted(
+            (str(k), _segment_attribute_values(segment, k) or ())
+            for k, _ in items
+        )
+    )
+    return (
+        str(getattr(segment, "seqid", "")),
+        str(getattr(segment, "strand", "")),
+        str(getattr(segment, "source", "")),
+        int(segment.start),
+        int(segment.end),
+        str(getattr(segment, "id", "") or ""),
+        normalized_attributes,
+    )
+
+
+def _segments_attributes_compatible(segment1, segment2, key_attributes):
+    """
+    True if two segments have no conflict on any key attribute.
+
+    If `key_attributes` is None, the union of all attribute keys of both
+    segments is checked. When both segments define a key, their value sets
+    must be identical; a key defined on only one segment is not a conflict.
+
+    Note this relation is not transitive: A and C can both be compatible
+    with a middle segment B (which defines no conflicting values) while
+    being incompatible with each other.
+    """
+    if key_attributes is None:
+        attributes1 = getattr(segment1, "attributes", None) or {}
+        attributes2 = getattr(segment2, "attributes", None) or {}
+        keys = set(attributes1) | set(attributes2)
+    else:
+        keys = key_attributes
+    for key in keys:
+        values1 = _segment_attribute_values(segment1, key)
+        values2 = _segment_attribute_values(segment2, key)
+        if values1 is not None and values2 is not None and values1 != values2:
+            return False
+    return True
+
+
+def _build_merged_interval(components):
+    """
+    Build a MergedInterval from a non-empty, canonically-sorted component list.
+    """
+    attributes = {}
+    for component in components:
+        attributes = merge_attributes(
+            attributes, getattr(component, "attributes", None) or {}
+        )
+    first = components[0]
+    return MergedInterval(
+        seqid=first.seqid,
+        source=first.source,
+        strand=first.strand,
+        start=min(int(c.start) for c in components),
+        end=max(int(c.end) for c in components),
+        attributes=attributes,
+        components=tuple(components),
+    )
+
+
+def _resolve_segment_cluster(cluster, max_distance, key_attributes, merged, disputes):
+    """
+    Resolve one distance-linked cluster of same-seqid/strand/source segments.
+
+    Appends MergedInterval entries to `merged` for every uniquely-determined
+    group, and a DisputedRange to `disputes` for each group of segments whose
+    legal grouping is not unique.
+    """
+    n = len(cluster)
+    if n == 1:
+        merged.append(_build_merged_interval(cluster))
+        return
+
+    # Union-find over segments linked by BOTH attribute compatibility and a
+    # pairwise gap of at most max_distance.
+    parent = list(range(n))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(i, j):
+        ri, rj = find(i), find(j)
+        if ri != rj:
+            parent[ri] = rj
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            gap = int(cluster[j].start) - int(cluster[i].end) - 1
+            if gap > max_distance:
+                continue
+            if _segments_attributes_compatible(
+                cluster[i], cluster[j], key_attributes
+            ):
+                union(i, j)
+
+    groups = {}
+    for i in range(n):
+        groups.setdefault(find(i), []).append(i)
+
+    for indices in groups.values():
+        components = [cluster[i] for i in indices]
+        # Compatibility is not transitive: segments chained together through
+        # a mutually-compatible middle segment may still be incompatible with
+        # each other. Only a fully mutually-compatible group has a unique
+        # legal grouping; anything else is ambiguous and must be reported
+        # rather than resolved by input order.
+        clique = all(
+            _segments_attributes_compatible(a, b, key_attributes)
+            for x, a in enumerate(components)
+            for b in components[x + 1 :]
+        )
+        if clique:
+            merged.append(_build_merged_interval(components))
+        else:
+            disputes.append(
+                DisputedRange(
+                    seqid=components[0].seqid,
+                    source=components[0].source,
+                    strand=components[0].strand,
+                    start=min(int(c.start) for c in components),
+                    end=max(int(c.end) for c in components),
+                    segments=tuple(components),
+                    reason=(
+                        "multiple legal groupings exist: segments are linked "
+                        "through compatible neighbors but are not all mutually "
+                        "compatible"
+                    ),
+                )
+            )
+
+
+def merge_segments(segments, max_distance=0, key_attributes=None):
+    """
+    Deterministically merge adjacent segments with compatible properties.
+
+    Segments (e.g. `gffutils.Feature` objects, or any objects with `seqid`,
+    `source`, `strand`, `start`, `end` and `attributes`) are merged only when
+    they are compatible on all of the following:
+
+    - `seqid`, `strand` and `source` must be identical
+    - key attributes must be compatible (see `key_attributes` below)
+    - the distance between neighboring segments must not exceed
+      `max_distance`
+
+    The result never depends on the order in which segments are provided
+    (e.g. database traversal order): segments are sorted canonically before
+    grouping, and ranges for which more than one legal grouping exists are
+    reported as disputes instead of being resolved arbitrarily.
+
+    Note that compatibility is not transitive: three segments that chain
+    together through a shared middle segment (each neighbor pair within
+    `max_distance` and pairwise compatible) cannot necessarily all be merged,
+    because the two outer segments may be incompatible with each other. Such
+    ambiguous configurations are reported as disputes.
+
+    Parameters
+    ----------
+    segments : iterable
+        Segments to merge. Each segment is returned exactly once, either as
+        a (possibly singleton) `MergedInterval` in `merged` or as part of a
+        `DisputedRange` in `disputes`.
+
+    max_distance : int
+        Maximum allowed distance between adjacent segments for them to be
+        linked, supplied by the caller. Overlapping or book-ended segments
+        have a distance of 0 or less, so the default of 0 merges only
+        overlapping or directly adjacent segments.
+
+    key_attributes : str, iterable of str, or None
+        Attribute keys that must be compatible for segments to be merged. If
+        None (default), the union of all attribute keys is checked. When both
+        segments define a key, their value sets must be identical; a key
+        defined on only one segment is not a conflict.
+
+    Returns
+    -------
+    (merged, disputes)
+
+    merged : list of MergedInterval
+        Merged intervals, each with the tuple of original segments that
+        contributed to it in its `components` field. Singleton groups are
+        included as MergedIntervals with a single component.
+
+    disputes : list of DisputedRange
+        Ranges for which multiple legal groupings exist, along with the
+        segments involved. These segments are not included in `merged`.
+    """
+    if isinstance(key_attributes, str):
+        key_attributes = (key_attributes,)
+    elif key_attributes is not None:
+        key_attributes = tuple(key_attributes)
+
+    canonical = sorted(segments, key=_segment_sort_key)
+
+    merged = []
+    disputes = []
+    cluster = []
+    cluster_identity = None
+    cluster_end = None
+
+    def flush():
+        if cluster:
+            _resolve_segment_cluster(
+                cluster, max_distance, key_attributes, merged, disputes
+            )
+
+    for segment in canonical:
+        identity = (
+            str(getattr(segment, "seqid", "")),
+            str(getattr(segment, "strand", "")),
+            str(getattr(segment, "source", "")),
+        )
+        start = int(segment.start)
+        end = int(segment.end)
+        if (
+            cluster
+            and identity == cluster_identity
+            and start - cluster_end - 1 <= max_distance
+        ):
+            cluster.append(segment)
+            cluster_end = max(cluster_end, end)
+        else:
+            flush()
+            cluster = [segment]
+            cluster_identity = identity
+            cluster_end = end
+    flush()
+
+    return merged, disputes
 
 
 def dialect_compare(dialect1, dialect2):

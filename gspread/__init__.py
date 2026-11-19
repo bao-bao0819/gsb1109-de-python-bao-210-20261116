@@ -16,12 +16,37 @@ from .cell import Cell
 from .client import Client
 from .exceptions import (
     GSpreadException,
+    IdentityError,
+    IdentityTimelineError,
     IncorrectCellLabel,
     NoValidUrlKeyFound,
     SpreadsheetNotFound,
     WorksheetNotFound,
 )
 from .http_client import BackOffHTTPClient, HTTPClient
+from .identity import (
+    ChangeKind,
+    DeveloperMetadata,
+    Evidence,
+    IdentityCandidate,
+    IdentityChange,
+    IdentityLedger,
+    IdentityRevision,
+    ReferenceEdge,
+    ReferenceGraph,
+    ReferenceSource,
+    ReferenceStatus,
+    Reconciliation,
+    SheetEvent,
+    SheetObservation,
+    SheetSnapshot,
+    SourceIdentity,
+)
+from .references import (
+    FormulaReference,
+    extract_formula_references,
+    extract_sheet_titles,
+)
 from .spreadsheet import Spreadsheet
 from .worksheet import ValueRange, Worksheet
 
@@ -47,6 +72,31 @@ __all__ = [
     "BackOffHTTPClient",
     "HTTPClient",
 
+    # from .identity
+    "ChangeKind",
+    "DeveloperMetadata",
+    "Evidence",
+    "IdentityCandidate",
+    "IdentityChange",
+    "IdentityError",
+    "IdentityLedger",
+    "IdentityRevision",
+    "IdentityTimelineError",
+    "ReferenceEdge",
+    "ReferenceGraph",
+    "ReferenceSource",
+    "ReferenceStatus",
+    "Reconciliation",
+    "SheetEvent",
+    "SheetObservation",
+    "SheetSnapshot",
+    "SourceIdentity",
+
+    # from .references
+    "FormulaReference",
+    "extract_formula_references",
+    "extract_sheet_titles",
+
     # from .spreadsheet
     "Spreadsheet",
 
@@ -56,6 +106,8 @@ __all__ = [
 
     # from .exceptions
     "GSpreadException",
+    "IdentityError",
+    "IdentityTimelineError",
     "IncorrectCellLabel",
     "NoValidUrlKeyFound",
     "SpreadsheetNotFound",

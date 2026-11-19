@@ -9,5 +9,6 @@ API Reference
    client
    http_client
    models/index
+   identity
    utils
    exceptions

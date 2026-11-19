@@ -32,6 +32,7 @@ from typing import (
 from .cell import Cell
 from .exceptions import GSpreadException
 from .http_client import DefaultSerializerType, HTTPClient, ParamsType
+from .identity import SheetEvent
 from .urls import WORKSHEET_DRIVE_URL
 from .utils import (
     DateTimeOption,
@@ -1634,6 +1635,10 @@ class Worksheet:
 
         response = self.client.batch_update(self.spreadsheet_id, body)
         self._properties["title"] = title
+
+        ledger = getattr(self._spreadsheet, "_identity_ledger", None)
+        if ledger is not None:
+            ledger.record_rename(self.spreadsheet_id, self.id, title)
         return response
 
     def update_tab_color(self, color: str) -> JSONResponse:
@@ -2708,7 +2713,7 @@ class Worksheet:
 
         .. versionadded:: 3.1
         """
-        return Worksheet._duplicate(
+        duplicate = Worksheet._duplicate(
             self.client,
             self.spreadsheet_id,
             self.id,
@@ -2717,6 +2722,40 @@ class Worksheet:
             new_sheet_id=new_sheet_id,
             new_sheet_name=new_sheet_name,
         )
+        ledger = getattr(self._spreadsheet, "_identity_ledger", None)
+        source_uid = self.identity_uid()
+        if ledger is not None and source_uid is not None:
+            ledger.record_event(
+                SheetEvent(
+                    kind="duplicate",
+                    sheet_id=duplicate.id,
+                    source_uid=source_uid,
+                ),
+                self.spreadsheet_id,
+            )
+        return duplicate
+
+    def identity_uid(self) -> Optional[str]:
+        """Return this worksheet's stable identity UID from the ledger.
+
+        Returns ``None`` when the parent spreadsheet has no ledger that has
+        observed this worksheet yet. The UID does not depend on the title.
+        """
+        ledger = getattr(self._spreadsheet, "_identity_ledger", None)
+        if ledger is None:
+            return None
+        identity = ledger.active_identity_for(self.spreadsheet_id, self.id)
+        if identity is None:
+            return None
+        return identity.uid
+
+    @property
+    def uid(self) -> Optional[str]:
+        """Stable identity UID, if the spreadsheet has a ledger.
+
+        This is a convenience alias of :meth:`identity_uid`.
+        """
+        return self.identity_uid()
 
     def copy_to(
         self,

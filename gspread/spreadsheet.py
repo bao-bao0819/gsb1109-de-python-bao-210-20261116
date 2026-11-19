@@ -7,15 +7,39 @@ This module contains common spreadsheets' models.
 """
 
 import warnings
-from typing import Any, Dict, Generator, Iterable, List, Mapping, Optional, Union
+from typing import (
+    Any,
+    Dict,
+    Generator,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Union,
+)
 
 from requests import Response
 
 from .cell import Cell
 from .exceptions import WorksheetNotFound
 from .http_client import HTTPClient, ParamsType
+from .identity import (
+    IdentityLedger,
+    Reconciliation,
+    ReferenceGraph,
+    SheetEvent,
+    SheetSnapshot,
+    coerce_datetime,
+)
+from .references import find_formula_cell
 from .urls import DRIVE_FILES_API_V3_URL, SPREADSHEET_DRIVE_URL
-from .utils import ExportFormat, absolute_range_name, extract_title_from_range, finditem
+from .utils import (
+    ExportFormat,
+    ValueRenderOption,
+    absolute_range_name,
+    extract_title_from_range,
+    finditem,
+)
 from .worksheet import Worksheet
 
 
@@ -28,6 +52,8 @@ class Spreadsheet:
 
         metadata = self.fetch_sheet_metadata()
         self._properties.update(metadata["properties"])
+
+        self._identity_ledger: Optional[IdentityLedger] = None
 
     @property
     def id(self) -> str:
@@ -284,6 +310,162 @@ class Spreadsheet:
         except (StopIteration, KeyError):
             raise WorksheetNotFound("id {} not found".format(worksheet_id_int))
 
+    def identity_ledger(
+        self, published_at: Optional[Any] = None
+    ) -> IdentityLedger:
+        """Return this spreadsheet's identity ledger, creating it if needed.
+
+        The first call bootstraps the ledger from the spreadsheet metadata, so
+        every currently visible worksheet immediately gets a stable UID and a
+        publication time. Pass ``published_at`` (for example the Drive
+        ``createdTime``) when the true publication time is known; otherwise
+        the bootstrap time is used.
+
+        The ledger belongs to the :class:`Spreadsheet` instance and is not
+        written back to Google; persist it with
+        :meth:`gspread.identity.IdentityLedger.dumps` and restore it with
+        :meth:`gspread.identity.IdentityLedger.loads`.
+        """
+        if self._identity_ledger is None:
+            self._identity_ledger = IdentityLedger()
+            self._identity_ledger.publish(
+                self.build_snapshot(observed_at=published_at)
+            )
+        return self._identity_ledger
+
+    def attach_identity_ledger(self, ledger: IdentityLedger) -> None:
+        """Attach an existing ledger to this spreadsheet."""
+        self._identity_ledger = ledger
+
+    def build_snapshot(
+        self,
+        formulas: Optional[Mapping[Any, Mapping[str, str]]] = None,
+        events: Optional[Iterable[SheetEvent]] = None,
+        complete: bool = True,
+        observed_at: Optional[Any] = None,
+        metadata: Optional[Mapping[str, Any]] = None,
+        metadata_observed: Optional[bool] = None,
+    ) -> SheetSnapshot:
+        """Build a :class:`~gspread.identity.SheetSnapshot` from the API.
+
+        :param formulas: (optional) ``{sheet_id_or_title: {cell: formula}}``.
+            Cells are captured only when callers request formulas.
+        :param events: (optional) structural events observed alongside the
+            snapshot.
+        :param bool complete: whether the snapshot lists every worksheet.
+        :param observed_at: (optional) publication time. Defaults to now.
+        :param metadata: (optional) pre-fetched spreadsheet metadata.
+        :param metadata_observed: (optional) set to ``True`` when the metadata
+            response is known to include developer metadata, so an empty list
+            means "no metadata" rather than "not requested".
+        """
+        data = metadata if metadata is not None else self.fetch_sheet_metadata()
+        return SheetSnapshot.from_api(
+            data,
+            formulas=formulas,
+            events=tuple(events or ()),
+            complete=complete,
+            observed_at=observed_at,
+            metadata_observed=metadata_observed,
+        )
+
+    def collect_identity_snapshot(
+        self,
+        value_render_option: str = ValueRenderOption.formula,
+        observed_at: Optional[Any] = None,
+        complete: bool = True,
+    ) -> SheetSnapshot:
+        """Collect a snapshot (titles, metadata and formulas) from the API.
+
+        Every worksheet is read with ``FORMULA`` rendering so cross-sheet
+        references can be extracted. No cell contents other than formulas are
+        stored in the ledger.
+        """
+        metadata = self.fetch_sheet_metadata(
+            params={
+                "fields": (
+                    "properties,sheets.properties,"
+                    "sheets.developerMetadata,developerMetadata"
+                )
+            }
+        )
+        formulas: Dict[int, Dict[str, str]] = {}
+
+        for sheet in metadata.get("sheets") or []:
+            properties = sheet.get("properties") or {}
+            title = str(properties.get("title", ""))
+            sheet_id = int(properties["sheetId"])
+            data = self.values_get(
+                absolute_range_name(title),
+                params={
+                    "valueRenderOption": value_render_option
+                    or ValueRenderOption.formula
+                },
+            )
+            formulas[sheet_id] = dict(
+                find_formula_cell(data.get("values", []))
+            )
+
+        return self.build_snapshot(
+            formulas=formulas,
+            complete=complete,
+            observed_at=observed_at,
+            metadata=metadata,
+            metadata_observed=True,
+        )
+
+    def publish_identity_snapshot(
+        self,
+        snapshot: Optional[SheetSnapshot] = None,
+        at: Optional[Any] = None,
+    ) -> Reconciliation:
+        """Publish a snapshot to this spreadsheet's ledger.
+
+        If ``snapshot`` is omitted a fresh snapshot is collected from the API.
+        Returns the :class:`~gspread.identity.Reconciliation` report.
+
+        Duplicate events recorded by :meth:`Worksheet.duplicate` are already
+        held by the ledger and resolved when the copied worksheet appears in a
+        snapshot; they are not re-injected here.
+        """
+        if snapshot is not None:
+            # An explicit snapshot may be historical. Do not bootstrap the
+            # ledger at "now" first, or publishing it would move time
+            # backwards.
+            if self._identity_ledger is None:
+                self._identity_ledger = IdentityLedger()
+            ledger = self._identity_ledger
+        elif at is not None:
+            # Bootstrap and publish at the same requested time so an explicit
+            # historical timestamp does not collide with "now".
+            ledger = self.identity_ledger(published_at=at)
+            snapshot = self.collect_identity_snapshot(observed_at=at)
+        else:
+            ledger = self.identity_ledger()
+            snapshot = self.collect_identity_snapshot()
+
+        return ledger.publish(snapshot, at=at)
+
+    def reconcile_identity(
+        self, at: Optional[Any] = None
+    ) -> Reconciliation:
+        """Collect and publish a snapshot in one call."""
+        return self.publish_identity_snapshot(at=at)
+
+    def identity_graph(self, at: Optional[Any] = None) -> Any:
+        """Return the reference graph as of ``at`` from the attached ledger.
+
+        Requires the ledger to have been bootstrapped (with
+        :meth:`identity_ledger` or :meth:`reconcile_identity`); it never
+        performs a network call.
+        """
+        ledger = self._identity_ledger
+        if ledger is None:
+            return ReferenceGraph(
+                as_of=coerce_datetime(at), sources=(), edges=()
+            )
+        return ledger.reference_graph(at=at)
+
     def get_all_worksheet_values(
         self,
         skip_worksheet_titles: Optional[List[str]] = None,
@@ -450,7 +632,12 @@ class Spreadsheet:
         """
         body = {"requests": [{"deleteSheet": {"sheetId": worksheet.id}}]}
 
-        return self.client.batch_update(self.id, body)
+        response = self.client.batch_update(self.id, body)
+        if self._identity_ledger is not None:
+            self._identity_ledger.record_event(
+                SheetEvent.delete(worksheet.id), self.id
+            )
+        return response
 
     def del_worksheet_by_id(self, worksheet_id: Union[str, int]) -> Any:
         """
@@ -463,7 +650,12 @@ class Spreadsheet:
 
         body = {"requests": [{"deleteSheet": {"sheetId": worksheet_id_int}}]}
 
-        return self.client.batch_update(self.id, body)
+        response = self.client.batch_update(self.id, body)
+        if self._identity_ledger is not None:
+            self._identity_ledger.record_event(
+                SheetEvent.delete(worksheet_id_int), self.id
+            )
+        return response
 
     def reorder_worksheets(
         self, worksheets_in_desired_order: Iterable[Worksheet]

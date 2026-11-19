@@ -19,6 +19,14 @@ class GSpreadException(Exception):
     """A base class for gspread's exceptions."""
 
 
+class IdentityError(GSpreadException):
+    """Invalid identity ledger operation."""
+
+
+class IdentityTimelineError(IdentityError):
+    """A snapshot was published before an already observed point in time."""
+
+
 class WorksheetNotFound(GSpreadException):
     """Trying to open non-existent or inaccessible worksheet."""
 

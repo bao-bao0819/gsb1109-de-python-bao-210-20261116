@@ -1,6 +1,13 @@
 Release History
 ===============
 
+Unreleased
+----------
+
+* Add a worksheet identity ledger with publication times, rename/copy/recreate
+  reconciliation and immutable historical reference graphs. Titles and
+  business developer metadata are never used to transfer identities.
+
 6.2.1 (2025-05-14)
 ------------------
 

@@ -69,6 +69,7 @@ Advanced
     :maxdepth: 2
 
     advanced
+    identity
 
 Community extensions
 --------------------

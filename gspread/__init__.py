@@ -22,9 +22,17 @@ from .exceptions import (
     WorksheetNotFound,
 )
 from .http_client import BackOffHTTPClient, HTTPClient
+from .range_planner import (
+    GridRegion,
+    RangePlan,
+    RangePlanError,
+    RangePlanner,
+    plan_ranges,
+)
 from .spreadsheet import Spreadsheet
 from .worksheet import ValueRange, Worksheet
 
+from . import range_planner as range_planner
 from . import urls as urls
 from . import utils as utils
 
@@ -47,6 +55,13 @@ __all__ = [
     "BackOffHTTPClient",
     "HTTPClient",
 
+    # from .range_planner
+    "GridRegion",
+    "RangePlan",
+    "RangePlanError",
+    "RangePlanner",
+    "plan_ranges",
+
     # from .spreadsheet
     "Spreadsheet",
 
@@ -62,6 +77,7 @@ __all__ = [
     "WorksheetNotFound",
 
     # full module imports
+    "range_planner",
     "urls",
     "utils",
 ]

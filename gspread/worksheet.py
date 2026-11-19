@@ -65,6 +65,7 @@ from .utils import (
 )
 
 if TYPE_CHECKING is True:
+    from .range_planner import RangePlan
     from .spreadsheet import Spreadsheet
 
 CellFormat = TypedDict(
@@ -1104,6 +1105,68 @@ class Worksheet:
         )
 
         return [ValueRange.from_json(x) for x in response["valueRanges"]]
+
+    def plan_ranges(
+        self,
+        ranges: Iterable[str],
+        max_requests: int,
+        max_cells: int,
+        forbidden: Iterable[str] = (),
+        allow_partial: bool = False,
+        objective: str = "requests",
+    ) -> "RangePlan":
+        """Plan how to read several far-apart ranges within hard budgets.
+
+        This is pure geometry; it does not call the API. The worksheet's
+        known size resolves unbounded ranges such as ``A5:B`` or ``A:B``.
+
+        :param ranges: Requested ranges in A1 notation, with or without a
+            sheet title. Their title is ignored in favour of this worksheet.
+        :param int max_requests: Maximum number of read requests.
+        :param int max_cells: Maximum number of distinct returned cells.
+        :param forbidden: Ranges that must not be read. Their sheet title is
+            ignored in the same way.
+        :param bool allow_partial: Report regions overlapping forbidden
+            ranges instead of raising.
+        :param str objective: ``"requests"`` (default) minimises request
+            count first; ``"overhead"`` minimises over-read cells first.
+
+        :raises RangePlanError: when no legal plan fits.
+            ``RangePlanError.conflicted`` names the binding constraint and
+            ``best_plan`` shows the closest legal attempt.
+
+        Example::
+
+            plan = worksheet.plan_ranges(
+                ["A1:C2", "Z100:AB120", "A200:C201"],
+                max_requests=3,
+                max_cells=500,
+                forbidden=["A3:C199"],
+            )
+            print(plan.explain())
+            worksheet.batch_get(plan.a1_ranges())
+        """
+        from .range_planner import GridRegion, RangePlanner
+
+        def resolve(a1: str) -> GridRegion:
+            return GridRegion.from_a1(
+                a1,
+                row_count=self.row_count,
+                column_count=self.col_count,
+            )
+
+        planner = RangePlanner(
+            max_requests=max_requests,
+            max_cells=max_cells,
+            forbidden=[resolve(item) for item in forbidden],
+            row_count=self.row_count,
+            column_count=self.col_count,
+            allow_partial=allow_partial,
+            objective=objective,
+        )
+        plan = planner.plan([resolve(item) for item in ranges])
+        # Planned ranges are plain A1; batch_get adds the sheet title.
+        return plan
 
     def update(
         self,

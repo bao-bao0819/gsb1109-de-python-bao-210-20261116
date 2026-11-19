@@ -215,6 +215,39 @@ Get all values from the first column:
         * :meth:`~gspread.models.Worksheet.update` lets you update a range of cells with a list of lists.
         * :meth:`~gspread.models.Worksheet.batch_update` lets you update multiple ranges of cells with one API call.
 
+Planning Far-Apart Reads
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+When the regions you need are far apart, reading each one separately costs
+requests, but merging them into one rectangle can return a large amount of
+unrelated data. :meth:`~gspread.models.Worksheet.plan_ranges` compares legal
+combinations before any API call:
+
+.. code:: python
+
+   plan = worksheet.plan_ranges(
+       ["A1:C2", "A200:C201", "Z100:AB120"],
+       max_requests=3,
+       max_cells=500,
+       forbidden=["A3:C199"],   # never read this block
+   )
+   print(plan.explain())
+
+   # Send the selected ranges in one request.
+   values = worksheet.batch_get(plan.a1_ranges())
+
+The planner reports each range's nominal cells and the distinct
+``unique_cells`` returned, so ranges that overlap are counted once. It never
+returns a range that intersects a forbidden region: a wider shortcut is
+rejected even when it would save a request. If the budgets cannot be met, it
+raises :class:`~gspread.range_planner.RangePlanError`; ``conflicted`` names
+``max_requests``, ``max_cells``, both, or ``forbidden``, and ``best_plan``
+shows the closest attempt.
+
+The default ``objective="requests"`` minimises requests, then over-read
+cells. Use ``objective="overhead"`` to minimise over-read data first. In both
+cases every Pareto-efficient alternative is available in ``plan.alternatives``.
+
 
 Getting All Values From a Worksheet as a List of Lists
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

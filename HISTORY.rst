@@ -1,6 +1,14 @@
 Release History
 ===============
 
+Unreleased
+----------
+
+* Add :class:`gspread.range_planner.RangePlanner` and
+  :meth:`gspread.worksheet.Worksheet.plan_ranges` to plan reads across
+  far-apart regions under request and returned-cell budgets, with hard
+  exclusions for forbidden regions and exact unique-cell accounting.
+
 6.2.1 (2025-05-14)
 ------------------
 

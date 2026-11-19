@@ -27,6 +27,7 @@ from .worksheet import ValueRange, Worksheet
 
 from . import urls as urls
 from . import utils as utils
+from . import dates as dates
 
 __all__ = [
     # from .auth
@@ -64,4 +65,5 @@ __all__ = [
     # full module imports
     "urls",
     "utils",
+    "dates",
 ]

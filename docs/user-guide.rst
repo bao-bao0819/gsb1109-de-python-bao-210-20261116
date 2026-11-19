@@ -402,6 +402,51 @@ a value the encoder cannot handle and returns a JSON-serializable substitute.
    matches how you want the cell interpreted.
 
 
+Interpreting Date, Time, and Duration Cells
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A column read with ``ValueRenderOption.unformatted`` and
+``DateTimeOption.serial_number`` contains both date serial numbers and ordinary
+numbers. The serial's meaning comes from the cell's number format and the
+spreadsheet's timezone, both of which can change. :mod:`gspread.dates` turns
+those raw values into explicit readings while preserving the original value
+and the range of possible results.
+
+.. code:: python
+
+   from gspread import dates
+
+   print(dates.classify_number_format("yyyy-mm-dd"))
+   # FieldKind.date
+
+   result = dates.interpret_value(43831, number_format="yyyy-mm-dd")
+   assert result.reading.value.isoformat() == "2020-01-01"
+   assert result.reading.time is None  # date-only, not midnight
+
+A whole column is partitioned into confirmed, unresolved, and invalid cells.
+A cell is left unresolved when two legal readings belong to different
+partitions (for example a number with no usable format, which could be either a
+measurement or a date serial).
+
+.. code:: python
+
+   column = dates.interpret_column(
+       raw_values,
+       number_formats=number_formats,
+       timezone_name=spreadsheet.timezone,
+   )
+   for index, interpretation in column.unresolved.items():
+       print(index, interpretation.all_readings)
+
+When the spreadsheet timezone changes, recompute the existing result rather
+than re-reading with a machine-local timezone. Only exact datetimes change;
+numbers, durations, pure times, and date-only readings are left untouched.
+
+.. code:: python
+
+   moved = column.with_timezone("America/New_York")
+
+
 Adding Data Validation
 ~~~~~~~~~~~~~~~~~~~~~~
 

@@ -30,6 +30,7 @@ from typing import (
 )
 
 from .cell import Cell
+from .dates import ColumnResult, FieldKind, SerialAnchor, interpret_column
 from .exceptions import GSpreadException
 from .http_client import DefaultSerializerType, HTTPClient, ParamsType
 from .urls import WORKSHEET_DRIVE_URL
@@ -492,6 +493,60 @@ class Worksheet:
             maintain_size=maintain_size,
             pad_values=pad_values,
             return_type=return_type,
+        )
+
+    def interpret_date_column(
+        self,
+        range_name: str,
+        kind: Optional[Union[FieldKind, str]] = None,
+        number_formats: Optional[Union[str, Sequence[Optional[str]]]] = None,
+        anchor: Optional[Union[SerialAnchor, str]] = None,
+    ) -> ColumnResult:
+        """Read a single-column range as raw serials and interpret them.
+
+        The values are read with ``ValueRenderOption.unformatted`` and
+        ``DateTimeOption.serial_number`` so dates, times, and durations arrive
+        as numbers rather than locale-formatted strings. The spreadsheet's own
+        timezone is used, never the machine's.
+
+        ``kind`` applies to the whole column; ``number_formats`` may be one
+        value for the whole column or one per cell. Cells whose legal readings
+        fall into different semantic partitions are returned in
+        ``ColumnResult.unresolved``.
+
+        This is a convenience wrapper; it does not fetch per-cell number
+        formats from the API. Supply ``number_formats`` when the formats are
+        known, or pass an explicit ``kind``.
+
+        Example::
+
+        >>> column = worksheet.interpret_date_column("A2:A4", kind="date")
+        >>> [reading.value for reading in column.readings()]
+        """
+        values = self.get(
+            range_name=range_name,
+            value_render_option=ValueRenderOption.unformatted,
+            date_time_render_option=DateTimeOption.serial_number,
+        )
+
+        flat: List[Any] = []
+        for row in values:
+            if not row:
+                flat.append("")
+            elif len(row) == 1:
+                flat.append(row[0])
+            else:
+                raise ValueError(
+                    "interpret_date_column expects a single-column range, "
+                    "got {} columns".format(len(row))
+                )
+
+        return interpret_column(
+            flat,
+            kind=kind,
+            anchor=anchor,
+            number_formats=number_formats,
+            timezone_name=self.spreadsheet.timezone,
         )
 
     def get_all_records(

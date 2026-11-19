@@ -23,6 +23,14 @@ from .exceptions import (
 )
 from .http_client import BackOffHTTPClient, HTTPClient
 from .spreadsheet import Spreadsheet
+from .value_grid import (
+    CellStatus,
+    GridBounds,
+    GridState,
+    ValueSnapshot,
+    WriteEvent,
+    WriteEventType,
+)
 from .worksheet import ValueRange, Worksheet
 
 from . import urls as urls
@@ -53,6 +61,14 @@ __all__ = [
     # from .worksheet
     "Worksheet",
     "ValueRange",
+
+    # from .value_grid
+    "CellStatus",
+    "GridBounds",
+    "GridState",
+    "ValueSnapshot",
+    "WriteEvent",
+    "WriteEventType",
 
     # from .exceptions
     "GSpreadException",

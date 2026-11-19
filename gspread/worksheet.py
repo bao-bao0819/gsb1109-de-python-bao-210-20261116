@@ -63,6 +63,7 @@ from .utils import (
     rowcol_to_a1,
     to_records,
 )
+from .value_grid import GridBounds, GridState
 
 if TYPE_CHECKING is True:
     from .spreadsheet import Spreadsheet
@@ -200,6 +201,54 @@ class Worksheet:
         # kept for backward compatibility - publicly available
         # do not use if possible.
         self._spreadsheet = spreadsheet
+
+        # Lazily allocated evidence of the values fetched and the writes
+        # issued on this worksheet. None means tracking was never started.
+        self._grid_state: Optional[GridState] = None
+
+    @property
+    def grid_state(self) -> GridState:
+        """The :class:`~gspread.value_grid.GridState` tracking fetched values
+        and write events for this worksheet.
+
+        The state is created on first access and then updated by every
+        :meth:`get` / :meth:`batch_get` read and by the value writing methods.
+        It distinguishes cells that are merely empty from cells that were
+        explicitly cleared, and keeps the evidence for rows/columns shaped
+        responses and partial re-fetches separate.
+        """
+        if self._grid_state is None:
+            self._grid_state = GridState()
+        return self._grid_state
+
+    def _record_dimension_mutation(
+        self, dimension: Dimension, start_index: int, detail: str
+    ) -> None:
+        """Invalidate cells affected by an insert/delete of a dimension.
+
+        Inserting or deleting a row/column shifts every cell from the
+        boundary onward, so the region is unbounded past ``start_index`` on
+        the mutated axis and spans the whole other axis. ``start_index`` is
+        one-based, matching the public delete/insert methods.
+        """
+        if self._grid_state is None:
+            # no state to update, skip the work
+            return
+        if dimension == Dimension.rows:
+            bounds = GridBounds(
+                start_row=start_index - 1,
+                end_row=None,
+                start_col=0,
+                end_col=None,
+            )
+        else:
+            bounds = GridBounds(
+                start_row=0,
+                end_row=None,
+                start_col=start_index - 1,
+                end_col=None,
+            )
+        self._grid_state.record_structural(bounds, detail=detail)
 
     def __repr__(self) -> str:
         return "<{} {} id:{}>".format(
@@ -764,6 +813,8 @@ class Worksheet:
             body={"values": [[value]]},
         )
 
+        self._record_value_write(range_name, [[value]])
+
         return data
 
     def update_cells(
@@ -820,6 +871,8 @@ class Worksheet:
             params={"valueInputOption": value_input_option},
             body={"values": values_rect},
         )
+
+        self._record_value_write(range_name, values_rect)
 
         return data
 
@@ -959,6 +1012,12 @@ class Worksheet:
             self.spreadsheet_id, get_range_name, params=params
         )
 
+        # Record the raw evidence before any padding: only the cells the API
+        # actually returned are observed, trailing omitted cells stay unknown
+        # and an empty formula result is an empty value, never a clear.
+        if self._grid_state is not None:
+            self._grid_state.record_snapshot(response, requested_range=range_name)
+
         values = response.get("values", [[]])
 
         if pad_values is True:
@@ -1091,7 +1150,10 @@ class Worksheet:
             # Read values from 'A1:B2' range and 'F12' cell
             worksheet.batch_get(['A1:B2', 'F12'])
         """
-        ranges = [absolute_range_name(self.title, r) for r in ranges if r]
+        requested_ranges = [r for r in ranges if r]
+        absolute_ranges = [
+            absolute_range_name(self.title, r) for r in requested_ranges
+        ]
 
         params: ParamsType = {
             "majorDimension": major_dimension,
@@ -1100,10 +1162,18 @@ class Worksheet:
         }
 
         response = self.client.values_batch_get(
-            self.spreadsheet_id, ranges=ranges, params=params
+            self.spreadsheet_id, ranges=absolute_ranges, params=params
         )
 
-        return [ValueRange.from_json(x) for x in response["valueRanges"]]
+        value_ranges = response["valueRanges"]
+
+        if self._grid_state is not None:
+            for requested, value_range in zip(requested_ranges, value_ranges):
+                self._grid_state.record_snapshot(
+                    value_range, requested_range=requested
+                )
+
+        return [ValueRange.from_json(x) for x in value_ranges]
 
     def update(
         self,
@@ -1237,6 +1307,10 @@ class Worksheet:
             )
             range_name, values = values, range_name
 
+        # Materialize once so the same matrix can be sent to the API and then
+        # recorded as write evidence even when the caller passes generators.
+        values = [list(row) for row in values]
+
         full_range_name = absolute_range_name(self.title, range_name)
 
         if not value_input_option:
@@ -1259,7 +1333,42 @@ class Worksheet:
             default_serializer=default_serializer,
         )
 
+        self._record_value_write(
+            response.get("updatedRange", full_range_name),
+            values,
+            major_dimension or Dimension.rows,
+        )
+
         return response
+
+    def _record_value_write(
+        self,
+        range_name: str,
+        values: Iterable[Iterable[Any]],
+        major_dimension: Union[Dimension, str] = Dimension.rows,
+    ) -> None:
+        """Record an issued value write when tracking is active.
+
+        The values matrix itself is the evidence: an empty string written to
+        a cell means the cell is blank, never that it was cleared. Failures
+        while resolving the range (e.g. a named range) simply skip tracking.
+        """
+        if self._grid_state is None:
+            return
+        try:
+            bounds = GridBounds.from_a1(
+                get_a1_from_absolute_range(range_name)
+            )
+            if bounds.end_row is None or bounds.end_col is None:
+                return
+            self._grid_state.record_write(
+                bounds,
+                [list(row) for row in values],
+                major_dimension=major_dimension,
+                detail=range_name,
+            )
+        except Exception:
+            return
 
     def batch_update(
         self,
@@ -1385,6 +1494,16 @@ class Worksheet:
         response = self.client.values_batch_update(
             self.spreadsheet_id, body=body, default_serializer=default_serializer
         )
+
+        if self._grid_state is not None:
+            per_range = response.get("responses", [])
+            for index, item in enumerate(data):
+                updated_range = (
+                    per_range[index].get("updatedRange", item["range"])
+                    if index < len(per_range)
+                    else item["range"]
+                )
+                self._record_value_write(updated_range, item["values"])
 
         return response
 
@@ -1541,8 +1660,30 @@ class Worksheet:
 
         res = self.client.batch_update(self.spreadsheet_id, body)
         if rows is not None:
+            if self._grid_state is not None and rows < self.row_count:
+                # shrinking the grid drops the trailing rows permanently
+                self._grid_state.record_structural(
+                    GridBounds(
+                        start_row=rows,
+                        end_row=None,
+                        start_col=0,
+                        end_col=None,
+                    ),
+                    detail="resize",
+                )
             self._properties["gridProperties"]["rowCount"] = rows
         if cols is not None:
+            if self._grid_state is not None and cols < self.col_count:
+                # shrinking the grid drops the trailing columns permanently
+                self._grid_state.record_structural(
+                    GridBounds(
+                        start_row=0,
+                        end_row=None,
+                        start_col=cols,
+                        end_col=None,
+                    ),
+                    detail="resize",
+                )
             self._properties["gridProperties"]["columnCount"] = cols
         return res
 
@@ -1614,6 +1755,18 @@ class Worksheet:
         }
 
         response = self.client.batch_update(self.spreadsheet_id, body)
+
+        if self._grid_state is not None:
+            # values moved within the sorted range, cached coordinates are stale
+            self._grid_state.record_structural(
+                GridBounds(
+                    start_row=request_range["startRowIndex"],
+                    end_row=request_range["endRowIndex"],
+                    start_col=request_range["startColumnIndex"],
+                    end_col=request_range["endColumnIndex"],
+                ),
+                detail="sort",
+            )
         return response
 
     def update_title(self, title: str) -> JSONResponse:
@@ -1898,6 +2051,13 @@ class Worksheet:
         )
         num_new_rows = len(values)
         self._properties["gridProperties"]["rowCount"] += num_new_rows
+
+        if self._grid_state is not None:
+            updates = res.get("updates", res)
+            updated_range = updates.get("updatedRange")
+            if updated_range is not None:
+                self._record_value_write(updated_range, values)
+
         return res
 
     def insert_row(
@@ -1999,6 +2159,17 @@ class Worksheet:
         }
 
         self.client.batch_update(self.spreadsheet_id, insert_dimension_body)
+        if self._grid_state is not None:
+            # every row from the insertion point onward shifted down
+            self._grid_state.record_structural(
+                GridBounds(
+                    start_row=row - 1,
+                    end_row=None,
+                    start_col=0,
+                    end_col=None,
+                ),
+                detail="insert_rows",
+            )
 
         range_label = absolute_range_name(self.title, "A%s" % row)
 
@@ -2009,6 +2180,11 @@ class Worksheet:
         res = self.client.values_append(self.spreadsheet_id, range_label, params, body)
         num_new_rows = len(values)
         self._properties["gridProperties"]["rowCount"] += num_new_rows
+
+        if self._grid_state is not None:
+            updated_range = res.get("updates", res).get("updatedRange")
+            if updated_range is not None:
+                self._record_value_write(updated_range, values)
         return res
 
     def insert_cols(
@@ -2064,6 +2240,17 @@ class Worksheet:
         }
 
         self.client.batch_update(self.spreadsheet_id, insert_dimension_body)
+        if self._grid_state is not None:
+            # every column from the insertion point onward shifted right
+            self._grid_state.record_structural(
+                GridBounds(
+                    start_row=0,
+                    end_row=None,
+                    start_col=col - 1,
+                    end_col=None,
+                ),
+                detail="insert_cols",
+            )
 
         range_label = absolute_range_name(self.title, rowcol_to_a1(1, col))
 
@@ -2074,6 +2261,13 @@ class Worksheet:
         res = self.client.values_append(self.spreadsheet_id, range_label, params, body)
         num_new_cols = len(values)
         self._properties["gridProperties"]["columnCount"] += num_new_cols
+
+        if self._grid_state is not None:
+            updated_range = res.get("updates", res).get("updatedRange")
+            if updated_range is not None:
+                self._record_value_write(
+                    updated_range, values, major_dimension=Dimension.cols
+                )
         return res
 
     @cast_to_a1_notation
@@ -2207,6 +2401,10 @@ class Worksheet:
             self._properties["gridProperties"]["rowCount"] -= num_deleted
         elif dimension == Dimension.cols:
             self._properties["gridProperties"]["columnCount"] -= num_deleted
+
+        self._record_dimension_mutation(
+            dimension, start_index, "delete_dimension"
+        )
         return res
 
     def delete_rows(
@@ -2305,6 +2503,11 @@ class Worksheet:
             self._properties["gridProperties"]["rowCount"] -= num_deleted
         elif dimension == Dimension.cols:
             self._properties["gridProperties"]["columnCount"] -= num_deleted
+
+        for start_index, end_index in sorted_blocks:
+            self._record_dimension_mutation(
+                dimension, start_index, "delete_dimension_blocks"
+            )
         return res
 
     @staticmethod
@@ -2396,9 +2599,24 @@ class Worksheet:
 
     def clear(self) -> JSONResponse:
         """Clears all cells in the worksheet."""
-        return self.client.values_clear(
+        response = self.client.values_clear(
             self.spreadsheet_id, absolute_range_name(self.title)
         )
+
+        if self._grid_state is not None:
+            cleared_range = response.get("clearedRange")
+            if cleared_range is not None:
+                try:
+                    self._grid_state.record_clear(
+                        GridBounds.from_a1(
+                            get_a1_from_absolute_range(cleared_range)
+                        ),
+                        detail=cleared_range,
+                    )
+                except Exception:
+                    pass
+
+        return response
 
     def batch_clear(self, ranges: Sequence[str]) -> JSONResponse:
         """Clears multiple ranges of cells with 1 API call.
@@ -2423,6 +2641,21 @@ class Worksheet:
         body = {"ranges": ranges}
 
         response = self.client.values_batch_clear(self.spreadsheet_id, body=body)
+
+        if self._grid_state is not None:
+            cleared_ranges = response.get("clearedRanges") or ranges
+            bounds_list = []
+            for cleared_range in cleared_ranges:
+                try:
+                    bounds = GridBounds.from_a1(
+                        get_a1_from_absolute_range(cleared_range)
+                    )
+                except Exception:
+                    continue
+                if bounds.end_row is not None and bounds.end_col is not None:
+                    bounds_list.append(bounds)
+            if bounds_list:
+                self._grid_state.record_clear(bounds_list, detail="batch_clear")
 
         return response
 

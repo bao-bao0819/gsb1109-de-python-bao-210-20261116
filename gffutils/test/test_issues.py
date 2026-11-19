@@ -697,3 +697,192 @@ def test_issue_212():
     f = next(iter(gffutils.DataIterator(data, from_string=True, dialect=inferred_dialect)))
     assert f.dialect["semicolon in quotes"]
     assert f.attributes["note"] == ["Evidence 1a: Function from experimental evidences in the studied strain; PubMedId: 2167836, 2846289, 12682299, 16120674, 1779750, 28166228; Product type f : factor"]
+
+
+def _write_gff(tmp_path, name, text):
+    path = tmp_path / name
+    path.write_text(dedent(text))
+    return str(path)
+
+
+def test_incremental_late_parent_relations(tmp_path):
+    # Start with children only: the mRNA's parent (gene1) does not exist yet.
+    first = _write_gff(
+        tmp_path,
+        "children.gff3",
+        """\
+        ##gff-version 3
+        chr1\t.\tmRNA\t50\t450\t.\t+\t.\tID=mRNA1;Parent=gene1
+        chr1\t.\texon\t100\t200\t.\t+\t.\tID=exon1;Parent=mRNA1
+        chr1\t.\texon\t300\t400\t.\t+\t.\tID=exon2;Parent=mRNA1
+        """,
+    )
+    db = gffutils.create_db(first, ":memory:")
+
+    # The parent records arrive later.  Before a level-2 (gene -> exon)
+    # relation can be created, the level-1 intermediate (mRNA1) is now known.
+    second = _write_gff(
+        tmp_path,
+        "parents.gff3",
+        """\
+        ##gff-version 3
+        chr1\t.\tgene\t1\t1000\t.\t+\t.\tID=gene1
+        chr1\t.\tmRNA\t50\t450\t.\t+\t.\tID=mRNA1;Parent=gene1
+        """,
+    )
+    db.update(second, merge_strategy="replace")
+
+    relations = {
+        (row[0], row[1], row[2])
+        for row in db.execute("SELECT parent, child, level FROM relations")
+    }
+    assert ("gene1", "mRNA1", 1) in relations
+    assert ("gene1", "exon1", 2) in relations
+    assert ("gene1", "exon2", 2) in relations
+
+    assert {f.id for f in db.parents("exon1")} == {"mRNA1", "gene1"}
+    assert {f.id for f in db.children("gene1", level=1)} == {"mRNA1"}
+    assert {f.id for f in db.children("gene1", level=2)} == {"exon1", "exon2"}
+
+
+def test_incremental_rejects_cycle_but_keeps_valid_records(tmp_path):
+    first = _write_gff(
+        tmp_path,
+        "acyclic.gff3",
+        """\
+        ##gff-version 3
+        chr1\t.\tgene\t1\t1000\t.\t+\t.\tID=gene1
+        chr1\t.\tmRNA\t50\t450\t.\t+\t.\tID=mRNA1;Parent=gene1
+        chr1\t.\texon\t100\t200\t.\t+\t.\tID=exon1;Parent=mRNA1
+        """,
+    )
+    db = gffutils.create_db(first, ":memory:")
+
+    # gene1 now carries a bad edge back to its own descendant exon1.  The
+    # same update also contains an unrelated, perfectly valid gene2 branch.
+    second = _write_gff(
+        tmp_path,
+        "cycle.gff3",
+        """\
+        ##gff-version 3
+        chr1\t.\tgene\t1\t1000\t.\t+\t.\tID=gene1;Parent=exon1
+        chr1\t.\tgene\t2000\t3000\t.\t+\t.\tID=gene2
+        chr1\t.\tmRNA\t2100\t2900\t.\t+\t.\tID=mRNA2;Parent=gene2
+        chr1\t.\texon\t2200\t2300\t.\t+\t.\tID=exon3;Parent=mRNA2
+        """,
+    )
+    db.update(second, merge_strategy="replace")
+
+    relations = {
+        (row[0], row[1], row[2])
+        for row in db.execute("SELECT parent, child, level FROM relations")
+    }
+    # The cycle-closing edge is absent...
+    assert ("exon1", "gene1", 1) not in relations
+    assert ("exon1", "gene1", 2) not in relations
+    # ...but the unrelated branch is fully present.
+    assert ("gene2", "mRNA2", 1) in relations
+    assert ("gene2", "exon3", 2) in relations
+    assert ("mRNA2", "exon3", 1) in relations
+
+    assert "gene2" in {f.id for f in db.all_features()}
+    assert "exon3" in {f.id for f in db.all_features()}
+    assert {f.id for f in db.parents("exon1")} == {"mRNA1", "gene1"}
+
+
+def test_incremental_paths_are_not_counted_twice(tmp_path):
+    # A diamond: gene1 has two transcripts that share exon1.
+    first = _write_gff(
+        tmp_path,
+        "shared_exon.gff3",
+        """\
+        ##gff-version 3
+        chr1\t.\texon\t100\t200\t.\t+\t.\tID=exon1;Parent=mRNA1,mRNA2
+        """,
+    )
+    db = gffutils.create_db(first, ":memory:")
+    second = _write_gff(
+        tmp_path,
+        "diamond.gff3",
+        """\
+        ##gff-version 3
+        chr1\t.\tgene\t1\t1000\t.\t+\t.\tID=gene1
+        chr1\t.\tmRNA\t50\t450\t.\t+\t.\tID=mRNA1;Parent=gene1
+        chr1\t.\tmRNA\t60\t460\t.\t+\t.\tID=mRNA2;Parent=gene1
+        """,
+    )
+    db.update(second)
+
+    # Both transcripts are parents, but the shared grandparent appears once.
+    assert [f.id for f in db.parents("exon1")] == ["mRNA1", "mRNA2", "gene1"]
+    assert [f.id for f in db.parents("exon1", featuretype="gene")] == ["gene1"]
+    assert [f.id for f in db.children("gene1", level=2)] == ["exon1"]
+    assert [f.id for f in db.children("gene1", featuretype="exon")] == ["exon1"]
+
+
+def test_incremental_gtf_parents_added_later(tmp_path):
+    first = tmp_path / "children.gtf"
+    first.write_text(
+        dedent(
+            """\
+            chr1\t.\texon\t100\t200\t.\t+\t.\tgene_id "g1"; transcript_id "t1";
+            chr1\t.\texon\t300\t400\t.\t+\t.\tgene_id "g1"; transcript_id "t1";
+            """
+        )
+    )
+    db = gffutils.create_db(
+        str(first),
+        ":memory:",
+        disable_infer_genes=True,
+        disable_infer_transcripts=True,
+    )
+
+    second = tmp_path / "parents.gtf"
+    second.write_text(
+        dedent(
+            """\
+            chr1\t.\tgene\t1\t1000\t.\t+\t.\tgene_id "g1";
+            chr1\t.\ttranscript\t50\t450\t.\t+\t.\tgene_id "g1"; transcript_id "t1";
+            """
+        )
+    )
+    db.update(
+        str(second),
+        disable_infer_genes=True,
+        disable_infer_transcripts=True,
+        merge_strategy="replace",
+    )
+
+    relations = {
+        (row[0], row[1], row[2])
+        for row in db.execute("SELECT parent, child, level FROM relations")
+    }
+    assert ("g1", "t1", 1) in relations
+    assert ("t1", "exon_1", 1) in relations
+    assert ("g1", "exon_1", 2) in relations
+
+    assert {f.id for f in db.parents("exon_1")} == {"t1", "g1"}
+    assert {f.id for f in db.children("g1", featuretype="transcript")} == {"t1"}
+    assert {f.id for f in db.children("g1", featuretype="exon")} == {"exon_1", "exon_2"}
+
+
+def test_add_relation_refuses_cycle(tmp_path):
+    gff = _write_gff(
+        tmp_path,
+        "add_relation.gff3",
+        """\
+        ##gff-version 3
+        chr1\t.\tgene\t1\t1000\t.\t+\t.\tID=gene1
+        chr1\t.\tmRNA\t50\t450\t.\t+\t.\tID=mRNA1;Parent=gene1
+        chr1\t.\texon\t100\t200\t.\t+\t.\tID=exon1;Parent=mRNA1
+        """,
+    )
+    db = gffutils.create_db(gff, ":memory:")
+
+    with pytest.raises(ValueError):
+        db.add_relation("exon1", "gene1", 1)
+
+    assert ("exon1", "gene1", 1) not in {
+        (row[0], row[1], row[2])
+        for row in db.execute("SELECT parent, child, level FROM relations")
+    }

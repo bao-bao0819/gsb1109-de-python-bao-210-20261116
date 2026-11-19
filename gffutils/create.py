@@ -70,6 +70,7 @@ class _DBCreator(object):
         pragmas=constants.default_pragmas,
         _keep_tempfiles=False,
         directives=None,
+        _is_update=False,
         **kwargs
     ):
         """
@@ -98,6 +99,12 @@ class _DBCreator(object):
         self.pragmas = pragmas
         self.merge_strategy = merge_strategy
         self.default_encoding = default_encoding
+        self._is_update = _is_update
+        self._relation_children = None
+        self._relation_children_level1 = None
+        self._relation_triples = None
+        self._relation_depths_cache = None
+        self._pending_relations = []
         if directives is None:
             directives = []
         self.directives = directives
@@ -439,6 +446,213 @@ class _DBCreator(object):
     def _update_relations(self):
         raise NotImplementedError
 
+    def _load_relation_graph(self):
+        """
+        Cache the relations already stored in the database.
+
+        This is only needed for incremental updates, where a relation that
+        would close a cycle must be rejected without discarding the rest of
+        the incoming records.
+        """
+        if self._relation_children is not None:
+            return
+        children = collections.defaultdict(set)
+        children_level1 = collections.defaultdict(set)
+        triples = set()
+        c = self.conn.cursor()
+        c.execute("SELECT parent, child, level FROM relations")
+        for parent, child, level in c:
+            children[parent].add(child)
+            if level == 1:
+                children_level1[parent].add(child)
+            triples.add((parent, child, level))
+        self._relation_children = children
+        self._relation_children_level1 = children_level1
+        self._relation_triples = triples
+        self._relation_depths_cache = None
+
+    def _reachable(self, start, target):
+        """
+        True if `target` can be reached from `start` by following
+        parent -> child relations.
+        """
+        children = self._relation_children
+        stack = [start]
+        seen = set()
+        while stack:
+            node = stack.pop()
+            if node == target:
+                return True
+            if node in seen:
+                continue
+            seen.add(node)
+            stack.extend(children.get(node, ()))
+        return False
+
+    def _closes_cycle(self, parent, child):
+        """
+        True if adding `parent` -> `child` would introduce a cycle.
+
+        If the two nodes are already mutually reachable the graph already
+        contains that cycle; adding a redundant edge does not make things
+        worse, so it is allowed.
+        """
+        if parent == child:
+            return True
+        if not self._reachable(child, parent):
+            return False
+        return not self._reachable(parent, child)
+
+    def _has_level1_path(self, parent, child):
+        """
+        True if `parent` and `child` are connected by an existing two-step
+        parent -> intermediate -> child chain built only from level-1 edges.
+        """
+        children = self._relation_children_level1
+        for intermediate in children.get(parent, ()):
+            if child in children.get(intermediate, ()):
+                return True
+        return False
+
+    def _compute_relation_depths(self):
+        """
+        Approximate depth of each node in the existing relation graph.
+
+        Roots (nodes that never appear as a child) have depth 0.  This is used
+        only to order candidate edges so that an edge pointing back towards an
+        ancestor is considered after ordinary downward edges.
+        """
+        if self._relation_depths_cache is not None:
+            return self._relation_depths_cache
+        children = self._relation_children
+        all_nodes = set(children)
+        for childs in children.values():
+            all_nodes.update(childs)
+        has_parent = set()
+        for childs in children.values():
+            has_parent.update(childs)
+        depths = {node: 0 for node in all_nodes - has_parent}
+        queue = collections.deque(depths)
+        seen = set(depths)
+        while queue:
+            node = queue.popleft()
+            for child in children.get(node, ()):
+                if child not in seen:
+                    seen.add(child)
+                    depths[child] = depths[node] + 1
+                    queue.append(child)
+        # Nodes only reachable through a cycle, or with no root, get 0.
+        for node in all_nodes:
+            depths.setdefault(node, 0)
+        self._relation_depths_cache = depths
+        return depths
+
+    def _apply_relations(self, relations, cursor, require_provable=False):
+        """
+        Validate and insert candidate relations one at a time.
+
+        A candidate is dropped if it would close a cycle.  Rejection is
+        per-edge: the features and the other relations in the same update are
+        still committed.  Dangling relations (a parent with no matching
+        feature) are kept.
+        """
+        self._load_relation_graph()
+        depths = self._compute_relation_depths()
+        candidates = []
+        seen = set()
+        for parent, child, level in relations:
+            triple = (parent, child, level)
+            if triple in self._relation_triples or triple in seen:
+                continue
+            seen.add(triple)
+            d_parent = depths.get(parent, 0)
+            d_child = depths.get(child, 0)
+            backwards = int(d_parent > d_child)
+            candidates.append(
+                (level, backwards, d_parent - d_child, parent, child)
+            )
+
+        # Level-1 relations are structural, so they get first say.  Within a
+        # level, edges that point back up the current hierarchy are considered
+        # last, which keeps the legitimate downward edges when both together
+        # would form a cycle.
+        candidates.sort()
+
+        for level, _backwards, _diff, parent, child in candidates:
+            triple = (parent, child, level)
+            if triple in self._relation_triples:
+                continue
+            if require_provable and level == 2 and not self._has_level1_path(
+                parent, child
+            ):
+                logger.warning(
+                    "Skipping unprovable level-2 relation %s -> %s", parent, child
+                )
+                continue
+            if self._closes_cycle(parent, child):
+                logger.warning(
+                    "Skipping relation %s -> %s (level %s): would create a cycle",
+                    parent,
+                    child,
+                    level,
+                )
+                continue
+            cursor.execute(
+                """
+                INSERT OR IGNORE INTO relations (parent, child, level)
+                VALUES (?, ?, ?)
+                """,
+                (parent, child, level),
+            )
+            self._relation_children[parent].add(child)
+            if level == 1:
+                self._relation_children_level1[parent].add(child)
+            self._relation_triples.add(triple)
+            # Depths are only used for ordering; recomputing after a partial
+            # batch is not necessary.
+
+    def _flush_relations(self, cursor=None):
+        """Insert relations queued during an incremental update."""
+        if cursor is None:
+            cursor = self.conn.cursor()
+        pending = self._pending_relations
+        if pending:
+            self._apply_relations(pending, cursor, require_provable=True)
+            self._pending_relations = []
+
+    def _insert_relations(
+        self, relations, cursor=None, defer=False, require_provable=False
+    ):
+        """
+        Insert `(parent, child, level)` relations.
+
+        For a fresh database creation this is a straight bulk insert.  During
+        an incremental update the relations may be queued (`defer=True`) so
+        that all of them can be checked together, which avoids input order
+        deciding whether a legitimate edge or a cycle-closing edge survives.
+
+        Dangling relations (a parent ID that has no corresponding feature) are
+        kept; they may become resolvable in a later update.
+        """
+        if cursor is None:
+            cursor = self.conn.cursor()
+
+        if not self._is_update:
+            cursor.executemany(
+                """
+                INSERT OR IGNORE INTO relations (parent, child, level)
+                VALUES (?, ?, ?)
+                """,
+                relations,
+            )
+            return
+
+        relations = list(relations)
+        if defer:
+            self._pending_relations.extend(relations)
+            return
+        self._apply_relations(relations, cursor, require_provable=require_provable)
+
     def _drop_indexes(self):
         c = self.conn.cursor()
         for index in constants.INDEXES:
@@ -659,14 +873,11 @@ class _GFFDBCreator(_DBCreator):
                     self._insert(f, c)
 
             if "Parent" in f.attributes:
-                for parent in f.attributes["Parent"]:
-                    c.execute(
-                        """
-                        INSERT OR IGNORE INTO relations VALUES
-                        (?, ?, 1)
-                        """,
-                        (parent, f.id),
-                    )
+                self._insert_relations(
+                    [(parent, f.id, 1) for parent in f.attributes["Parent"]],
+                    cursor=c,
+                    defer=True,
+                )
 
         if features_seen is None:
             raise EmptyInputError("No lines parsed -- was an empty file provided?")
@@ -680,6 +891,10 @@ class _GFFDBCreator(_DBCreator):
         c = self.conn.cursor()
         c2 = self.conn.cursor()
         c3 = self.conn.cursor()
+
+        # Level-1 relations queued during population must be present before
+        # the grandchild (level 2) relations can be inferred from them.
+        self._flush_relations(c)
 
         # TODO: pre-compute indexes?
         # c.execute('CREATE INDEX ids ON features (id)')
@@ -717,14 +932,10 @@ class _GFFDBCreator(_DBCreator):
             with open(fout.name) as fin:
                 for line in fin:
                     parent, child = line.strip().split("\t")
-                    yield dict(parent=parent, child=child, level=2)
+                    yield (parent, child, 2)
 
-        c.executemany(
-            """
-            INSERT OR IGNORE INTO relations VALUES
-            (:parent, :child, :level)
-            """,
-            relations_generator(),
+        self._insert_relations(
+            relations_generator(), cursor=c, require_provable=True
         )
 
         # TODO: Index creation.  Which ones affect performance?
@@ -847,13 +1058,7 @@ class _GTFDBCreator(_DBCreator):
             # Note the IGNORE, so relationships defined many times in the file
             # (e.g., the transcript-gene relation on pretty much every line in
             # a GTF) will only be included once.
-            c.executemany(
-                """
-                INSERT OR IGNORE INTO relations (parent, child, level)
-                VALUES (?, ?, ?)
-                """,
-                relations,
-            )
+            self._insert_relations(relations, cursor=c, defer=True)
 
         if lines_seen == 0:
             raise ValueError("No lines parsed -- was an empty file provided?")
@@ -864,12 +1069,16 @@ class _GTFDBCreator(_DBCreator):
 
     def _update_relations(self):
 
-        if self.disable_infer_genes and self.disable_infer_transcripts:
-            return
-
         # TODO: do any indexes speed this up?
         c = self.conn.cursor()
         c2 = self.conn.cursor()
+
+        # Make level-1 relations available to the extent-inference queries
+        # below (and to the database, even if inference is disabled).
+        self._flush_relations(c)
+
+        if self.disable_infer_genes and self.disable_infer_transcripts:
+            return
 
         logger.info("Creating relations(parent) index")
         c.execute("DROP INDEX IF EXISTS relationsparent")

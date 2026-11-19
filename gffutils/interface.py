@@ -1084,6 +1084,20 @@ class FeatureDB(object):
         Returns
         -------
         Returns self but with the underlying database updated.
+
+        Notes
+        -----
+        Relations are added incrementally and are treated as a DAG.  Two kinds
+        of edge are skipped, one at a time:
+
+        * an edge that would close a cycle; and
+        * a level-2 shortcut (for example gene -> exon) when the level-1 path
+          that would prove it (gene -> mRNA -> exon) is not present.
+
+        Relations pointing at an ID that does not exist yet are kept as
+        dangling edges; they become usable if that feature is added in a later
+        update.  Because rejection is per-edge, a single bad relation does not
+        roll back the features or the other relations added in the same update.
         """
 
         from gffutils import create
@@ -1106,6 +1120,11 @@ class FeatureDB(object):
             return self
 
         kwargs["_autoincrements"] = self._autoincrements
+
+        # Relations added to an existing database are validated one edge at a
+        # time: cycle-closing edges are skipped, but the features and the
+        # remaining relations from the same update are still committed.
+        kwargs["_is_update"] = True
 
         if self.dialect["fmt"] == "gtf":
             if "id_spec" not in kwargs:
@@ -1168,6 +1187,11 @@ class FeatureDB(object):
         Returns
         -------
         FeatureDB object with new relations added.
+
+        Raises
+        ------
+        ValueError
+            If the relation would create a cycle in the parent/child graph.
         """
         if isinstance(parent, str):
             parent = self[parent]
@@ -1175,6 +1199,10 @@ class FeatureDB(object):
             child = self[child]
 
         c = self.conn.cursor()
+        if self._would_create_cycle(parent.id, child.id):
+            raise ValueError(
+                "Relation %s -> %s would create a cycle" % (parent.id, child.id)
+            )
         c.execute(
             """
                   INSERT INTO relations (parent, child, level)
@@ -1191,6 +1219,32 @@ class FeatureDB(object):
 
         self.conn.commit()
         return self
+
+    def _would_create_cycle(self, parent_id, child_id):
+        """
+        Return True if adding the relation `parent_id` -> `child_id` would
+        make the relation graph cyclic.
+        """
+        if parent_id == child_id:
+            return True
+        c = self.conn.cursor()
+        stack = [child_id]
+        seen = set()
+        while stack:
+            node = stack.pop()
+            if node == parent_id:
+                return True
+            if node in seen:
+                continue
+            seen.add(node)
+            c.execute(
+                """
+                SELECT child FROM relations WHERE parent = ?
+                """,
+                (node,),
+            )
+            stack.extend(row[0] for row in c)
+        return False
 
     def _update(self, feature, cursor):
         values = [list(feature.astuple()) + [feature.id]]

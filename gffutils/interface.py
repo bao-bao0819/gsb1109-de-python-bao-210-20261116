@@ -1904,99 +1904,65 @@ class FeatureDB(object):
             If None, then use black (0,0,0) as the RGB color; otherwise this
             should be a comma-separated string of R,G,B values each of which
             are integers in the range 0-255.
+
+        Raises
+        ------
+        gffutils.convert.UnrepresentableFeatureError
+            If the feature cannot be expressed in BED12 without changing its
+            coordinates or block coverage.  Zero-length point events
+            (``start == end + 1``), reversed intervals and overlapping blocks
+            are reported rather than silently normalized.  A one-base GFF
+            segment (``start == end``) is a valid one-base block.
         """
-        if thick_featuretype and thin_featuretype:
-            raise ValueError(
-                "Can only specify one of `thick_featuertype` or " "`thin_featuretype`"
-            )
+        from gffutils import convert
 
-        exons = list(
-            self.children(feature, featuretype=block_featuretype, order_by="start")
+        record = convert.to_bed12_record(
+            feature,
+            db=self,
+            child_type=block_featuretype,
+            name_field=name_field,
+            color=color,
+            thick_featuretype=thick_featuretype,
+            thin_featuretype=thin_featuretype,
         )
-        if len(exons) == 0:
-            exons = [feature]
-        feature = self[feature]
-        first = exons[0].start
-        last = exons[-1].stop
+        return record.to_bed12()
 
-        if first != feature.start:
-            raise ValueError(
-                "Start of first exon (%s) does not match start of feature (%s)"
-                % (first, feature.start)
-            )
-        if last != feature.stop:
-            raise ValueError(
-                "End of last exon (%s) does not match end of feature (%s)"
-                % (last, feature.stop)
-            )
+    def bed12_many(
+        self,
+        features,
+        block_featuretype=["exon"],
+        thick_featuretype=["CDS"],
+        thin_featuretype=None,
+        name_field="ID",
+        color=None,
+    ):
+        """
+        Convert multiple features to BED12, separating unrepresentable ones.
 
-        if color is None:
-            color = "0,0,0"
-        color = color.replace(" ", "").strip()
+        Returns
+        -------
+        (lines, unrepresentable)
+            `lines` contains one BED12 string per representable feature.
+            `unrepresentable` is a list of ``(feature, reason)`` tuples for
+            features that cannot be expressed in BED12 without changing their
+            coordinates or block coverage (for example zero-length point
+            events, reversed intervals, overlapping blocks or blocks that
+            extend beyond the parent).
+        """
+        from gffutils import convert
 
-        # Use field names as defined at
-        # http://genome.ucsc.edu/FAQ/FAQformat.html#format1
-        chrom = feature.chrom
-        chromStart = feature.start - 1
-        chromEnd = feature.stop
-        orig = constants.always_return_list
-        constants.always_return_list = True
-        try:
-            name = feature[name_field][0]
-        except KeyError:
-            name = "."
-
-        constants.always_return_list = orig
-
-        score = feature.score
-        if score == ".":
-            score = "0"
-        strand = feature.strand
-        itemRgb = color
-        blockCount = len(exons)
-        blockSizes = [len(i) for i in exons]
-        blockStarts = [i.start - 1 - chromStart for i in exons]
-
-        if thick_featuretype:
-            thick = list(
-                self.children(feature, featuretype=thick_featuretype, order_by="start")
-            )
-            if len(thick) == 0:
-                thickStart = feature.start
-                thickEnd = feature.stop
-            else:
-                thickStart = thick[0].start - 1  # BED 0-based coords
-                thickEnd = thick[-1].stop
-
-        if thin_featuretype:
-            thin = list(
-                self.children(feature, featuretype=thin_featuretype, order_by="start")
-            )
-            if len(thin) == 0:
-                thickStart = feature.start
-                thickEnd = feature.stop
-            else:
-                thickStart = thin[0].stop
-                thickEnd = thin[-1].start - 1  # BED 0-based coords
-
-        tst = chromStart + blockStarts[-1] + blockSizes[-1]
-        assert tst == chromEnd, "tst=%s; chromEnd=%s" % (tst, chromEnd)
-
-        fields = [
-            chrom,
-            chromStart,
-            chromEnd,
-            name,
-            score,
-            strand,
-            thickStart,
-            thickEnd,
-            itemRgb,
-            blockCount,
-            ",".join(map(str, blockSizes)),
-            ",".join(map(str, blockStarts)),
-        ]
-        return "\t".join(map(str, fields))
+        result = convert.gff_to_bed12(
+            features,
+            db=self,
+            child_type=block_featuretype,
+            name_field=name_field,
+            color=color,
+            thick_featuretype=thick_featuretype,
+            thin_featuretype=thin_featuretype,
+            include_newline=False,
+        )
+        skipped = [(item.feature, item.reason) for item in result.unrepresentable]
+        return result.lines, skipped
 
     def seqids(self):
         """

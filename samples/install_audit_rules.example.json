@@ -1,0 +1,49 @@
+{
+  "products": [
+    {
+      "name": "ExampleSuite",
+      "product_codes": ["{11111111-2222-3333-4444-555555555555}"],
+      "uninstall_keys": [
+        "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{11111111-2222-3333-4444-555555555555}"
+      ],
+      "uninstall_roots": [
+        "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
+        "SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall"
+      ],
+      "component_keys": ["{aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee}"],
+      "component_roots": [
+        "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Installer\\Components",
+        "SOFTWARE\\Classes\\Installer\\Components"
+      ],
+      "version_values": ["DisplayVersion", "Version"],
+      "path_values": ["InstallLocation", "DisplayIcon", "UninstallString"],
+      "requires": [
+        "key:SOFTWARE\\ExampleSuite"
+      ],
+      "excludes": [
+        "value:SOFTWARE\\Policies\\ExampleSuite|Blocked=1"
+      ],
+      "versions": [
+        {
+          "version": "1.x",
+          "constraint": ">=1.0,<2.0",
+          "requires": ["component:{aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee}"],
+          "excludes": [
+            "key:SOFTWARE\\ExampleSuite\\V3Only"
+          ]
+        },
+        {
+          "version": "2.x",
+          "constraint": ">=2.0,<3.0",
+          "allows_coexist": false
+        }
+      ]
+    }
+  ],
+  "exclusions": [
+    {
+      "reason": "security agent blocks ExampleSuite on locked-down images",
+      "paths": ["SOFTWARE\\Policies\\ExampleSuite\\Blocked"]
+    }
+  ]
+}

@@ -67,6 +67,34 @@ Advanced users who wish to study the structure of the Windows
 Registry may find the `Registry.RegistryParse` module useful.
 This module implements all known structures of the Windows Registry.
 
+Installation-history auditing
+------------------------------
+
+`Registry.install_audit` reconciles software installation evidence
+across two offline hives (for example two `SOFTWARE` snapshots) using a
+caller-supplied rule set of product codes, uninstall keys, component
+keys and per-version support/exclusion rules:
+
+    from Registry.Registry import Registry
+    from Registry.install_audit import (InstallAuditor, RegistryHiveView,
+                                        RuleSet)
+
+    rules = RuleSet.from_file("rules.json")
+    report = InstallAuditor(
+        rules,
+        RegistryHiveView(Registry.Registry("hive_a/SOFTWARE"), "hive_a"),
+        RegistryHiveView(Registry.Registry("hive_b/SOFTWARE"), "hive_b"),
+    ).run()
+    print(report.to_text())
+
+Each product/hive pair is classified as provable, candidate, conflict,
+inactive residue or no evidence. A stale path string alone is never
+treated as proof of installation; it is reported as inactive residue
+together with the exact missing artifact (uninstall key, product code,
+version value) that would discriminate the two competing
+interpretations. See `samples/install_audit_rules.example.json` for the
+rule schema and `samples/install_audit.py` for the command line tool.
+
 Wanted
 ------
   - Bug reports.

@@ -6,6 +6,13 @@ and this project adheres to [Python PEP 440 Versioning](https://www.python.org/d
 
 ## [Unreleased]
 
+### Added
+
+- New `pyshacl.rdfutil.import_closure` module for reproducible, offline validation of documents that use `owl:imports`.
+  - `capture_import_closure(root, dest_dir)` records the *actual* import closure of a root document: every fetched dependency is stored content-addressed next to an `import-closure.json` manifest with its SHA-256 digest, RDF format, triple count, and version identity (`owl:versionIRI` / `owl:versionInfo`).
+  - Duplicate imports are recorded once (extra references counted), import cycles are detected and recorded instead of being followed forever, and dependencies that cannot be retrieved are recorded as **unverified** — nothing is silently substituted from a machine-local cache.
+  - `replay_import_closure(closure_dir)` rebuilds the graph from the stored materials only, verifying every digest; unverified dependencies abort the rebuild unless `allow_unverified=True` is passed, and remain listed on the returned closure's `unverified` property.
+
 ## [0.40.2] - 2026-07-28
 
 ### Fixed

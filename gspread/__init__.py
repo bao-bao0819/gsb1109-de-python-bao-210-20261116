@@ -22,6 +22,7 @@ from .exceptions import (
     WorksheetNotFound,
 )
 from .http_client import BackOffHTTPClient, HTTPClient
+from .listing import SpreadsheetFileDiff, SpreadsheetFileList, SpreadsheetFileListing
 from .spreadsheet import Spreadsheet
 from .worksheet import ValueRange, Worksheet
 
@@ -46,6 +47,11 @@ __all__ = [
     # from .http_client
     "BackOffHTTPClient",
     "HTTPClient",
+
+    # from .listing
+    "SpreadsheetFileDiff",
+    "SpreadsheetFileList",
+    "SpreadsheetFileListing",
 
     # from .spreadsheet
     "Spreadsheet",

@@ -7,6 +7,7 @@ API Reference
    top-level
    auth
    client
+   listing
    http_client
    models/index
    utils

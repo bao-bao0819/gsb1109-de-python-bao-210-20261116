@@ -15,6 +15,21 @@ from requests import Response, Session
 
 from .exceptions import APIError, SpreadsheetNotFound
 from .http_client import HTTPClient, HTTPClientType, ParamsType
+from .listing import (
+    UNKNOWN_CROSS_PAGE_DUPLICATE,
+    UNKNOWN_DUPLICATE,
+    UNKNOWN_INCOMPLETE_SEARCH,
+    UNKNOWN_MISSING_IDENTITY,
+    UNKNOWN_PARTIAL_LISTING,
+    UNKNOWN_PERMISSION_CHANGE,
+    UNKNOWN_REPEATED_PAGE_TOKEN,
+    UNKNOWN_VISIBILITY_CHANGED,
+    PageCursor,
+    SpreadsheetFileList,
+    SpreadsheetFileListing,
+    VISIBILITY_UNKNOWN,
+    visibility_basis_for_file,
+)
 from .spreadsheet import Spreadsheet
 from .urls import DRIVE_FILES_API_V3_COMMENTS_URL, DRIVE_FILES_API_V3_URL
 from .utils import ExportFormat, MimeType, extract_id_from_url, finditem
@@ -73,58 +88,260 @@ class Client:
         return self.http_client.get_file_drive_metadata(id)
 
     def list_spreadsheet_files(
-        self, title: Optional[str] = None, folder_id: Optional[str] = None
-    ) -> List[Dict[str, Any]]:
+        self,
+        title: Optional[str] = None,
+        folder_id: Optional[str] = None,
+        *,
+        page_token: Optional[str] = None,
+        include_visibility: bool = False,
+        page_size: int = 1000,
+    ) -> SpreadsheetFileList:
         """List all the spreadsheet files
 
         Will list all spreadsheet files owned by/shared with this user account.
+
+        Files are deduplicated by their stable Drive file ID, never by title.
+        Two different files with the same title are both returned.  The
+        returned list also exposes listing metadata through its
+        :attr:`~gspread.listing.SpreadsheetFileList.listing` attribute:
+        the query scope, every page cursor, the basis on which each file is
+        visible, and whether the enumeration is complete.
 
         :param str title: Filter only spreadsheet files with this title
         :param str folder_id: Only look for spreadsheet files in this folder
             The parameter ``folder_id`` can be obtained from the URL when looking at
             a folder in a web browser as follow:
             ``https://drive.google.com/drive/u/0/folders/<folder_id>``
+        :param str page_token: (optional) Start from this Drive page cursor
+            instead of the first page.  A listing that starts from a cursor is
+            partial and is never used to confirm deletions.
+        :param bool include_visibility: (optional) Also request the Drive
+            ``ownedByMe``, ``shared`` and ``driveId`` fields.  This changes the
+            request made to Drive, but gives :attr:`visibility_basis` a
+            definite value instead of ``unknown``.
+        :param int page_size: (optional) Number of files requested per page.
 
         :returns: a list of dicts containing the keys id, name, createdTime and modifiedTime.
+        :rtype: :class:`~gspread.listing.SpreadsheetFileList`
         """
-        files, _ = self._list_spreadsheet_files(title=title, folder_id=folder_id)
-        return files
+        listing = self._list_spreadsheet_files_detailed(
+            title=title,
+            folder_id=folder_id,
+            page_token=page_token,
+            include_visibility=include_visibility,
+            page_size=page_size,
+        )
+        return SpreadsheetFileList(listing.files, listing)
+
+    def list_spreadsheet_files_detailed(
+        self,
+        title: Optional[str] = None,
+        folder_id: Optional[str] = None,
+        *,
+        page_token: Optional[str] = None,
+        include_visibility: bool = False,
+        page_size: int = 1000,
+    ) -> SpreadsheetFileListing:
+        """List spreadsheet files and return the full listing metadata.
+
+        This is the same operation as :meth:`list_spreadsheet_files`, but it
+        returns a :class:`~gspread.listing.SpreadsheetFileListing` instead of
+        a plain list.  In addition to the files it keeps the exact query
+        scope, the page cursor used for each request, the visibility basis for
+        each file, and the reasons why the listing is not a complete
+        enumeration (if any).
+        """
+        return self._list_spreadsheet_files_detailed(
+            title=title,
+            folder_id=folder_id,
+            page_token=page_token,
+            include_visibility=include_visibility,
+            page_size=page_size,
+        )
+
+    def _spreadsheet_files_query(
+        self, title: Optional[str], folder_id: Optional[str]
+    ) -> str:
+        query = f'mimeType="{MimeType.google_sheets}"'
+        if title:
+            escaped_title = title.replace("\\", "\\\\").replace('"', '\\"')
+            query += f' and name = "{escaped_title}"'
+        if folder_id:
+            escaped_folder = folder_id.replace("\\", "\\\\").replace('"', '\\"')
+            query += f' and parents in "{escaped_folder}"'
+        return query
+
+    def _spreadsheet_files_fields(self, include_visibility: bool) -> str:
+        fields = "id,name,createdTime,modifiedTime"
+        if include_visibility:
+            fields += ",ownedByMe,shared,driveId"
+            return "kind,nextPageToken,incompleteSearch,files({})".format(fields)
+        # Keep the historical request unchanged for existing callers and
+        # recorded fixtures.  incompleteSearch is still honoured when Drive
+        # includes it in a response.
+        return "kind,nextPageToken,files({})".format(fields)
+
+    def _list_spreadsheet_files_detailed(
+        self,
+        title: Optional[str] = None,
+        folder_id: Optional[str] = None,
+        *,
+        page_token: Optional[str] = None,
+        include_visibility: bool = False,
+        page_size: int = 1000,
+    ) -> SpreadsheetFileListing:
+        query = self._spreadsheet_files_query(title, folder_id)
+        params: ParamsType = {
+            "q": query,
+            "pageSize": page_size,
+            "supportsAllDrives": True,
+            "includeItemsFromAllDrives": True,
+            "fields": self._spreadsheet_files_fields(include_visibility),
+        }
+
+        listing = SpreadsheetFileListing(
+            query_scope={
+                "title": title,
+                "folder_id": folder_id,
+                "mime_type": str(MimeType.google_sheets),
+                "q": query,
+                "params": dict(params),
+                "include_visibility": include_visibility,
+            },
+            requested_page_token=page_token,
+            finished=False,
+        )
+
+        if page_token is not None:
+            listing.partial = True
+            if UNKNOWN_PARTIAL_LISTING not in listing.unknown_reasons:
+                listing.unknown_reasons.append(UNKNOWN_PARTIAL_LISTING)
+
+        seen_ids: Dict[str, int] = {}
+        page_index = 0
+        request_token = page_token
+        requested_tokens = set()
+
+        while True:
+            if request_token is not None:
+                if request_token in requested_tokens:
+                    if UNKNOWN_REPEATED_PAGE_TOKEN not in listing.unknown_reasons:
+                        listing.unknown_reasons.append(UNKNOWN_REPEATED_PAGE_TOKEN)
+                    listing.finished = False
+                    break
+                requested_tokens.add(request_token)
+                params["pageToken"] = request_token
+            else:
+                params.pop("pageToken", None)
+
+            try:
+                response = self.http_client.request(
+                    "get", DRIVE_FILES_API_V3_URL, params=params
+                )
+            except APIError as ex:
+                if ex.response.status_code in (
+                    HTTPStatus.FORBIDDEN,
+                    HTTPStatus.NOT_FOUND,
+                    HTTPStatus.GONE,
+                ):
+                    listing.last_response = ex.response
+                    listing.error = ex
+                    if UNKNOWN_PERMISSION_CHANGE not in listing.unknown_reasons:
+                        listing.unknown_reasons.append(UNKNOWN_PERMISSION_CHANGE)
+                    listing.finished = False
+                    break
+                raise
+
+            response_json = response.json()
+            page_files = list(response_json.get("files", []))
+            page_ids: List[str] = []
+
+            for file in page_files:
+                file_id = file.get("id")
+                basis = visibility_basis_for_file(file)
+
+                if not file_id:
+                    listing.unidentified_files.append(file)
+                    listing.files.append(file)
+                    if UNKNOWN_MISSING_IDENTITY not in listing.unknown_reasons:
+                        listing.unknown_reasons.append(UNKNOWN_MISSING_IDENTITY)
+                    continue
+
+                page_ids.append(file_id)
+
+                if file_id in seen_ids:
+                    duplicate_reason = (
+                        UNKNOWN_DUPLICATE
+                        if seen_ids[file_id] == page_index
+                        else UNKNOWN_CROSS_PAGE_DUPLICATE
+                    )
+                    if duplicate_reason not in listing.unknown_reasons:
+                        listing.unknown_reasons.append(duplicate_reason)
+                    if file_id not in listing.duplicate_ids:
+                        listing.duplicate_ids.append(file_id)
+
+                    previous_basis = listing.visibility.get(file_id)
+                    if (
+                        previous_basis is not None
+                        and basis != VISIBILITY_UNKNOWN
+                        and previous_basis != VISIBILITY_UNKNOWN
+                        and basis != previous_basis
+                        and UNKNOWN_VISIBILITY_CHANGED
+                        not in listing.unknown_reasons
+                    ):
+                        listing.unknown_reasons.append(UNKNOWN_VISIBILITY_CHANGED)
+
+                    retained = listing.by_id.get(file_id)
+                    if retained is not None:
+                        for key, value in file.items():
+                            retained.setdefault(key, value)
+                    continue
+
+                seen_ids[file_id] = page_index
+                listing.files.append(file)
+                listing.page_by_id[file_id] = request_token
+                listing.visibility[file_id] = basis
+
+            next_token = response_json.get("nextPageToken", None)
+            incomplete_search = bool(
+                response_json.get("incompleteSearch", False)
+            )
+
+            listing.page_cursors.append(
+                PageCursor(
+                    request_token=request_token,
+                    next_token=next_token,
+                    file_ids=tuple(page_ids),
+                    incomplete_search=incomplete_search,
+                    page=page_index,
+                )
+            )
+            listing.last_response = response
+
+            if (
+                incomplete_search
+                and UNKNOWN_INCOMPLETE_SEARCH not in listing.unknown_reasons
+            ):
+                listing.unknown_reasons.append(UNKNOWN_INCOMPLETE_SEARCH)
+
+            page_index += 1
+
+            if next_token is None:
+                listing.finished = True
+                break
+
+            request_token = next_token
+
+        return listing
 
     def _list_spreadsheet_files(
         self, title: Optional[str] = None, folder_id: Optional[str] = None
     ) -> Tuple[List[Dict[str, Any]], Response]:
-        files = []
-        page_token = ""
-        url = DRIVE_FILES_API_V3_URL
-
-        query = f'mimeType="{MimeType.google_sheets}"'
-        if title:
-            query += f' and name = "{title}"'
-        if folder_id:
-            query += f' and parents in "{folder_id}"'
-
-        params: ParamsType = {
-            "q": query,
-            "pageSize": 1000,
-            "supportsAllDrives": True,
-            "includeItemsFromAllDrives": True,
-            "fields": "kind,nextPageToken,files(id,name,createdTime,modifiedTime)",
-        }
-
-        while True:
-            if page_token:
-                params["pageToken"] = page_token
-
-            response = self.http_client.request("get", url, params=params)
-            response_json = response.json()
-            files.extend(response_json["files"])
-
-            page_token = response_json.get("nextPageToken", None)
-
-            if page_token is None:
-                break
-
-        return files, response
+        listing = self._list_spreadsheet_files_detailed(
+            title=title, folder_id=folder_id
+        )
+        files = SpreadsheetFileList(listing.files, listing)
+        return files, listing.last_response
 
     def open(self, title: str, folder_id: Optional[str] = None) -> Spreadsheet:
         """Opens a spreadsheet.

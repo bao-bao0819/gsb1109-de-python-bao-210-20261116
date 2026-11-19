@@ -61,6 +61,66 @@ with yourself:
 See :meth:`~gspread.models.Spreadsheet.share` documentation for a full list of accepted parameters.
 
 
+Listing Spreadsheet Files
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:meth:`~gspread.client.Client.list_spreadsheet_files` returns every
+spreadsheet file visible to the account.  Files are identified by their Drive
+file ID, never by title, so two different files with the same title are both
+returned:
+
+.. code:: python
+
+   files = gc.list_spreadsheet_files()
+   for file in files:
+       print(file["id"], file["name"])
+
+   # Both IDs are kept even though the title is identical.
+   print(files.names["Same title"])
+
+The returned object is still a normal list, but it also carries listing
+metadata describing exactly what was queried and how it was paged:
+
+.. code:: python
+
+   files = gc.list_spreadsheet_files(include_visibility=True)
+
+   files.query          # Drive "q" expression used for every page
+   files.query_scope    # title, folder_id, mime type, q, params
+   files.page_tokens    # pageToken sent with each request
+   files.page_cursors   # request token, next token and IDs per page
+   files.visibility_basis["<file id>"]  # owned / shared / shared_drive / ...
+   files.complete       # every page read without a paging anomaly
+   files.deletion_safe  # absence from this listing can mean deletion
+
+Drive pagination is not a stable snapshot: a file can be returned on more
+than one page, and a file can become invisible between pages because its
+sharing permissions changed.  A listing therefore reports ``complete`` only
+when every page was read without such an anomaly.  Use
+:meth:`~gspread.client.Client.list_spreadsheet_files_detailed` or
+``files.listing`` to inspect the reasons.
+
+To compare two listings, use :meth:`~gspread.listing.SpreadsheetFileListing.diff`.
+Files that disappeared are only reported in ``deleted`` when both listings are
+complete, cover the same query scope, and the earlier listing recorded the
+file as owned.  Shared files, partial listings, cross-page duplicates, and
+listings interrupted by a permission change are reported in ``unknown``
+instead:
+
+.. code:: python
+
+   before = gc.list_spreadsheet_files(include_visibility=True)
+   after = gc.list_spreadsheet_files(include_visibility=True)
+
+   diff = after.diff(before)
+   diff.deleted  # safe to treat as deleted
+   diff.unknown  # absent, but deletion cannot be proven
+
+If a full listing is resumed from a page cursor, pass ``page_token=...``.  The
+result is marked partial and is never used to claim that a missing file was
+deleted.
+
+
 Selecting a Worksheet
 ~~~~~~~~~~~~~~~~~~~~~
 

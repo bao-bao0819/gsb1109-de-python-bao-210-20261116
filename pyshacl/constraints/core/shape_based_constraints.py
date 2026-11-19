@@ -379,56 +379,87 @@ class QualifiedValueShapeConstraintComponent(ConstraintComponent):
             reports.extend(_r)
         return (not non_conformant), reports
 
+    def _gather_sibling_shapes(self):
+        """
+        Textual Definition of Sibling Shapes:
+        Let Q be a shape in shapes graph G that declares a qualified cardinality constraint (by having values
+        for sh:qualifiedValueShape and at least one of sh:qualifiedMinCount or sh:qualifiedMaxCount). Let ps
+        be the set of shapes in G that have Q as a value of sh:property. If Q has true as a value for
+        sh:qualifiedValueShapesDisjoint then the set of sibling shapes for Q is defined as the set of all
+        values of the SPARQL property path sh:property/sh:qualifiedValueShape for any shape in ps minus the
+        value of sh:qualifiedValueShape of Q itself. The set of sibling shapes is empty otherwise.
+        The scope of the sibling set is therefore the set of shapes that actually reach Q through
+        sh:property; qualified value shapes declared on Q itself are never siblings of one another.
+        :rtype: set[Shape]
+        """
+        sibling_nodes = set()
+        parent_shapes = set(self.shape.sg.subjects(SH_property, self.shape.node))
+        for p in iter(parent_shapes):
+            parent_property_shapes = set(self.shape.sg.objects(p, SH_property))
+            for s in iter(parent_property_shapes):
+                sibling_nodes.update(self.shape.sg.objects(s, SH_qualifiedValueShape))
+        # Minus the value of sh:qualifiedValueShape of Q itself.
+        own_value_shapes = set(self.shape.sg.objects(self.shape.node, SH_qualifiedValueShape))
+        sibling_nodes.difference_update(own_value_shapes)
+        sibling_shapes = set()
+        for sibling_node in sibling_nodes:
+            if self.shape.sg.is_filtered_out_shape(sibling_node):
+                # A sibling that is not in scope for validation provides no evidence.
+                # It must neither exclude a conforming value nor consume a count slot.
+                continue
+            resolved_sibling = self.shape.get_other_shape(sibling_node)
+            if resolved_sibling is not None:
+                sibling_shapes.add(resolved_sibling)
+        return sibling_shapes
+
     def _evaluate_value_shape(
         self, executor, _v_shape, target_graph, focus_value_nodes, potentially_recursive, _evaluation_path
     ):
         _reports = []
         _non_conformant = False
         other_shape = self.shape.get_other_shape(_v_shape)
-        if potentially_recursive and other_shape in potentially_recursive:
-            warn(ShapeRecursionWarning(_evaluation_path))
-            return _non_conformant, _reports
         if not other_shape:
             raise ReportableRuntimeError(
                 "Shape pointed to by sh:qualifiedValueShape does not exist or is not a well-formed SHACL Shape."
             )
+        recursion_blocked = bool(potentially_recursive and other_shape in potentially_recursive)
+        if recursion_blocked:
+            # Back out of the recursive conformance check instead of treating its absent result as
+            # evidence of conformance. Values checked against this shape contribute no count here;
+            # the min/max count comparisons below still run so missing counts are still reported.
+            warn(ShapeRecursionWarning(_evaluation_path))
         if self.is_disjoint:
-            # Textual Definition of Sibling Shapes:
-            # Let Q be a shape in shapes graph G that declares a qualified cardinality constraint (by having values for sh:qualifiedValueShape and at least one of sh:qualifiedMinCount or sh:qualifiedMaxCount). Let ps be the set of shapes in G that have Q as a value of sh:property. If Q has true as a value for sh:qualifiedValueShapesDisjoint then the set of sibling shapes for Q is defined as the set of all values of the SPARQL property path sh:property/sh:qualifiedValueShape for any shape in ps minus the value of sh:qualifiedValueShape of Q itself. The set of sibling shapes is empty otherwise.
-            sibling_shapes = set()
-            parent_shapes = set(self.shape.sg.subjects(SH_property, self.shape.node))
-            for p in iter(parent_shapes):
-                parent_property_shapes = set(self.shape.sg.objects(p, SH_property))
-                for s in iter(parent_property_shapes):
-                    parent_property_qualifiedvalueshapes = set(self.shape.sg.objects(s, SH_qualifiedValueShape))
-                    for sibling in parent_property_qualifiedvalueshapes:
-                        if sibling == _v_shape:
-                            continue
-                        sibling_shapes.add(sibling)
-
-            sibling_shapes = set(self.shape.get_other_shape(s) for s in sibling_shapes)
-            sibling_shapes = {s for s in sibling_shapes if s is not None}
+            sibling_shapes = self._gather_sibling_shapes()
         else:
             sibling_shapes = set()
         upstream_reports = []
         for f, value_nodes in focus_value_nodes.items():
             number_conforms = 0
             for v in value_nodes:
+                if recursion_blocked:
+                    # No conformance evidence is available for this value against this shape,
+                    # so it cannot be counted as conforming and cannot fill a qualified count.
+                    continue
                 try:
                     _is_conform, _r = other_shape.validate(
                         executor, target_graph, focus=v, _evaluation_path=_evaluation_path[:]
                     )
                     if len(_r):
                         upstream_reports.extend(_r)
-                    if _is_conform:
-                        _conforms_to_sibling = False
-                        for sibling_shape in sibling_shapes:
-                            _c2, _r = sibling_shape.validate(
-                                executor, target_graph, focus=v, _evaluation_path=_evaluation_path[:]
-                            )
-                            _conforms_to_sibling = _conforms_to_sibling or _c2
-                        if not _conforms_to_sibling:
-                            number_conforms += 1
+                    if not _is_conform:
+                        continue
+                    _conforms_to_sibling = False
+                    for sibling_shape in sibling_shapes:
+                        _c2, _r = sibling_shape.validate(
+                            executor, target_graph, focus=v, _evaluation_path=_evaluation_path[:]
+                        )
+                        if len(_r):
+                            upstream_reports.extend(_r)
+                        _conforms_to_sibling = _conforms_to_sibling or _c2
+                    if not _conforms_to_sibling:
+                        # The value conforms to this qualified value shape and to none of the in-scope
+                        # sibling shapes, so it contributes exactly one count to this candidate.
+                        number_conforms += 1
                 except ValidationFailure as v:
                     raise v
             if self.max_count is not None and number_conforms > self.max_count:

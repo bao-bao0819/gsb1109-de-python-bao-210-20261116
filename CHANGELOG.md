@@ -6,6 +6,18 @@ and this project adheres to [Python PEP 440 Versioning](https://www.python.org/d
 
 ## [Unreleased]
 
+### Fixed
+
+- Qualified value shape counting with `sh:qualifiedValueShapesDisjoint true` now follows the
+  sibling shape definition in the SHACL specification:
+  - Qualified value shapes declared on the same property shape are no longer treated as sibling
+    shapes, so a value conforming to both of them can contribute to both counts.
+  - Sibling shapes are resolved only within the scope of the node shapes that reach the property
+    shape via `sh:property`; out-of-scope and unresolvable sibling nodes no longer exclude
+    conforming values without evidence.
+  - When a recursive qualified value shape check has to back out, the unevaluated values no
+    longer silently satisfy `sh:qualifiedMinCount`; the min/max count comparisons still run.
+
 ## [0.40.2] - 2026-07-28
 
 ### Fixed

@@ -4,6 +4,15 @@ from gffutils.feature import Feature
 from gffutils.iterators import DataIterator
 from gffutils.helpers import example_filename
 from gffutils.exceptions import FeatureNotFoundError, DuplicateIDError
+from gffutils.seqidmap import (
+    Candidate,
+    MappingConflict,
+    ReferenceCatalog,
+    ResolutionResult,
+    SeqidResolver,
+    SourceRecord,
+    records_from_features,
+)
 from gffutils.version import version as __version__
 
 __all__ = [
@@ -15,4 +24,11 @@ __all__ = [
     "example_filename",
     "FeatureNotFoundError",
     "DuplicateIDError",
+    "Candidate",
+    "MappingConflict",
+    "ReferenceCatalog",
+    "ResolutionResult",
+    "SeqidResolver",
+    "SourceRecord",
+    "records_from_features",
 ]

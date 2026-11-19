@@ -3,7 +3,12 @@ from gffutils.interface import FeatureDB
 from gffutils.feature import Feature
 from gffutils.iterators import DataIterator
 from gffutils.helpers import example_filename
-from gffutils.exceptions import FeatureNotFoundError, DuplicateIDError
+from gffutils.exceptions import (
+    FeatureNotFoundError,
+    DuplicateIDError,
+    MissingSequenceLengthError,
+)
+from gffutils.circular import LogicalFeature
 from gffutils.version import version as __version__
 
 __all__ = [
@@ -15,4 +20,6 @@ __all__ = [
     "example_filename",
     "FeatureNotFoundError",
     "DuplicateIDError",
+    "MissingSequenceLengthError",
+    "LogicalFeature",
 ]

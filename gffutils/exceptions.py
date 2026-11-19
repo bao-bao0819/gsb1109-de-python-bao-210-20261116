@@ -21,3 +21,11 @@ class AttributeStringError(Exception):
 
 class EmptyInputError(Exception):
     pass
+
+
+class MissingSequenceLengthError(Exception):
+    """
+    Raised when a feature crossing the origin cannot be resolved because the
+    length of its sequence is unknown.
+    """
+

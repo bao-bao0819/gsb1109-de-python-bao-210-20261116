@@ -435,12 +435,16 @@ def sanitize_gff_db(db, gid_field="gid"):
 
     Sanitizing means:
 
-    - Ensuring that start < stop for all features
+    - Ensuring that start < stop for all features, unless the database knows
+      the feature's sequence length and the feature crosses the origin of
+      a circular sequence (in which case ``start > end`` is meaningful and is
+      preserved)
     - Standardizing gene units by adding a 'gid' attribute
       that makes the file grep-able
 
     TODO: Do something with negative coordinates?
     """
+    sequence_lengths = getattr(db, "sequence_lengths", {})
 
     def sanitized_iterator():
         # Iterate through the database by each gene's records
@@ -448,15 +452,26 @@ def sanitize_gff_db(db, gid_field="gid"):
             # The gene's ID
             gene_id = gene_recs[0].id
             for rec in gene_recs:
-                # Fixup coordinates if necessary
+                # Fixup coordinates if necessary.  A wrapped feature with a
+                # known sequence length is a circular feature, not a mistake,
+                # so do not swap its endpoints.
                 if rec.start > rec.stop:
-                    rec.start, rec.stop = rec.stop, rec.start
+                    has_length = (
+                        rec.seqid in sequence_lengths or None in sequence_lengths
+                    )
+                    if not has_length:
+                        rec.start, rec.stop = rec.stop, rec.start
                 # Add a gene id field to each gene's records
                 rec.attributes[gid_field] = [gene_id]
                 yield rec
 
     # Return sanitized GFF database
-    sanitized_db = gffutils.create_db(sanitized_iterator(), ":memory:", verbose=False)
+    sanitized_db = gffutils.create_db(
+        sanitized_iterator(),
+        ":memory:",
+        verbose=False,
+        sequence_lengths=sequence_lengths,
+    )
     return sanitized_db
 
 

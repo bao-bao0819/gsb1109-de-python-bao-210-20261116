@@ -13,7 +13,9 @@ from gffutils import helpers
 from gffutils import feature
 from gffutils import interface
 from gffutils import iterators
+from gffutils import circular
 from gffutils.exceptions import EmptyInputError
+from gffutils.exceptions import MissingSequenceLengthError
 
 import logging
 
@@ -70,6 +72,7 @@ class _DBCreator(object):
         pragmas=constants.default_pragmas,
         _keep_tempfiles=False,
         directives=None,
+        sequence_lengths=None,
         **kwargs
     ):
         """
@@ -98,6 +101,7 @@ class _DBCreator(object):
         self.pragmas = pragmas
         self.merge_strategy = merge_strategy
         self.default_encoding = default_encoding
+        self.sequence_lengths = circular.load_sequence_lengths(sequence_lengths)
         if directives is None:
             directives = []
         self.directives = directives
@@ -485,14 +489,32 @@ class _DBCreator(object):
                       """,
             ((i,) for i in directives),
         )
-        c.execute(
-            """
-            INSERT INTO meta (version, dialect)
-            VALUES (:version, :dialect)""",
-            dict(
-                version=version.version, dialect=helpers._jsonify(self.iterator.dialect)
-            ),
-        )
+        sequence_lengths_json = circular.dump_sequence_lengths(self.sequence_lengths)
+        try:
+            c.execute(
+                """
+                INSERT INTO meta (version, dialect, sequence_lengths)
+                VALUES (:version, :dialect, :sequence_lengths)""",
+                dict(
+                    version=version.version,
+                    dialect=helpers._jsonify(self.iterator.dialect),
+                    sequence_lengths=sequence_lengths_json,
+                ),
+            )
+        except sqlite3.OperationalError:
+            # Databases created before sequence-length support have a meta
+            # table without this column (for example when updating an old db).
+            c.execute("ALTER TABLE meta ADD COLUMN sequence_lengths text")
+            c.execute(
+                """
+                INSERT INTO meta (version, dialect, sequence_lengths)
+                VALUES (:version, :dialect, :sequence_lengths)""",
+                dict(
+                    version=version.version,
+                    dialect=helpers._jsonify(self.iterator.dialect),
+                    sequence_lengths=sequence_lengths_json,
+                ),
+            )
 
         c.executemany(
             """
@@ -862,6 +884,61 @@ class _GTFDBCreator(_DBCreator):
         if self.verbose:
             logger.info(msg % i)
 
+    def _infer_extent(self, cursor, parent_id):
+        """
+        Infer the extent of `parent_id` from its `self.subfeature` children.
+
+        Ordinary features use the minimum start and maximum end.  If any child
+        crosses the origin and the sequence length is known, the smallest
+        circular interval containing all covered segments is used instead.
+        """
+        cursor.execute(
+            """
+            SELECT start, end, strand, seqid
+            FROM features
+            JOIN relations ON
+            features.id = relations.child
+            WHERE parent = ? AND featuretype == ?
+            """,
+            (parent_id, self.subfeature),
+        )
+        rows = cursor.fetchall()
+        if not rows:
+            return None
+
+        strand, seqid = rows[0][2], rows[0][3]
+        starts = [row[0] for row in rows]
+        ends = [row[1] for row in rows]
+        wrapped = [
+            (start, end)
+            for start, end in zip(starts, ends)
+            if start is not None and end is not None and start > end
+        ]
+
+        if not wrapped:
+            starts = [i for i in starts if i is not None]
+            ends = [i for i in ends if i is not None]
+            return min(starts), max(ends), strand, seqid
+
+        sequence_length = self.sequence_lengths.get(
+            seqid, self.sequence_lengths.get(None)
+        )
+        if sequence_length is None:
+            if len(rows) == 1:
+                return starts[0], ends[0], strand, seqid
+            raise MissingSequenceLengthError(
+                "Cannot infer the extent of %s without a sequence length; "
+                "its children cross the origin" % parent_id
+            )
+
+        segments = []
+        for start, end in zip(starts, ends):
+            segments.extend(circular.coverage_segments(start, end, sequence_length))
+        extent_start, extent_end = circular.circular_extent(
+            segments, sequence_length
+        )
+        return extent_start, extent_end, strand, seqid
+
     def _update_relations(self):
 
         if self.disable_infer_genes and self.disable_infer_transcripts:
@@ -950,17 +1027,12 @@ class _GTFDBCreator(_DBCreator):
 
                 if not self.disable_infer_transcripts:
                     # transcript extent
-                    c2.execute(
-                        """
-                        SELECT MIN(start), MAX(end), strand, seqid
-                        FROM features
-                        JOIN relations ON
-                        features.id = relations.child
-                        WHERE parent = ? AND featuretype == ?
-                        """,
-                        (transcript_id, self.subfeature),
-                    )
-                    transcript_start, transcript_end, strand, seqid = c2.fetchone()
+                    (
+                        transcript_start,
+                        transcript_end,
+                        strand,
+                        seqid,
+                    ) = self._infer_extent(c2, transcript_id)
                     transcript_attributes = {
                         self.transcript_key: [transcript_id],
                         self.gene_key: [gene_id],
@@ -1000,17 +1072,9 @@ class _GTFDBCreator(_DBCreator):
                     # for this gene; recall we sorted by gene id so this check
                     # works
                     if gene_id != last_gene_id:
-                        c2.execute(
-                            """
-                            SELECT MIN(start), MAX(end), strand, seqid
-                            FROM features
-                            JOIN relations ON
-                            features.id = relations.child
-                            WHERE parent = ? AND featuretype == ?
-                            """,
-                            (gene_id, self.subfeature),
+                        gene_start, gene_end, strand, seqid = self._infer_extent(
+                            c2, gene_id
                         )
-                        gene_start, gene_end, strand, seqid = c2.fetchone()
                         gene_attributes = {self.gene_key: [gene_id]}
                         gene_bin = bins.bins(gene_start, gene_end, one=True)
 
@@ -1123,6 +1187,7 @@ def create_db(
     infer_gene_extent=True,
     disable_infer_genes=False,
     disable_infer_transcripts=False,
+    sequence_lengths=None,
     **kwargs
 ):
     """
@@ -1344,6 +1409,20 @@ def create_db(
         as the suffix fo the tempfile. This can be useful for testing in
         parallel environments.
 
+    sequence_lengths : dict, int, str, path-like, or None
+        Lengths of the sequences (chromosomes, contigs) in the data.
+
+        This can be a ``{seqid: length}`` mapping, an iterable of
+        ``(seqid, length)`` pairs, a single integer used as a fallback for
+        every sequence, a path to a two-column chrom.sizes file, or a path to
+        a FASTA file.
+
+        Sequence lengths are stored in the database's ``meta`` table and are
+        needed to resolve features that cross the origin of a circular
+        sequence (stored with ``start > end``).  Without a length, such
+        features remain undecided rather than being interpreted by swapping
+        their endpoints.
+
     Returns
     -------
     New :class:`FeatureDB` object.
@@ -1409,6 +1488,7 @@ def create_db(
             pragmas=pragmas,
             sort_attribute_values=sort_attribute_values,
             text_factory=text_factory,
+            sequence_lengths=sequence_lengths,
         )
     else:
         db = interface.FeatureDB(
@@ -1417,6 +1497,7 @@ def create_db(
             pragmas=pragmas,
             sort_attribute_values=sort_attribute_values,
             text_factory=text_factory,
+            sequence_lengths=sequence_lengths,
         )
 
     return db

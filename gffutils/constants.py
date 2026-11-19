@@ -25,7 +25,8 @@ CREATE TABLE relations (
 
 CREATE TABLE meta (
     dialect text,
-    version text
+    version text,
+    sequence_lengths text
     );
 
 CREATE TABLE directives (

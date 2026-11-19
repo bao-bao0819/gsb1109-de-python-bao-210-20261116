@@ -4,6 +4,23 @@ Change log
 ==========
 
 
+Unreleased
+----------
+
+- Support features that cross the origin of circular sequences.  Such features
+  are stored with ``start > end`` and cover two segments
+  (``start..sequence_length`` and ``1..end``).  Sequence lengths can be given
+  to :func:`gffutils.create_db` or :class:`gffutils.FeatureDB` as a mapping, a
+  single integer, a chrom.sizes file, or a FASTA file, and are stored in the
+  database's ``meta`` table.  With lengths available, :meth:`FeatureDB.region`
+  accepts origin-crossing queries, returns each matching feature only once,
+  and ``len(feature)``/``Feature.segments`` reflect the actual covered bases.
+  Without a length the coordinates stay undecided:
+  :class:`gffutils.exceptions.MissingSequenceLengthError` is raised instead of
+  silently swapping the endpoints (which would select most of the
+  chromosome).  ``Feature.sequence()`` concatenates the wrapped segments in
+  transcription order.  See :mod:`gffutils.circular`.
+
 v0.14
 -----
 

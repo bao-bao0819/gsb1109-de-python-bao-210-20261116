@@ -52,6 +52,8 @@ Then, use the methods of :class:`FeatureDB` to interact:
     FeatureDB.execute
     FeatureDB.featuretypes
     FeatureDB.region
+    FeatureDB.sequence_length
+    FeatureDB.set_sequence_lengths
     FeatureDB.iter_by_parent_childs
 
 Modify a :class:`FeatureDB`:
@@ -100,6 +102,30 @@ You can extract the sequence for a feature:
     :nosignatures:
 
     Feature.sequence
+
+
+Circular sequences
+------------------
+Features on circular sequences that cross the origin are stored with
+``start > end``.  Providing sequence lengths (for example, a chrom.sizes or
+FASTA file) lets :mod:`gffutils` resolve the logical feature and the actual
+covered segments while preserving parent/child relations and strand:
+
+.. currentmodule:: gffutils.circular
+
+.. autosummary::
+    :toctree: autodocs
+    :nosignatures:
+
+    LogicalFeature
+    coverage_segments
+    covered_length
+    circular_extent
+    merge_segments
+    segments_overlap
+    segments_within
+    load_sequence_lengths
+    reverse_complement
 
 Creating a :class:`Feature` object:
 

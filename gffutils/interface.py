@@ -9,6 +9,8 @@ from gffutils import constants
 from gffutils import merge_criteria as mc
 from gffutils.feature import Feature
 from gffutils.exceptions import FeatureNotFoundError
+from gffutils.exceptions import MissingSequenceLengthError
+from gffutils import circular
 
 
 def assign_child(parent, child):
@@ -102,6 +104,7 @@ class FeatureDB(object):
         pragmas=constants.default_pragmas,
         sort_attribute_values=False,
         text_factory=str,
+        sequence_lengths=None,
     ):
         """
         Connect to a database created by :func:`gffutils.create_db`.
@@ -146,6 +149,21 @@ class FeatureDB(object):
             possibilities, and constants.default_pragmas for the defaults.
             These can be changed later using the :meth:`FeatureDB.set_pragmas`
             method.
+
+        sequence_lengths : dict, int, str, path-like, or None
+            Lengths of the sequences (chromosomes, contigs) in the database.
+
+            This can be a ``{seqid: length}`` mapping, an iterable of
+            ``(seqid, length)`` pairs, a single integer used as a fallback for
+            every sequence, a path to a two-column chrom.sizes file, or a path
+            to a FASTA file.
+
+            Sequence lengths are needed to resolve features that cross the
+            origin of a circular sequence and are therefore stored with
+            ``start > end``.  Without a length, such features remain
+            undecided rather than being silently interpreted by swapping the
+            endpoints.  Can also be provided by the database's ``meta`` table
+            (as set by :func:`gffutils.create_db`).
 
         Notes
         -----
@@ -203,6 +221,10 @@ class FeatureDB(object):
         self.version = version
         self.dialect = helpers._unjsonify(dialect)
 
+        self.sequence_lengths = circular.load_sequence_lengths(sequence_lengths)
+        if not self.sequence_lengths:
+            self.sequence_lengths = self._load_sequence_lengths_from_db()
+
         # Load directives from db
         c.execute(
             """
@@ -248,6 +270,65 @@ class FeatureDB(object):
         c.executescript(";\n".join(["PRAGMA %s=%s" % i for i in self.pragmas.items()]))
         self.conn.commit()
 
+    def _load_sequence_lengths_from_db(self):
+        """
+        Read sequence lengths stored in the database's ``meta`` table.
+
+        Databases created by :func:`gffutils.create_db` with
+        ``sequence_lengths`` will have a ``sequence_lengths`` row.  Older
+        databases simply have no such column, in which case an empty dict is
+        returned.
+        """
+        try:
+            c = self.conn.cursor()
+            c.execute("SELECT sequence_lengths FROM meta")
+        except sqlite3.OperationalError:
+            return {}
+        row = c.fetchone()
+        if row is None or row[0] is None:
+            return {}
+        lengths = helpers._unjsonify(row[0])
+        if "null" in lengths:
+            lengths[None] = lengths.pop("null")
+        return circular.load_sequence_lengths(lengths)
+
+    def sequence_length(self, seqid):
+        """
+        Return the length of `seqid`, or ``None`` if it is unknown.
+
+        See :attr:`FeatureDB.sequence_lengths`.
+        """
+        if seqid in self.sequence_lengths:
+            return self.sequence_lengths[seqid]
+        return self.sequence_lengths.get(None)
+
+    def set_sequence_lengths(self, sequence_lengths):
+        """
+        Set sequence lengths in memory and persist them to the database.
+
+        Parameters
+        ----------
+        sequence_lengths : dict, int, str, path-like, or None
+            Same accepted values as the ``sequence_lengths`` kwarg of
+            :class:`FeatureDB`.
+        """
+        self.sequence_lengths = circular.load_sequence_lengths(sequence_lengths)
+        c = self.conn.cursor()
+        try:
+            c.execute(
+                "UPDATE meta SET sequence_lengths = ?",
+                (circular.dump_sequence_lengths(self.sequence_lengths),),
+            )
+        except sqlite3.OperationalError:
+            # Databases created before sequence-length support lack the column.
+            c.execute("ALTER TABLE meta ADD COLUMN sequence_lengths text")
+            c.execute(
+                "UPDATE meta SET sequence_lengths = ?",
+                (circular.dump_sequence_lengths(self.sequence_lengths),),
+            )
+        self.conn.commit()
+        return self
+
     def _feature_returner(self, **kwargs):
         """
         Returns a feature, adding additional database-specific defaults
@@ -255,6 +336,8 @@ class FeatureDB(object):
         kwargs.setdefault("dialect", self.dialect)
         kwargs.setdefault("keep_order", self.keep_order)
         kwargs.setdefault("sort_attribute_values", self.sort_attribute_values)
+        if "sequence_length" not in kwargs:
+            kwargs["sequence_length"] = self.sequence_length(kwargs.get("seqid"))
         return Feature(**kwargs)
 
     def _analyzed(self):
@@ -682,6 +765,17 @@ class FeatureDB(object):
         BEDTools). Otherwise all features' start/stop coords need to be
         searched to see if they partially overlap the region of interest.
 
+        Features on circular sequences that cross the origin are stored with
+        ``start > end`` and cover ``start..sequence_length`` plus ``1..end``.
+        A query that spans the origin (``start > end``) is resolved into those
+        two segments; a feature hit through either segment is returned once.
+        Resolving such features requires a sequence length (see
+        :attr:`FeatureDB.sequence_lengths`).  Without one, wrapped coordinates
+        remain undecided: a wrapped *query* raises
+        :class:`~gffutils.exceptions.MissingSequenceLengthError` instead of
+        swapping the endpoints, and wrapped features are not silently
+        reinterpreted as their linear span.
+
         Examples
         --------
 
@@ -694,6 +788,9 @@ class FeatureDB(object):
         - `region("chr1:1-100", strand="+", completely_within=True)` returns
           only plus-strand features that completely fall within positions 1 to
           100 on chr1.
+
+        - On a 1000 bp circular sequence, `region("chr1:950-50")` returns
+          features overlapping positions 950-1000 or 1-50, each only once.
 
         Returns
         -------
@@ -727,60 +824,92 @@ class FeatureDB(object):
             else:
                 seqid, start, end = region[:3]
 
-        # e.g.,
-        #   completely_within=True..... start >= {start} AND end <= {end}
-        #   completely_within=False.... start <  {end}   AND end >  {start}
-        if completely_within:
-            start_op = ">="
-            end_op = "<="
-        else:
-            start_op = "<"
-            end_op = ">"
-            end, start = start, end
-
-        args = []
-        position_clause = []
-        if seqid is not None:
-            position_clause.append("seqid = ?")
-            args.append(seqid)
         if start is not None:
             start = int(start)
         if end is not None:
             end = int(end)
 
-        # See #129
-        if start and end and not completely_within:
-            position_clause.append(
-                """(
-                ({region_start} <= start AND {region_end} >= start) OR
-                ({region_start} >= start AND {region_end} <= end) OR
-                ({region_start} <= end AND {region_end} >= end)
-            )""".format(
-                    region_start=start, region_end=end
+        sequence_length = self.sequence_length(seqid) if seqid is not None else None
+
+        has_start = start is not None
+        has_end = end is not None
+        query_wrapped = has_start and has_end and start > end
+
+        query_segments = None
+        if query_wrapped:
+            # A query crossing the origin is two segments, not the linear span
+            # obtained by swapping the endpoints.  Without a sequence length
+            # its coverage is undecided.
+            query_segments = circular.coverage_segments(start, end, sequence_length)
+
+        args = []
+        clauses = []
+        if seqid is not None:
+            clauses.append("seqid = ?")
+            args.append(seqid)
+
+        if query_segments is not None:
+            # Use a broad overlap test for both linear and wrapped features;
+            # the exact circular predicate is applied after fetching.
+            segment_clauses = []
+            for seg_start, seg_end in query_segments:
+                segment_clauses.append(
+                    "(start <= end AND start <= ? AND end >= ?)"
                 )
-            )
+                args.extend([seg_end, seg_start])
+            segment_clauses.append("(start > end)")
+            clauses.append("(" + " OR ".join(segment_clauses) + ")")
+
+        elif has_start and has_end:
+            if completely_within:
+                linear_clause = "(start <= end AND start >= ? AND end <= ?)"
+                args.extend([start, end])
+            else:
+                linear_clause = "(start <= end AND start <= ? AND end >= ?)"
+                args.extend([end, start])
+
+            # Wrapped features are always candidates; they are resolved (or
+            # reported as undecided) below using their actual segments.
+            clauses.append("(%s OR start > end)" % linear_clause)
+
+        elif has_start:
+            if completely_within:
+                linear_clause = "(start <= end AND start >= ?)"
+            else:
+                linear_clause = "(start <= end AND end > ?)"
+            args.append(start)
+            clauses.append("(%s OR start > end)" % linear_clause)
+
+        elif has_end:
+            if completely_within:
+                linear_clause = "(start <= end AND end <= ?)"
+            else:
+                linear_clause = "(start <= end AND start < ?)"
+            args.append(end)
+            clauses.append("(%s OR start > end)" % linear_clause)
+
+        if clauses:
+            position_clause = " AND ".join(clauses)
         else:
-            if start:
-                position_clause.append("start %s ?" % start_op)
-                args.append(start)
-            if end:
-                position_clause.append("end %s ?" % end_op)
-                args.append(end)
+            position_clause = "1"
 
-        position_clause = " AND ".join(position_clause)
-
-        # Only use bins if we have defined boundaries and completely_within is
-        # True. Otherwise you can't know how far away a feature stretches
-        # (which means bins are not computable ahead of time)
+        # For linear completely-within queries, the UCSC bin optimization can
+        # narrow the search.  Features crossing the origin have bin 1, which is
+        # always part of the overlapping-bin set, so they remain candidates.
         _bin_clause = ""
-        if (start is not None) and (end is not None) and completely_within:
-            if start <= bins.MAX_CHROM_SIZE and end <= bins.MAX_CHROM_SIZE:
-                _bins = list(bins.bins(start, end, one=False))
-                # See issue #45
-                if len(_bins) < 900:
-                    _bin_clause = " or ".join(["bin = ?" for _ in _bins])
-                    _bin_clause = "AND ( %s )" % _bin_clause
-                    args += _bins
+        if (
+            completely_within
+            and has_start
+            and has_end
+            and not query_wrapped
+            and start <= bins.MAX_CHROM_SIZE
+            and end <= bins.MAX_CHROM_SIZE
+        ):
+            _bins = list(bins.bins(start, end, one=False))
+            # See issue #45
+            if len(_bins) < 900:
+                _bin_clause = " AND (%s)" % " or ".join(["bin = ?" for _ in _bins])
+                args.extend(_bins)
 
         query = " ".join([constants._SELECT, "WHERE ", position_clause, _bin_clause])
 
@@ -807,8 +936,85 @@ class FeatureDB(object):
             "region": region,
         }
         c.execute(query, tuple(args))
+
+        def _matches_wrapped(feature_segments):
+            if query_segments is not None:
+                if completely_within:
+                    return circular.segments_within(
+                        feature_segments, query_segments
+                    )
+                return circular.segments_overlap(feature_segments, query_segments)
+
+            if has_start and has_end:
+                if completely_within:
+                    return circular.segments_within(
+                        feature_segments, ((start, end),)
+                    )
+                return circular.segments_overlap(feature_segments, ((start, end),))
+
+            if has_start:
+                if completely_within:
+                    return all(s >= start for s, e in feature_segments)
+                return any(e > start for s, e in feature_segments)
+
+            if has_end:
+                if completely_within:
+                    return all(e <= end for s, e in feature_segments)
+                return any(s < end for s, e in feature_segments)
+
+            return True
+
+        seen = set()
+
+        def _provably_outside(feature):
+            if query_segments is not None:
+                return circular.definitely_disjoint(
+                    feature.start, feature.end, query_segments
+                )
+            if has_start and has_end:
+                return circular.definitely_disjoint(
+                    feature.start, feature.end, ((start, end),)
+                )
+            # An open-ended query ("everything at or after X" / "at or before
+            # Y") always reaches the origin via one of the feature's two
+            # segments, so a wrapped feature cannot be ruled out without a
+            # sequence length.
+            return False
+
         for i in c:
-            yield self._feature_returner(**i)
+            f = self._feature_returner(**i)
+
+            # A single feature may match through more than one covered
+            # segment; report it only once.
+            if f.id in seen:
+                continue
+
+            is_wrapped = (
+                f.start is not None and f.end is not None and f.start > f.end
+            )
+
+            if (is_wrapped or query_segments is not None) and (
+                has_start or has_end
+            ):
+                if is_wrapped and f.sequence_length is None:
+                    # If the feature is provably outside the query, skip it.
+                    # Otherwise its coverage is undecided: dropping it would
+                    # lose the feature, and swapping its endpoints would
+                    # select most of the chromosome.
+                    if _provably_outside(f):
+                        continue
+                    raise MissingSequenceLengthError(
+                        "Cannot resolve %s:%s-%s in the query; provide a "
+                        "sequence length for %s"
+                        % (f.seqid, f.start, f.end, f.seqid)
+                    )
+                feature_segments = f.segments
+
+                if not _matches_wrapped(feature_segments):
+                    continue
+
+            seen.add(f.id)
+            yield f
 
     def interfeatures(
         self,
@@ -1111,13 +1317,21 @@ class FeatureDB(object):
             if "id_spec" not in kwargs:
                 kwargs["id_spec"] = {"gene": "gene_id", "transcript": "transcript_id"}
             db = create._GTFDBCreator(
-                data=data, dbfn=self.dbfn, dialect=self.dialect, **kwargs
+                data=data,
+                dbfn=self.dbfn,
+                dialect=self.dialect,
+                sequence_lengths=self.sequence_lengths,
+                **kwargs
             )
         elif self.dialect["fmt"] == "gff3":
             if "id_spec" not in kwargs:
                 kwargs["id_spec"] = "ID"
             db = create._GFFDBCreator(
-                data=data, dbfn=self.dbfn, dialect=self.dialect, **kwargs
+                data=data,
+                dbfn=self.dbfn,
+                dialect=self.dialect,
+                sequence_lengths=self.sequence_lengths,
+                **kwargs
             )
 
         else:
@@ -1835,7 +2049,15 @@ class FeatureDB(object):
 
         total = 0
         for child in children:
-            total += len(child)
+            try:
+                total += len(child)
+            except MissingSequenceLengthError:
+                # A child crossing the origin with unknown sequence length
+                # cannot contribute an exact bp count.
+                raise MissingSequenceLengthError(
+                    "Cannot compute bp for %s without a sequence length; "
+                    "it crosses the origin" % child.id
+                )
         return total
 
     def bed12(

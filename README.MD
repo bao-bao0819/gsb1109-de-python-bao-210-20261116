@@ -72,10 +72,42 @@ Wanted
   - Bug reports.
   - Feedback.
 
-python-registry was originally developed to scratch one of
-the author's itches.  Now he hopes it can be of use to
-someone outside of his lonely NYC apartment.
+Comparing and migrating names across snapshots
+-----------------------------------------------
+`Registry.RegistryName` keeps each stored name together with its raw bytes
+and storage format (compressed Windows-1252 or UTF-16LE).  Comparison uses
+that format and an upcase mapping, not `str.lower`: a name stored compressed
+folds only its ASCII letters, while an uncompressed name folds by code point.
+A query string has no storage format, so it is considered in both forms.
 
+`Registry.RegistryDiff` builds a rename mapping for one level, either the
+sibling subkeys of a key or the values of one key.  Entries are matched by
+identity, so a rename does not change which entities correspond.
+Destination-only entries act as blockers and are never overwritten.
+
+    import Registry
+    from Registry import RegistryDiff
+
+    old = Registry.Registry("old.hive").open("Software\\Vendor")
+    new = Registry.Registry("new.hive").open("Software\\Vendor")
+
+    source = RegistryDiff.Snapshot.from_key(old, kind="key")
+    destination = RegistryDiff.Snapshot.from_key(new, kind="key")
+    plan = RegistryDiff.plan_renames(source, destination=destination)
+
+    for intent in plan.accepted_intents():
+        print(intent.old_name.text, "->", intent.new_name.text)
+    for group in plan.conflict_groups():
+        print("needs manual unbinding:", group.names)
+    for component in plan.components():
+        print("independent component:", component.is_complete())
+
+The plan reports the minimum number of renames that must be unbound by hand,
+groups the rest into components that can be migrated independently, and emits
+ordered steps.  A rename cycle is broken with a temporary name rather than
+overwriting an entry, and unbound or untouched entries keep their original
+Name objects and bytes.  All decisions are made after a canonical sort, so the
+order in which intents are supplied does not choose the winner.
 
 License
 -------

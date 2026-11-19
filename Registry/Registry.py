@@ -23,6 +23,7 @@ import ntpath
 from enum import Enum
 
 from . import RegistryParse
+from . import RegistryName
 
 RegSZ = 0x0001
 RegExpandSZ = 0x0002
@@ -98,10 +99,58 @@ class RegistryValueNotFoundException(RegistryParse.RegistryStructureDoesNotExist
     def __str__(self):
         return "Registry value not found: %s" % (self._value)
 
+
+class RegistryAmbiguousNameException(RegistryParse.RegistryException):
+    """
+    Raised when a lookup matches more than one stored name at the same level.
+
+    Two sibling names may differ in their stored bytes yet fold to the same
+    Windows lookup key.  Returning either one would make the result depend on
+    traversal order, so the ambiguity is reported instead.
+    """
+    def __init__(self, path, query, candidates):
+        super(RegistryAmbiguousNameException, self).__init__(query)
+        self._path = path
+        self._query = query
+        self._candidates = candidates
+
+    def path(self):
+        return self._path
+
+    def query(self):
+        return self._query
+
+    def candidates(self):
+        return list(self._candidates)
+
+    def __str__(self):
+        return "Ambiguous registry name %r under %s: %s" % (
+            self._query, self._path,
+            ", ".join(sorted(self._candidates)))
+
+
+def _matching_subkeys(nkrecord, name):
+    matches = []
+    for k in nkrecord.subkey_list().keys():
+        if RegistryName.query_matches(k.name(), k.has_ascii_name(), name,
+                                      RegistryName.NAME_KEY):
+            matches.append(k)
+    return matches
+
+
+def _matching_values(nkrecord, name):
+    matches = []
+    for v in nkrecord.values_list().values():
+        if RegistryName.query_matches(v.name(), v.has_ascii_name(), name,
+                                      RegistryName.NAME_VALUE,
+                                      present=v.has_name()):
+            matches.append(v)
+    return matches
+
 class RegistryValue(object):
     """
     This is a high level structure for working with the Windows Registry.
-    It represents the 3-tuple of (name, type, value) associated with 
+    It represents the 3-tuple of (name, type, value) associated with
       a registry value.
     """
     def __init__(self, vkrecord):
@@ -109,7 +158,7 @@ class RegistryValue(object):
 
     def __repr__(self):
         return 'RegistryValue(name="{0}", value="{1}", type="{2}")'.format(self.name(), self.value(), self.value_type_str())
-        
+
     def name(self):
         """
         Get the name of the value as a string.
@@ -119,6 +168,28 @@ class RegistryValue(object):
             return self._vkrecord.name()
         else:
             return  "(default)"
+
+    def name_bytes(self):
+        """
+        Get the raw bytes of the value name as stored in the hive.
+        The default value has no name and returns the empty byte string.
+        """
+        return self._vkrecord.name_bytes()
+
+    def name_is_ascii(self):
+        """
+        Is the value name stored in the compressed (ASCII/Windows-1252) form?
+        The default value reports True, since it has no encoded name.
+        """
+        if not self._vkrecord.has_name():
+            return True
+        return self._vkrecord.has_ascii_name()
+
+    def registry_name(self):
+        """
+        Get the value name as a RegistryName.Name, retaining the raw bytes.
+        """
+        return RegistryName.Name.from_value_record(self._vkrecord)
 
     def value_type(self):
         """
@@ -278,6 +349,24 @@ class RegistryKey(object):
         """
         return self._nkrecord.name()
 
+    def name_bytes(self):
+        """
+        Get the raw bytes of the key name as stored in the hive.
+        """
+        return self._nkrecord.name_bytes()
+
+    def name_is_ascii(self):
+        """
+        Is the key name stored in the compressed (ASCII/Windows-1252) form?
+        """
+        return self._nkrecord.has_ascii_name()
+
+    def registry_name(self):
+        """
+        Get the key name as a RegistryName.Name, retaining the raw bytes.
+        """
+        return RegistryName.Name.from_key_record(self._nkrecord)
+
     def path(self):
         """
         Get the full path of the RegistryKey as a string.
@@ -314,15 +403,20 @@ class RegistryKey(object):
     def subkey(self, name):
         """
         Return the subkey with a given name as a RegistryKey.
-        Raises RegistryKeyNotFoundException if the subkey with 
+        Raises RegistryKeyNotFoundException if the subkey with
           the given name does not exist.
+        Raises RegistryAmbiguousNameException if more than one stored
+          subkey matches the name.
         """
         if self._nkrecord.subkey_number() == 0:
             raise RegistryKeyNotFoundException(self.path() + "\\" + name)
 
-        for k in self._nkrecord.subkey_list().keys():
-            if k.name().lower() == name.lower():
-                return RegistryKey(k)
+        matches = _matching_subkeys(self._nkrecord, name)
+        if len(matches) == 1:
+            return RegistryKey(matches[0])
+        if len(matches) > 1:
+            raise RegistryAmbiguousNameException(
+                self.path(), name, [k.name() for k in matches])
         raise RegistryKeyNotFoundException(self.path() + "\\" + name)
 
     def values(self):
@@ -340,17 +434,23 @@ class RegistryKey(object):
     def value(self, name):
         """
         Return the value with the given name as a RegistryValue.
-        Raises RegistryValueNotFoundExceptiono if the value with
+        Raises RegistryValueNotFoundException if the value with
           the given name does not exist.
+        Raises RegistryAmbiguousNameException if more than one stored
+          value matches the name.
         """
         if name == "(default)":
             name = ""
         try:
-            for v in self._nkrecord.values_list().values():
-                if v.name().lower() == name.lower():
-                    return RegistryValue(v)
+            matches = _matching_values(self._nkrecord, name)
         except RegistryParse.RegistryStructureDoesNotExist:
             raise RegistryValueNotFoundException(self.path() + " : " + name)
+
+        if len(matches) == 1:
+            return RegistryValue(matches[0])
+        if len(matches) > 1:
+            raise RegistryAmbiguousNameException(
+                self.path(), name, [v.name() for v in matches])
         raise RegistryValueNotFoundException(self.path() + " : " + name)
 
     def find_key(self, path):

@@ -973,6 +973,16 @@ class VKRecord(Record):
         """
         return self.unpack_word(0x10) & 1 == 1
 
+    def name_bytes(self):
+        """
+        Get the raw bytes of the name, without decoding or trimming them.
+        If the value has no name, the empty byte string is returned.
+        @return: byte string containing the stored name
+        """
+        if not self.has_name():
+            return b""
+        return self.unpack_string(0x14, self.unpack_word(0x2))
+
     def name(self):
         """
         Get the name, if it exists. If not, the empty string is returned.
@@ -1529,6 +1539,13 @@ class NKRecord(Record):
 
     def has_ascii_name(self):
         return self.unpack_word(0x2) & 0x0020 > 0
+
+    def name_bytes(self):
+        """
+        Return the raw bytes of the key name, without decoding or trimming.
+        @return: byte string containing the stored name
+        """
+        return self.unpack_string(0x4C, self.unpack_word(0x48))
 
     def name(self):
         """

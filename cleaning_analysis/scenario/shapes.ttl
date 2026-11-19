@@ -1,0 +1,23 @@
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix : <http://example.org/hr#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+# 一个 NodeShape 挂两个具名 PropertyShape，便于在证据中稳定引用 sourceShape。
+:PersonShape a sh:NodeShape ;
+    sh:targetClass :Person ;
+    sh:property :NameShape , :AgeShape .
+
+:NameShape a sh:PropertyShape ;
+    sh:path :name ;
+    sh:minCount 1 ;
+    sh:datatype xsd:string .
+
+# 四个约束共享同一条 :age 路径上的值集合：
+#   计数类 minCount/maxCount 看“有几个值”，取值类 datatype/minInclusive 看“每个值本身”。
+# 删除一条 :age 关系会同时改变这两类约束的判定，这正是共同依赖的来源。
+:AgeShape a sh:PropertyShape ;
+    sh:path :age ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:datatype xsd:integer ;
+    sh:minInclusive 18 .

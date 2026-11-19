@@ -1,0 +1,448 @@
+{
+  "baseline": {
+    "conforms": false,
+    "fingerprint": "e925b6d1f2c612e49271e56a7bfe8194ca06c31db88553175658eb88792d6606",
+    "violationCount": 4,
+    "violations": [
+      {
+        "focusNode": "http://example.org/hr#alice",
+        "resultMessage": "Value is not >= Literal(\"18\", datatype=xsd:integer)",
+        "resultPath": "http://example.org/hr#age",
+        "sourceConstraintComponent": "http://www.w3.org/ns/shacl#MinInclusiveConstraintComponent",
+        "sourceShape": "http://example.org/hr#AgeShape",
+        "value": "17"
+      },
+      {
+        "focusNode": "http://example.org/hr#alice",
+        "resultMessage": "Value is not Literal with datatype xsd:integer",
+        "resultPath": "http://example.org/hr#age",
+        "sourceConstraintComponent": "http://www.w3.org/ns/shacl#DatatypeConstraintComponent",
+        "sourceShape": "http://example.org/hr#AgeShape",
+        "value": "17"
+      },
+      {
+        "focusNode": "http://example.org/hr#bob",
+        "resultMessage": "Less than 1 values on :bob->:name",
+        "resultPath": "http://example.org/hr#name",
+        "sourceConstraintComponent": "http://www.w3.org/ns/shacl#MinCountConstraintComponent",
+        "sourceShape": "http://example.org/hr#NameShape",
+        "value": ""
+      },
+      {
+        "focusNode": "http://example.org/hr#alice",
+        "resultMessage": "More than 1 values on :alice->:age",
+        "resultPath": "http://example.org/hr#age",
+        "sourceConstraintComponent": "http://www.w3.org/ns/shacl#MaxCountConstraintComponent",
+        "sourceShape": "http://example.org/hr#AgeShape",
+        "value": ""
+      }
+    ]
+  },
+  "candidates": [
+    {
+      "conforms": false,
+      "constraintImpact": {
+        "http://example.org/hr#alice http://example.org/hr#age": {
+          "components": {
+            "DatatypeConstraintComponent": {
+              "after": "PASS",
+              "baseline": "FAIL",
+              "parameter": "http://www.w3.org/2001/XMLSchema#integer"
+            },
+            "MaxCountConstraintComponent": {
+              "after": "PASS",
+              "baseline": "FAIL",
+              "parameter": "1"
+            },
+            "MinCountConstraintComponent": {
+              "after": "PASS",
+              "baseline": "PASS",
+              "parameter": "1"
+            },
+            "MinInclusiveConstraintComponent": {
+              "after": "PASS",
+              "baseline": "FAIL",
+              "parameter": "18"
+            }
+          },
+          "focusNode": "http://example.org/hr#alice",
+          "path": "http://example.org/hr#age",
+          "propertyShape": "http://example.org/hr#AgeShape"
+        }
+      },
+      "counts": {
+        "introduced": 0,
+        "netViolationChange": -3,
+        "removed": 3,
+        "retained": 1
+      },
+      "deletedTriples": [
+        [
+          "http://example.org/hr#alice",
+          "http://example.org/hr#age",
+          "17"
+        ]
+      ],
+      "description": "删除 alice 的坏年龄关系 :age \"17\"（字符串、低于 18）",
+      "fingerprint": "164e33ef2af5cd2af48ad49e416d56f997fdea6ae0c0a910e4378681a9edbcde",
+      "id": "C1",
+      "introducedViolations": [],
+      "removedViolations": [
+        {
+          "focusNode": "http://example.org/hr#alice",
+          "resultMessage": "Value is not >= Literal(\"18\", datatype=xsd:integer)",
+          "resultPath": "http://example.org/hr#age",
+          "sourceConstraintComponent": "http://www.w3.org/ns/shacl#MinInclusiveConstraintComponent",
+          "sourceShape": "http://example.org/hr#AgeShape",
+          "value": "17"
+        },
+        {
+          "focusNode": "http://example.org/hr#alice",
+          "resultMessage": "Value is not Literal with datatype xsd:integer",
+          "resultPath": "http://example.org/hr#age",
+          "sourceConstraintComponent": "http://www.w3.org/ns/shacl#DatatypeConstraintComponent",
+          "sourceShape": "http://example.org/hr#AgeShape",
+          "value": "17"
+        },
+        {
+          "focusNode": "http://example.org/hr#alice",
+          "resultMessage": "More than 1 values on :alice->:age",
+          "resultPath": "http://example.org/hr#age",
+          "sourceConstraintComponent": "http://www.w3.org/ns/shacl#MaxCountConstraintComponent",
+          "sourceShape": "http://example.org/hr#AgeShape",
+          "value": ""
+        }
+      ],
+      "retainedViolations": [
+        {
+          "focusNode": "http://example.org/hr#bob",
+          "resultMessage": "Less than 1 values on :bob->:name",
+          "resultPath": "http://example.org/hr#name",
+          "sourceConstraintComponent": "http://www.w3.org/ns/shacl#MinCountConstraintComponent",
+          "sourceShape": "http://example.org/hr#NameShape",
+          "value": ""
+        }
+      ]
+    },
+    {
+      "conforms": false,
+      "constraintImpact": {
+        "http://example.org/hr#alice http://example.org/hr#age": {
+          "components": {
+            "DatatypeConstraintComponent": {
+              "after": "FAIL",
+              "baseline": "FAIL",
+              "parameter": "http://www.w3.org/2001/XMLSchema#integer"
+            },
+            "MaxCountConstraintComponent": {
+              "after": "PASS",
+              "baseline": "FAIL",
+              "parameter": "1"
+            },
+            "MinCountConstraintComponent": {
+              "after": "PASS",
+              "baseline": "PASS",
+              "parameter": "1"
+            },
+            "MinInclusiveConstraintComponent": {
+              "after": "FAIL",
+              "baseline": "FAIL",
+              "parameter": "18"
+            }
+          },
+          "focusNode": "http://example.org/hr#alice",
+          "path": "http://example.org/hr#age",
+          "propertyShape": "http://example.org/hr#AgeShape"
+        }
+      },
+      "counts": {
+        "introduced": 0,
+        "netViolationChange": -1,
+        "removed": 1,
+        "retained": 3
+      },
+      "deletedTriples": [
+        [
+          "http://example.org/hr#alice",
+          "http://example.org/hr#age",
+          "19"
+        ]
+      ],
+      "description": "删除 alice 的好年龄关系 :age 19（合法整数）",
+      "fingerprint": "3ac3621d61ee0f3f557a1d854e129181add33c343659945ef6850c71cdf977f2",
+      "id": "C2",
+      "introducedViolations": [],
+      "removedViolations": [
+        {
+          "focusNode": "http://example.org/hr#alice",
+          "resultMessage": "More than 1 values on :alice->:age",
+          "resultPath": "http://example.org/hr#age",
+          "sourceConstraintComponent": "http://www.w3.org/ns/shacl#MaxCountConstraintComponent",
+          "sourceShape": "http://example.org/hr#AgeShape",
+          "value": ""
+        }
+      ],
+      "retainedViolations": [
+        {
+          "focusNode": "http://example.org/hr#alice",
+          "resultMessage": "Value is not >= Literal(\"18\", datatype=xsd:integer)",
+          "resultPath": "http://example.org/hr#age",
+          "sourceConstraintComponent": "http://www.w3.org/ns/shacl#MinInclusiveConstraintComponent",
+          "sourceShape": "http://example.org/hr#AgeShape",
+          "value": "17"
+        },
+        {
+          "focusNode": "http://example.org/hr#alice",
+          "resultMessage": "Value is not Literal with datatype xsd:integer",
+          "resultPath": "http://example.org/hr#age",
+          "sourceConstraintComponent": "http://www.w3.org/ns/shacl#DatatypeConstraintComponent",
+          "sourceShape": "http://example.org/hr#AgeShape",
+          "value": "17"
+        },
+        {
+          "focusNode": "http://example.org/hr#bob",
+          "resultMessage": "Less than 1 values on :bob->:name",
+          "resultPath": "http://example.org/hr#name",
+          "sourceConstraintComponent": "http://www.w3.org/ns/shacl#MinCountConstraintComponent",
+          "sourceShape": "http://example.org/hr#NameShape",
+          "value": ""
+        }
+      ]
+    },
+    {
+      "conforms": false,
+      "constraintImpact": {
+        "http://example.org/hr#bob http://example.org/hr#age": {
+          "components": {
+            "DatatypeConstraintComponent": {
+              "after": "PASS",
+              "baseline": "PASS",
+              "parameter": "http://www.w3.org/2001/XMLSchema#integer"
+            },
+            "MaxCountConstraintComponent": {
+              "after": "PASS",
+              "baseline": "PASS",
+              "parameter": "1"
+            },
+            "MinCountConstraintComponent": {
+              "after": "FAIL",
+              "baseline": "PASS",
+              "parameter": "1"
+            },
+            "MinInclusiveConstraintComponent": {
+              "after": "PASS",
+              "baseline": "PASS",
+              "parameter": "18"
+            }
+          },
+          "focusNode": "http://example.org/hr#bob",
+          "path": "http://example.org/hr#age",
+          "propertyShape": "http://example.org/hr#AgeShape"
+        }
+      },
+      "counts": {
+        "introduced": 1,
+        "netViolationChange": 1,
+        "removed": 0,
+        "retained": 4
+      },
+      "deletedTriples": [
+        [
+          "http://example.org/hr#bob",
+          "http://example.org/hr#age",
+          "20"
+        ]
+      ],
+      "description": "删除 bob 唯一的 :age 20，触发必填缺失",
+      "fingerprint": "d42bedc0f17944e89e62f679b00199432931067ba34795732f28af39a7e4befb",
+      "id": "C3",
+      "introducedViolations": [
+        {
+          "focusNode": "http://example.org/hr#bob",
+          "resultMessage": "Less than 1 values on :bob->:age",
+          "resultPath": "http://example.org/hr#age",
+          "sourceConstraintComponent": "http://www.w3.org/ns/shacl#MinCountConstraintComponent",
+          "sourceShape": "http://example.org/hr#AgeShape",
+          "value": ""
+        }
+      ],
+      "removedViolations": [],
+      "retainedViolations": [
+        {
+          "focusNode": "http://example.org/hr#alice",
+          "resultMessage": "Value is not >= Literal(\"18\", datatype=xsd:integer)",
+          "resultPath": "http://example.org/hr#age",
+          "sourceConstraintComponent": "http://www.w3.org/ns/shacl#MinInclusiveConstraintComponent",
+          "sourceShape": "http://example.org/hr#AgeShape",
+          "value": "17"
+        },
+        {
+          "focusNode": "http://example.org/hr#alice",
+          "resultMessage": "Value is not Literal with datatype xsd:integer",
+          "resultPath": "http://example.org/hr#age",
+          "sourceConstraintComponent": "http://www.w3.org/ns/shacl#DatatypeConstraintComponent",
+          "sourceShape": "http://example.org/hr#AgeShape",
+          "value": "17"
+        },
+        {
+          "focusNode": "http://example.org/hr#bob",
+          "resultMessage": "Less than 1 values on :bob->:name",
+          "resultPath": "http://example.org/hr#name",
+          "sourceConstraintComponent": "http://www.w3.org/ns/shacl#MinCountConstraintComponent",
+          "sourceShape": "http://example.org/hr#NameShape",
+          "value": ""
+        },
+        {
+          "focusNode": "http://example.org/hr#alice",
+          "resultMessage": "More than 1 values on :alice->:age",
+          "resultPath": "http://example.org/hr#age",
+          "sourceConstraintComponent": "http://www.w3.org/ns/shacl#MaxCountConstraintComponent",
+          "sourceShape": "http://example.org/hr#AgeShape",
+          "value": ""
+        }
+      ]
+    }
+  ],
+  "combinations": [
+    {
+      "actual": {
+        "introduced": [
+          {
+            "focusNode": "http://example.org/hr#alice",
+            "resultMessage": "Less than 1 values on :alice->:age",
+            "resultPath": "http://example.org/hr#age",
+            "sourceConstraintComponent": "http://www.w3.org/ns/shacl#MinCountConstraintComponent",
+            "sourceShape": "http://example.org/hr#AgeShape",
+            "value": ""
+          }
+        ],
+        "removed": [
+          {
+            "focusNode": "http://example.org/hr#alice",
+            "resultMessage": "Value is not >= Literal(\"18\", datatype=xsd:integer)",
+            "resultPath": "http://example.org/hr#age",
+            "sourceConstraintComponent": "http://www.w3.org/ns/shacl#MinInclusiveConstraintComponent",
+            "sourceShape": "http://example.org/hr#AgeShape",
+            "value": "17"
+          },
+          {
+            "focusNode": "http://example.org/hr#alice",
+            "resultMessage": "Value is not Literal with datatype xsd:integer",
+            "resultPath": "http://example.org/hr#age",
+            "sourceConstraintComponent": "http://www.w3.org/ns/shacl#DatatypeConstraintComponent",
+            "sourceShape": "http://example.org/hr#AgeShape",
+            "value": "17"
+          },
+          {
+            "focusNode": "http://example.org/hr#alice",
+            "resultMessage": "More than 1 values on :alice->:age",
+            "resultPath": "http://example.org/hr#age",
+            "sourceConstraintComponent": "http://www.w3.org/ns/shacl#MaxCountConstraintComponent",
+            "sourceShape": "http://example.org/hr#AgeShape",
+            "value": ""
+          }
+        ],
+        "retained": [
+          {
+            "focusNode": "http://example.org/hr#bob",
+            "resultMessage": "Less than 1 values on :bob->:name",
+            "resultPath": "http://example.org/hr#name",
+            "sourceConstraintComponent": "http://www.w3.org/ns/shacl#MinCountConstraintComponent",
+            "sourceShape": "http://example.org/hr#NameShape",
+            "value": ""
+          }
+        ]
+      },
+      "additive": false,
+      "conforms": false,
+      "deletedTriples": [
+        [
+          "http://example.org/hr#alice",
+          "http://example.org/hr#age",
+          "17"
+        ],
+        [
+          "http://example.org/hr#alice",
+          "http://example.org/hr#age",
+          "19"
+        ]
+      ],
+      "description": "同时删除 alice 的两条 :age（共同依赖与组合不可加的核心案例）",
+      "fingerprint": "e7e5896bae85d924158f41002da7e0d2fdb80a9f7f55ac5e59aa9cabc1f3c10a",
+      "id": "COMBO_C1_C2",
+      "memberCandidates": [
+        "C1",
+        "C2"
+      ],
+      "naiveSum": {
+        "introduced": [],
+        "removed": [
+          {
+            "focusNode": "http://example.org/hr#alice",
+            "resultMessage": "Value is not >= Literal(\"18\", datatype=xsd:integer)",
+            "resultPath": "http://example.org/hr#age",
+            "sourceConstraintComponent": "http://www.w3.org/ns/shacl#MinInclusiveConstraintComponent",
+            "sourceShape": "http://example.org/hr#AgeShape",
+            "value": "17"
+          },
+          {
+            "focusNode": "http://example.org/hr#alice",
+            "resultMessage": "Value is not Literal with datatype xsd:integer",
+            "resultPath": "http://example.org/hr#age",
+            "sourceConstraintComponent": "http://www.w3.org/ns/shacl#DatatypeConstraintComponent",
+            "sourceShape": "http://example.org/hr#AgeShape",
+            "value": "17"
+          },
+          {
+            "focusNode": "http://example.org/hr#alice",
+            "resultMessage": "More than 1 values on :alice->:age",
+            "resultPath": "http://example.org/hr#age",
+            "sourceConstraintComponent": "http://www.w3.org/ns/shacl#MaxCountConstraintComponent",
+            "sourceShape": "http://example.org/hr#AgeShape",
+            "value": ""
+          }
+        ]
+      },
+      "nonAdditivity": {
+        "introducedActualButMissedByNaiveSum": [
+          {
+            "focusNode": "http://example.org/hr#alice",
+            "resultMessage": "Less than 1 values on :alice->:age",
+            "resultPath": "http://example.org/hr#age",
+            "sourceConstraintComponent": "http://www.w3.org/ns/shacl#MinCountConstraintComponent",
+            "sourceShape": "http://example.org/hr#AgeShape",
+            "value": ""
+          }
+        ],
+        "introducedClaimedByNaiveSumButNotActual": [],
+        "removedActualButMissedByNaiveSum": [],
+        "removedClaimedByNaiveSumButNotActual": []
+      }
+    }
+  ],
+  "scenario": {
+    "candidates": "scenario/candidates.json",
+    "dataGraph": "scenario/data.ttl",
+    "shapesGraph": "scenario/shapes.ttl"
+  },
+  "sharedDependencies": [
+    {
+      "constraints": {
+        "DatatypeConstraintComponent": "http://www.w3.org/2001/XMLSchema#integer",
+        "MaxCountConstraintComponent": "1",
+        "MinCountConstraintComponent": "1",
+        "MinInclusiveConstraintComponent": "18"
+      },
+      "path": "http://example.org/hr#age",
+      "propertyShape": "http://example.org/hr#AgeShape"
+    },
+    {
+      "constraints": {
+        "DatatypeConstraintComponent": "http://www.w3.org/2001/XMLSchema#string",
+        "MinCountConstraintComponent": "1"
+      },
+      "path": "http://example.org/hr#name",
+      "propertyShape": "http://example.org/hr#NameShape"
+    }
+  ]
+}

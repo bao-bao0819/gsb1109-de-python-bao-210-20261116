@@ -1,0 +1,17 @@
+@prefix : <http://example.org/hr#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+# alice 的 :age 有两个值：合法整数 19 与非法字符串 "17"。
+# 这一条坏关系同时触发 maxCount / datatype / minInclusive 三条违规。
+:alice a :Person ;
+    :name "Alice" ;
+    :age 19, "17" .
+
+# bob 缺 :name（基线即有一条 minCount 违规），:age 20 合法。
+:bob a :Person ;
+    :age 20 .
+
+# carol 完全合规，作为对照组：清洗不应影响无关节点。
+:carol a :Person ;
+    :name "Carol" ;
+    :age 30 .

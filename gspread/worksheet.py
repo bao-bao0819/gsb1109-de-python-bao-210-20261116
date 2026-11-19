@@ -63,6 +63,7 @@ from .utils import (
     rowcol_to_a1,
     to_records,
 )
+from .write_plan import PlannedCell, WriteReport, apply_write_plan
 
 if TYPE_CHECKING is True:
     from .spreadsheet import Spreadsheet
@@ -1387,6 +1388,48 @@ class Worksheet:
         )
 
         return response
+
+    def update_with_plan(self, cells: Sequence[PlannedCell]) -> WriteReport:
+        """Writes cells with per-cell input semantics and verifies the result.
+
+        Each :class:`~gspread.write_plan.PlannedCell` declares how its value
+        must be interpreted: ``ValueInputOption.raw`` stores the value as-is
+        (the id ``"00123"`` stays text) while ``ValueInputOption.user_entered``
+        lets Sheets parse it using the spreadsheet locale (the amount
+        ``"1,234"`` becomes a number). Cells are grouped by semantics and
+        sent in separate write requests, then every cell is read back
+        unformatted to check the stored type and content.
+
+        A ``user_entered`` string starting with ``=`` is escaped so it is
+        stored as literal text and cannot turn into a formula by mistake,
+        unless ``allow_formula`` is set on the cell.
+
+        HTTP success of the write requests is not enough: cells whose
+        stored result does not match the declared convention are reported
+        individually in ``WriteReport.mismatches``.
+
+        :param cells: The :class:`~gspread.write_plan.PlannedCell` entries
+            to write and verify.
+        :returns: A :class:`~gspread.write_plan.WriteReport` with the raw
+            write responses and the per-cell verification outcome.
+
+        Example::
+
+            from gspread.write_plan import Expectation, PlannedCell
+            from gspread.utils import ValueInputOption
+
+            report = worksheet.update_with_plan([
+                PlannedCell(1, 1, "00123"),  # raw: stays text
+                PlannedCell(
+                    1, 2, "1,234",
+                    value_input_option=ValueInputOption.user_entered,
+                    expect=Expectation.number,
+                ),
+            ])
+            for mismatch in report.mismatches:
+                print(mismatch.a1, mismatch.reason)
+        """
+        return apply_write_plan(self, cells)
 
     def batch_format(self, formats: List[CellFormat]) -> JSONResponse:
         """Formats cells in batch.

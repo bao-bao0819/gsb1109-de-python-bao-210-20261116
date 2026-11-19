@@ -261,6 +261,32 @@ assert a.dumps() == d
 ### Enums and Flags
 The API to access enum and flag members and their values in the same way as the native Enum types in Python 3. Functionally, it's best comparable to the IntEnum or IntFlag type.
 
+### Migrating enums and flags between firmware versions
+Definitions from different firmware versions can be compared with `migrate`. Every old
+state is classified as `exact` (same value and all known names survive), `candidate`
+(a plausible new state exists, but the caller must choose) or `rejected` (with a
+concrete conflict as evidence). Flags are compared by member and bit-group names, never
+by copying bit positions, and unnamed states keep their own numeric value instead of
+being collapsed into a synthetic `UNKNOWN`.
+
+```python
+from dissect.cstruct import migrate, verify_roundtrip
+
+old = {"READ": 1, "WRITE": 2, "READ_WRITE": 3, "LEGACY": 8}
+new = {"READ": 1, "WRITE": 2}
+
+result = migrate(old, new, kind="flag", exclusive=[("READ", "WRITE")])
+assert result.exact_values == {1: 1, 2: 2}
+assert result.conflicts_for(3)  # READ_WRITE violates the READ/WRITE exclusion
+assert result.conflicts_for(8)  # LEGACY has no counterpart
+
+# Round-trip verification re-checks values and known names after migration.
+assert verify_roundtrip(result, old, new) == []
+```
+
+`observed=[...]` can be used to include raw values seen in firmware; each unnamed value
+is rejected or preserved individually rather than mapped to a shared unknown member.
+
 ### Custom types
 You can implement your own types by subclassing `BaseType`, and adding them to your cstruct instance with `add_custom_type(name, type, size, alignment, ...)`
 

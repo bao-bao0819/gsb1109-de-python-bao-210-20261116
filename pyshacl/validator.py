@@ -27,6 +27,7 @@ from .rdfutil import (
     mix_datasets,
     mix_graphs,
 )
+from .report import merge_validation_results
 from .rules import apply_rules, gather_rules
 from .run_type import PySHACLRunType
 from .shapes_graph import ShapesGraph
@@ -345,6 +346,7 @@ class Validator(PySHACLRunType):
         finally:
             if advanced and advanced['functions']:
                 unapply_functions(advanced['functions'], g)
+        reports = merge_validation_results(reports, executor.result_origins)
         v_report, v_text = self.create_validation_report(self.shacl_graph, not non_conformant, reports)
         return (not non_conformant), v_report, v_text
 

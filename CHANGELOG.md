@@ -6,6 +6,11 @@ and this project adheres to [Python PEP 440 Versioning](https://www.python.org/d
 
 ## [Unreleased]
 
+### Added
+- Validation results now carry an evidence-based identity, built from the source constraint component, source shape, focus node, result path, offending value and source constraint. Result message text never participates in the identity.
+- Results that describe the same fact but are produced by separate constraint evaluations (for example a property shape with its own target that is also reached via `sh:property`) are merged into one result. The contributing evaluations are retained as `urn:pyshacl:evidence` nodes, with `urn:pyshacl:evidenceCount` and `urn:pyshacl:resultIdentity` recorded on the merged result.
+- Distinct facts produced by a single constraint evaluation, such as one SPARQL result row or each duplicated language tag, and results from different constraint components, are never merged even when their messages are identical. Removing one constraint therefore leaves the other constraint's result in place.
+
 ## [0.40.2] - 2026-07-28
 
 ### Fixed

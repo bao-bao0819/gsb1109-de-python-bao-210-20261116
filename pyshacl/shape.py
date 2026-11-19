@@ -772,6 +772,14 @@ class Shape(object):
                 path_str = " -> ".join((str(e) for e in _e_p_copy))
                 self.logger.debug(f"Current constraint evaluation path: {path_str}")
             _is_conform, _reports = c.evaluate(executor, target_graph, focus_value_nodes, _e_p_copy)
+            # All new results of one constraint evaluation share an origin.
+            # Results bubbling up from nested shape evaluations already carry
+            # their own origin and keep it. Same-evaluation results are distinct
+            # facts and are never merged; separate evaluations producing the
+            # same fact may be.
+            origin = executor.take_result_origin()
+            for _v_str, v_node, _v_parts in _reports:
+                executor.result_origins.setdefault(id(v_node), origin)
             if executor.debug:
                 if collect_stats:
                     ct2 = perf_counter()
@@ -811,6 +819,9 @@ class Shape(object):
             validator = a.make_validator_for_shape(self)
             _e_p_copy2.append(validator)
             _is_conform, _r = validator.evaluate(executor, target_graph, focus_value_nodes, _e_p_copy2)
+            origin = executor.take_result_origin()
+            for _v_str, v_node, _v_parts in _r:
+                executor.result_origins.setdefault(id(v_node), origin)
             non_conformant = non_conformant or (not _is_conform)
             reports.extend(_r)
             run_count += 1

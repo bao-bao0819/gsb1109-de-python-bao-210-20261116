@@ -295,6 +295,30 @@ _**PySHACL now has a built-in SPARQL Remote Graph Mode, which allows you to vali
     - All SHACL-JS features are disabled (this is not safe when operating on a remote graph)
     - "inplace" mode is disabled (actually all operations on the remote data graph are inherently performed in-place)
 
+## Sharded (Cross-Shard) Validation
+
+_**PySHACL can validate `sh:minCount`, `sh:maxCount` and `sh:uniqueLang` on direct property paths across sharded entity data, without assembling the merged graph.**_
+
+When entity data is split over several shards, each shard can individually satisfy a cardinality constraint while the union violates it. `pyshacl.sharded.ShardCoordinator` validates the merged view of all shard versions by exchanging compact summaries (focus-node identities and digests of RDF value identities) instead of moving source graphs. Only when a violation is found are the actual, reviewable values fetched from the contributing shards. The result is identical to validating the graph composed from the same set of source versions.
+
+```python
+from pyshacl.sharded import ShardCoordinator
+
+coordinator = ShardCoordinator(shacl_graph, bnode_convention=None)
+coordinator.update_shard("shard-a", version="v1", data=graph_or_turtle_a)
+coordinator.update_shard("shard-b", version="v1", data=graph_or_turtle_b)
+
+result = coordinator.validate()
+conforms, report_graph, report_text = result
+for evidence in result.violations:
+    print(evidence.focus_node, evidence.kind, evidence.values_by_shard)
+```
+
+- Summaries deduplicate values by precise RDF term identity (normalised lexical form, datatype, lower-cased language tag), so the same value reported by two shards is counted once.
+- Blank node identity across shards follows the input `bnode_convention` mapping `(source_id, local_label) -> global identity`; by default blank nodes are scoped to their shard.
+- Contributions are keyed by shard id: re-sending the current version does not change counts, a new version replaces the old contribution, and `retract_shard()` withdraws it.
+- Shapes using anything beyond the supported subset (other constraint components, complex paths, custom constraint components, ...) raise `pyshacl.errors.UnsupportedShapeError` instead of silently passing.
+
 ## Inference and Rules
 PySHACL can perform inference - creation of new data using rules - according to the [SHACL Advanced Features - Rules specification](https://www.w3.org/TR/shacl-af/#rules).
 

@@ -48,6 +48,27 @@ class RuleLoadError(ReportableRuntimeError):
         return "RuleLoadError: {}".format(self.__str__())
 
 
+class UnsupportedShapeError(ReportableRuntimeError):
+    """
+    Raised by the sharded (cross-shard) validator when the shapes graph uses
+    SHACL features that cannot be faithfully evaluated over sharded summaries.
+    Raising this error ensures unsupported shapes never silently pass.
+    """
+
+    def __init__(self, message):
+        self.message = message
+
+    @property
+    def args(self):
+        return [self.message]
+
+    def __str__(self):
+        return str(self.message)
+
+    def __repr__(self):
+        return "UnsupportedShapeError: {}".format(self.__str__())
+
+
 class ValidationFailure(ReportableRuntimeError):
     """
     https://www.w3.org/TR/shacl/#failures

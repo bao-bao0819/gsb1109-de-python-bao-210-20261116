@@ -67,6 +67,44 @@ Advanced users who wish to study the structure of the Windows
 Registry may find the `Registry.RegistryParse` module useful.
 This module implements all known structures of the Windows Registry.
 
+Rehearsed edits
+---------------
+
+`Registry.RegistryEdit` adds a planning layer over an immutable snapshot.
+It never rewrites the hive file.  Instead, it validates groups of value
+edits against the snapshot, applies only legal and mutually independent
+groups, and reports the projected state before anything is committed.
+
+    from Registry import Registry, RegistryEdit
+
+    reg = Registry.Registry("NTUSER.DAT")
+    snapshot = RegistryEdit.HiveSnapshot.from_registry(reg)
+
+    plan = RegistryEdit.EditPlan(snapshot)
+    plan.add_group(
+        RegistryEdit.EditGroup("timezone")
+            .rename("TimeZoneInformation", "Bias", "BiasRenamed")
+            .change_type("TimeZoneInformation", "BiasRenamed", "RegQWord")
+    )
+
+    rehearsal = plan.rehearse()          # dry run only
+    result = plan.apply()                # validates and verifies again
+    result.verification.raise_if_failed()
+
+The unnamed default value is addressed with
+`Registry.Registry.DEFAULT_VALUE` (or the empty stored name).  It is not the
+same as a missing value, a value with empty data, or a normal value whose
+literal name is `(Default)`:
+
+    key.value("(default)")               # historical friendly spelling
+    key.value(Registry.DEFAULT_VALUE)    # explicitly the unnamed value
+    key.value_exact("(Default)")         # a literal named value
+    value.is_default()                   # True only for the unnamed value
+
+In a snapshot, use `find_value(...)` for exact logical identity and
+`resolve(...)` when the friendly `(default)` spelling should address the
+unnamed value:
+
 Wanted
 ------
   - Bug reports.

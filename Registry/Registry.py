@@ -40,6 +40,28 @@ RegFileTime = 0x0010
 
 DEVPROP_MASK_TYPE = 0x00000FFF
 
+
+class _DefaultValueName(object):
+    """
+    Sentinel used to request the unnamed default value of a key.
+
+    The unnamed default value is distinct from a value whose literal name is
+    ``(Default)``.  Pass this sentinel to :meth:`RegistryKey.value` or
+    :meth:`RegistryKey.value_exact` when the unnamed value is intended.
+    """
+    def __repr__(self):
+        return "Registry.DEFAULT_VALUE"
+
+
+DEFAULT_VALUE = _DefaultValueName()
+
+
+def _casefold(value):
+    if hasattr(value, "casefold"):
+        return value.casefold()
+    return value.lower()
+
+
 class HiveType(Enum):
     UNKNOWN = ""
     NTUSER = "ntuser.dat"
@@ -119,6 +141,28 @@ class RegistryValue(object):
             return self._vkrecord.name()
         else:
             return  "(default)"
+
+    def is_default(self):
+        """
+        Is this the unnamed default value of its key?
+
+        This is True only for the value whose VK record has no name.  It is
+        False for a value whose literal name happens to be "(Default)" or
+        for a key that has no values at all.
+        """
+        return not self._vkrecord.has_name()
+
+    def stored_name(self):
+        """
+        Get the name as stored in the hive.
+
+        The unnamed default value yields the empty string, while a value whose
+        literal name is "(Default)" yields "(Default)".
+        """
+        if self._vkrecord.has_name():
+            return self._vkrecord.name()
+        else:
+            return ""
 
     def value_type(self):
         """
@@ -342,16 +386,65 @@ class RegistryKey(object):
         Return the value with the given name as a RegistryValue.
         Raises RegistryValueNotFoundExceptiono if the value with
           the given name does not exist.
+
+        The exact string "(default)", the empty string, and
+        :data:`DEFAULT_VALUE` address the unnamed default value, matching
+        historical behavior.  Other spellings, including the literal name
+        "(Default)", address a normal named value.  Use :meth:`value_exact`
+        when the distinction matters.
         """
+        if name is DEFAULT_VALUE or name == "":
+            return self.value_exact("")
+
         if name == "(default)":
-            name = ""
-        try:
-            for v in self._nkrecord.values_list().values():
-                if v.name().lower() == name.lower():
+            for v in self._load_values():
+                if not v.has_name():
                     return RegistryValue(v)
-        except RegistryParse.RegistryStructureDoesNotExist:
             raise RegistryValueNotFoundException(self.path() + " : " + name)
+
+        lower_name = _casefold(name)
+        for v in self._load_values():
+            if v.has_name() and _casefold(v.name()) == lower_name:
+                return RegistryValue(v)
+
         raise RegistryValueNotFoundException(self.path() + " : " + name)
+
+    def value_exact(self, name):
+        """
+        Return the value whose stored name is exactly `name` (case-insensitive).
+
+        The unnamed default value is addressed by the empty string.  A literal
+        value named "(Default)" is therefore addressed by "(Default)" and is
+        never confused with the unnamed default value.
+        """
+        if name is DEFAULT_VALUE:
+            name = ""
+
+        lower_name = _casefold(name)
+        for v in self._load_values():
+            stored = v.name() if v.has_name() else ""
+            if _casefold(stored) == lower_name:
+                return RegistryValue(v)
+
+        raise RegistryValueNotFoundException(self.path() + " : " + name)
+
+    def has_value(self, name):
+        """
+        Does this key have a value with the given name?
+
+        `name` follows the resolution rules of :meth:`value`.
+        """
+        try:
+            self.value(name)
+            return True
+        except RegistryValueNotFoundException:
+            return False
+
+    def _load_values(self):
+        try:
+            return list(self._nkrecord.values_list().values())
+        except RegistryParse.RegistryStructureDoesNotExist:
+            return []
 
     def find_key(self, path):
         """

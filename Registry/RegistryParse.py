@@ -95,6 +95,11 @@ DEVPROP_MASK_TYPE = 0x00000FFF
 # This named tuple describes the recovery operations to be performed on a hive.
 RecoveryStatus = namedtuple('RecoveryStatus', ['recover_header', 'recover_data'])
 
+# Location of one proven big-data fragment within the value and the hive.
+FragmentLocation = namedtuple('FragmentLocation',
+                              ['index', 'reference', 'cell_offset',
+                               'data_offset', 'value_start', 'length'])
+
 
 def parse_timestamp(ticks, resolution, epoch, mode=decimal.ROUND_HALF_EVEN):
     """
@@ -221,6 +226,95 @@ class NotSupportedException(RegistryException):
 
     def __str__(self):
         return "Not Supported Exception (%s)" % (self._value)
+
+
+class RegistryDataRecoveryException(RegistryException):
+    """
+    Raised when the data of a value cannot be fully read because its on-disk
+    structures are damaged (for example, an invalid big-data fragment pointer).
+    Partial data may still be available via the recovered data object.
+    """
+    def __init__(self, value, recovered_data=None):
+        """
+        Constructor.
+        Arguments:
+        - `value`: A string description of the damage encountered.
+        - `recovered_data`: A RecoveredData instance with whatever could be
+           proven from the intact structures.
+        """
+        super(RegistryDataRecoveryException, self).__init__(value)
+        self._recovered_data = recovered_data
+
+    def recovered_data(self):
+        return self._recovered_data
+
+    def __str__(self):
+        return "Registry Data Recovery Exception (%s)" % (self._value)
+
+
+class RecoveredData(object):
+    """
+    Evidence-based result of reading a value whose data cannot be fully
+    recovered. The data is classified as follows:
+      - complete: every byte was read from the structures described by the
+        value, so `data` holds the whole value and `prefix_length` is None
+      - prefix:   only the first `prefix_length` bytes could be proven;
+        `data` holds this definite prefix and the remainder is unknown
+    Every structural inconsistency encountered (invalid references, duplicate
+    references, length contradictions) is recorded in `issues`.
+    The original cell position of each proven fragment is recorded in
+    `fragment_locations` as FragmentLocation entries.
+    """
+    COMPLETE = "complete"
+    PARTIAL = "partial"
+
+    def __init__(self, data, status, expected_length, prefix_length=None,
+                 issues=None, fragment_locations=None):
+        self._data = bytes(data)
+        self._status = status
+        self._expected_length = expected_length
+        self._prefix_length = prefix_length
+        self._issues = list(issues or [])
+        self._fragment_locations = list(fragment_locations or [])
+
+    @property
+    def status(self):
+        return self._status
+
+    @property
+    def data(self):
+        return self._data
+
+    @property
+    def expected_length(self):
+        return self._expected_length
+
+    @property
+    def prefix_length(self):
+        return self._prefix_length
+
+    @property
+    def issues(self):
+        return list(self._issues)
+
+    @property
+    def fragment_locations(self):
+        return list(self._fragment_locations)
+
+    def is_complete(self):
+        return self._status == self.COMPLETE
+
+    def add_issue(self, issue):
+        self._issues.append(issue)
+
+    def __repr__(self):
+        if self.is_complete():
+            detail = "complete, %d bytes" % len(self._data)
+        else:
+            detail = "partial prefix, %d of %d bytes" % (
+                self._prefix_length, self._expected_length)
+        return "RecoveredData(%s, issues=%r)" % (detail, self._issues)
+
 
 class RegistryBlock(object):
     """
@@ -712,12 +806,14 @@ class DBIndirectBlock(Record):
     The DBIndirect block is a list of offsets to DataRecords with data
     size up to 0x3fd8.
     """
+    MAX_SEGMENT_SIZE = 0x3fd8
+
     def __init__(self, buf, offset, parent):
         """
         Constructor.
         Arguments:
         - `buf`: Byte string containing Windows Registry file.
-        - `offset`: The offset into the buffer at which the block starts.
+        - `offset`: The absolute offset at which the block starts.
         - `parent`: The parent block, which links to this block. This should be an HBINCell.
         """
         super(DBIndirectBlock, self).__init__(buf, offset, parent)
@@ -725,21 +821,113 @@ class DBIndirectBlock(Record):
     def __str__(self):
         return "Large Data Block at 0x%x" % (self.offset())
 
+    def _reference_capacity(self):
+        """
+        Number of fragment reference DWORDs that fit inside the owning cell.
+        Reading past this would silently consume unrelated, neighboring cells.
+        """
+        cell = self.parent()
+        return (cell.size() - 0x4) // 0x4
+
+    def _fragment_cell(self, absolute_offset):
+        """
+        Resolve a fragment reference to an allocated HBINCell that is fully
+        contained in the buffer. Returns None when the reference is invalid;
+        physically adjacent cells are never assumed to be fragments.
+        """
+        if absolute_offset < 0 or absolute_offset + 0x4 > len(self._buf):
+            return None
+        try:
+            cell = HBINCell(self._buf, absolute_offset, self)
+        except (RegistryStructureDoesNotExist, struct.error):
+            return None
+        if cell.is_free() or cell.size() < 0x4:
+            return None
+        if cell.offset() + cell.size() > len(self._buf):
+            return None
+        return cell
+
+    def recover_large_data(self, length):
+        """
+        Reconstruct the data using only the fragment references stored in this
+        indirect block. Returns a RecoveredData that distinguishes a complete
+        value from a definite prefix, and records every invalid reference,
+        duplicate reference, and length contradiction encountered.
+        """
+        issues = []
+        data = bytearray()
+        fragment_locations = []
+        seen_references = {}
+        fragment_index = 0
+        remaining = length
+        capacity = self._reference_capacity()
+
+        while remaining > 0:
+            if fragment_index >= capacity:
+                issues.append(
+                    "length contradiction: value declares %d bytes but the "
+                    "indirect block at 0x%x holds only %d fragment reference(s)"
+                    % (length, self.parent().offset(), fragment_index))
+                break
+
+            reference = self.unpack_dword(0x4 * fragment_index)
+            if reference in seen_references:
+                issues.append(
+                    "duplicate fragment reference at index %d: 0x%x "
+                    "(previously used at index %d)"
+                    % (fragment_index, reference, seen_references[reference]))
+                break
+            seen_references[reference] = fragment_index
+
+            absolute_offset = self.abs_offset_from_hbin_offset(reference)
+            cell = self._fragment_cell(absolute_offset)
+            if cell is None:
+                issues.append(
+                    "invalid fragment reference at index %d: relative 0x%x "
+                    "(absolute 0x%x) does not point to an allocated cell"
+                    % (fragment_index, reference, absolute_offset))
+                break
+
+            wanted = min(self.MAX_SEGMENT_SIZE, remaining)
+            if cell.size() < wanted + 0x4:
+                issues.append(
+                    "invalid fragment reference at index %d: cell at 0x%x "
+                    "holds %d bytes but %d bytes are required"
+                    % (fragment_index, absolute_offset, cell.size() - 0x4, wanted))
+                break
+
+            value_start = len(data)
+            data += cell.raw_data()[0:wanted]
+            fragment_locations.append(FragmentLocation(
+                index=fragment_index,
+                reference=reference,
+                cell_offset=cell.offset(),
+                data_offset=cell.data_offset(),
+                value_start=value_start,
+                length=wanted))
+            remaining -= wanted
+            fragment_index += 1
+
+        if not issues and remaining == 0:
+            return RecoveredData(data, RecoveredData.COMPLETE, length,
+                                 fragment_locations=fragment_locations)
+        return RecoveredData(data, RecoveredData.PARTIAL, length,
+                             prefix_length=len(data), issues=issues,
+                             fragment_locations=fragment_locations)
+
     def large_data(self, length):
         """
         Get the data pointed to by the indirect block. It may be large.
-        Return a byte string.
+        Return a byte string, or raise RegistryDataRecoveryException if the
+        data cannot be fully proven (a definite prefix is attached to the
+        exception).
         """
-        b = bytearray()
-        count = 0
-        while length > 0:
-            off = self.abs_offset_from_hbin_offset(self.unpack_dword(4 * count))
-            size = min(0x3fd8, length)
-            b += HBINCell(self._buf, off, self).raw_data()[0:size]
-
-            count += 1
-            length -= size
-        return bytes(b)
+        recovered = self.recover_large_data(length)
+        if recovered.is_complete():
+            return recovered.data
+        raise RegistryDataRecoveryException(
+            "large data at 0x%x could not be fully recovered" % self.offset(),
+            recovered)
 
 
 class DBRecord(Record):
@@ -764,15 +952,49 @@ class DBRecord(Record):
     def __str__(self):
         return "Large Data Block at 0x%x" % (self.offset())
 
+    def recover_large_data(self, length):
+        """
+        Reconstruct the data described by the DBRecord via its indirect block,
+        returning a RecoveredData instance (see DBIndirectBlock).
+        """
+        reference = self.unpack_dword(0x4)
+        absolute_offset = self.abs_offset_from_hbin_offset(reference)
+        if absolute_offset < 0 or absolute_offset + 0x4 > len(self._buf):
+            return RecoveredData(b"", RecoveredData.PARTIAL, length,
+                                 prefix_length=0,
+                                 issues=["invalid indirect block reference: "
+                                         "relative 0x%x (absolute 0x%x) is "
+                                         "outside the hive"
+                                         % (reference, absolute_offset)])
+        try:
+            cell = HBINCell(self._buf, absolute_offset, self)
+        except (RegistryStructureDoesNotExist, struct.error):
+            cell = None
+        if cell is None or cell.is_free() or cell.size() < 0x4 or \
+                cell.offset() + cell.size() > len(self._buf):
+            return RecoveredData(b"", RecoveredData.PARTIAL, length,
+                                 prefix_length=0,
+                                 issues=["invalid indirect block reference: "
+                                         "relative 0x%x (absolute 0x%x) does "
+                                         "not point to an allocated cell"
+                                         % (reference, absolute_offset)])
+
+        dbi = DBIndirectBlock(self._buf, cell.data_offset(), cell)
+        return dbi.recover_large_data(length)
+
     def large_data(self, length):
         """
         Get the data described by the DBRecord. It may be large.
-        Return a byte array.
+        Return a byte string, or raise RegistryDataRecoveryException if the
+        data cannot be fully proven (a definite prefix is attached to the
+        exception).
         """
-        off = self.abs_offset_from_hbin_offset(self.unpack_dword(0x4))
-        cell = HBINCell(self._buf, off, self)
-        dbi = DBIndirectBlock(self._buf, cell.data_offset(), cell)
-        return dbi.large_data(length)
+        recovered = self.recover_large_data(length)
+        if recovered.is_complete():
+            return recovered.data
+        raise RegistryDataRecoveryException(
+            "large data at 0x%x could not be fully recovered" % self.offset(),
+            recovered)
 
 
 def decode_utf16le(s):
@@ -1030,6 +1252,33 @@ class VKRecord(Record):
             return self.absolute_offset(0x8)
         else:
             return self.abs_offset_from_hbin_offset(self.unpack_dword(0x8))
+
+    def recover_raw_data(self, overrun=0):
+        """
+        Evidence-based recovery of a value's raw data.
+
+        Always returns a RecoveredData instance:
+          - a complete result when every byte could be read through the
+            structures referenced by the value,
+          - a partial result holding only the definite prefix when a big-data
+            (db) fragment chain is damaged.
+        All structural problems (invalid/duplicate references and length
+        contradictions) are recorded on the returned object.
+
+        Non-big-data values are read exactly as raw_data() and reported as
+        complete, so unrelated, intact values remain usable.
+        """
+        data_type = self.data_type()
+        data_length = self.raw_data_length()
+        data_offset = self.data_offset()
+
+        if data_length < 0x80000000 and 0x3fd8 < data_length:
+            cell = HBINCell(self._buf, data_offset, self)
+            if cell.data_id() == b"db":
+                return cell.child().recover_large_data(data_length + overrun)
+
+        return RecoveredData(self.raw_data(overrun), RecoveredData.COMPLETE,
+                             data_length)
 
     def raw_data(self, overrun=0):
         """

@@ -1,3 +1,14 @@
+Unreleased
+  - add evidence-based recovery for damaged big-data (db) values:
+    VKRecord/RegistryValue.recover_raw_data() returns a RecoveredData that
+    distinguishes complete data from a definite prefix, records the original
+    fragment cell positions, and logs invalid references, duplicate
+    references, and length contradictions; fragments are followed only through
+    the indirect-block pointers, never through physically adjacent cells
+  - raw_data() now raises RegistryDataRecoveryException (with the recovered
+    prefix attached) instead of a low-level struct.error when a db fragment
+    chain is damaged
+
 1.2.0
   - [DEPRECATED] records() in HBINBlock, use the more correct cells() instead, by @NiKiZe
   - fix bug in parsing of resident values with length zero, reported and patched by @BridgeyTheGeek

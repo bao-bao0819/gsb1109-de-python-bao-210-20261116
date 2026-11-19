@@ -228,6 +228,16 @@ class RegistryValue(object):
     def raw_data(self, overrun=0):
         return self._vkrecord.raw_data(overrun)
 
+    def recover_raw_data(self, overrun=0):
+        """
+        Recover the raw data using only intact, explicitly referenced
+        structures. Always returns a RegistryParse.RecoveredData describing
+        either a complete value or a definite prefix, with every invalid
+        reference, duplicate reference, and length contradiction recorded.
+        Does not raise on a damaged big-data chain.
+        """
+        return self._vkrecord.recover_raw_data(overrun)
+
     def timestamp(self):
         """
         Get the last modified timestamp as a Python datetime. Only valid for

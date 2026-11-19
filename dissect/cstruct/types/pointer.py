@@ -101,22 +101,37 @@ class Pointer(int, BaseType, Generic[T]):
             endian: Optional endianness to use when reading the value.
                     If not provided, the endianness used when reading the pointer itself will be used.
         """
+        return self._dereference(endian=endian)[0]
+
+    def _dereference(self, *, endian: AllowedEndianness | None = None) -> tuple[T | None, int | None]:
+        """Dereference the pointer and return the value and the amount of bytes it occupies.
+
+        The size is ``None`` for values without an effective boundary, such as the empty value of a ``void`` pointer.
+
+        Args:
+            endian: Optional endianness to use when reading the value.
+                    If not provided, the endianness used when reading the pointer itself will be used.
+        """
         if self == 0 or self.__stream is None:
             raise NullPointerDereference
 
         endian = normalize_endianness(endian) if endian is not None else self.__endian
         if issubclass(self.__type__, Void):
-            return None
+            return None, None
 
         position = self.__stream.tell()
         self.__stream.seek(self)
 
-        if issubclass(self.__type__, Char):
-            # This makes the assumption that a char pointer is a null-terminated string
-            value = self.__type__._read_0(self.__stream, context=self.__context, endian=endian)
-        else:
-            value = self.__type__._read(self.__stream, context=self.__context, endian=endian)
+        try:
+            if issubclass(self.__type__, Char):
+                # This makes the assumption that a char pointer is a null-terminated string
+                value = self.__type__._read_0(self.__stream, context=self.__context, endian=endian)
+            else:
+                value = self.__type__._read(self.__stream, context=self.__context, endian=endian)
 
-        # Restore the stream position after reading the value
-        self.__stream.seek(position)
-        return value
+            size = self.__stream.tell() - self
+        finally:
+            # Restore the stream position after reading the value
+            self.__stream.seek(position)
+
+        return value, size

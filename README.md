@@ -261,6 +261,31 @@ assert a.dumps() == d
 ### Enums and Flags
 The API to access enum and flag members and their values in the same way as the native Enum types in Python 3. Functionally, it's best comparable to the IntEnum or IntFlag type.
 
+### Pointer references
+Structures can contain pointers, including pointers to the same structure (e.g. linked lists). Use `dumpreferences` to export a structure and the pointer references reachable from it as a graph:
+
+```python
+from dissect.cstruct import cstruct, dumpreferences
+
+linked_list = """
+struct node {
+    uint16  value;
+    node    *next;
+};
+"""
+cs = cstruct(linked_list, pointer="uint16")
+
+# The second node points back to itself
+data = b"\x01\x00\x04\x00" + b"\x02\x00\x04\x00"
+graph = dumpreferences(cs.node(data), output="dict")
+
+assert graph["objects"][1]["type"] == "node"
+assert graph["objects"][1]["bounds"] == [4, 8]
+assert graph["references"][1]["relation"] == "cycle"
+```
+
+Every object is identified by its address and resolved type, so two pointers of a different type to the same address are two objects, each with their own type and bounds. References distinguish a first reference, a `shared` reference to an object that was exported before, and a `cycle` back to an object that is currently being expanded. A reference has a `status` of `resolved`, `null`, `out_of_bounds` or `unresolved`; a `void` pointer, a pointer without a (seekable) stream or a reading error is `unresolved` and has a `reason`. `max_depth` limits how many pointer hops are followed, and `dumpstruct(obj, output="graph")` returns the same graph.
+
 ### Custom types
 You can implement your own types by subclassing `BaseType`, and adding them to your cstruct instance with `add_custom_type(name, type, size, alignment, ...)`
 

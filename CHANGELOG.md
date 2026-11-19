@@ -9,6 +9,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 
 - Declarative syntax for structures and unions in `dissect.cstruct.declarative`, using classes with type annotations.
+- `dumpreferences` (also exported as `dump_references`, `dumpgraph` and `dumpobjects`) exports a structure and the
+  pointer references reachable from it as a flat object and reference graph, with `output="dict"`, `"json"`, `"string"`
+  or `"print"`. `dumpstruct` supports `output="graph"` for the same graph. Objects are identified by address and
+  resolved type, and references distinguish shared objects from cycles. Null pointers, out-of-bounds targets and
+  targets that couldn't be obtained have separate statuses. `max_depth` bounds how many pointer hops are followed.
+  Pointers inside a union only observe the union's own bytes, which is reflected in the reported bounds.
 
 ### Changed
 

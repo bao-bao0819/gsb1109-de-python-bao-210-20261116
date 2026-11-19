@@ -10,6 +10,7 @@ from dissect.cstruct.exception import (
     ResolveError,
 )
 from dissect.cstruct.expression import Expression
+from dissect.cstruct.references import dump_graph, dump_objects, dump_references, dumpgraph, dumpobjects, dumpreferences
 from dissect.cstruct.types import (
     LEB128,
     Array,
@@ -79,6 +80,12 @@ __all__ = [
     "cstruct",
     "ctypes",
     "ctypes_type",
+    "dump_graph",
+    "dump_objects",
+    "dump_references",
+    "dumpgraph",
+    "dumpobjects",
+    "dumpreferences",
     "dumpstruct",
     "f16",
     "f32",

@@ -422,7 +422,9 @@ def dumpstruct(
     offset: int = 0,
     color: bool = True,
     autoskip: bool = False,
-    output: Literal["print", "string", "dict", "json"] = "print",
+    output: Literal["print", "string", "dict", "json", "graph"] = "print",
+    *,
+    max_depth: int = 32,
 ) -> str | dict[str, Any] | None:
     """Dump a structure or parsed structure instance.
 
@@ -445,6 +447,9 @@ def dumpstruct(
     For an array, ``name`` includes the dimensions as written in the definition and ``type`` is the element type,
     e.g. ``uint8 matrix[2][3];`` has ``name`` ``matrix[2][3]`` and ``type`` ``uint8``.
 
+    The ``graph`` output format describes the structure as an object and pointer reference graph, as described in
+    :func:`~dissect.cstruct.references.dumpreferences`.
+
     Args:
         obj: :class:`~dissect.cstruct.types.structure.Structure` to dump.
         data: Bytes to parse the :class:`~dissect.cstruct.types.structure.Structure` on,
@@ -452,14 +457,18 @@ def dumpstruct(
         offset: Byte offset of the hexdump.
         color: Colorize the hexdump and structure output.
         autoskip: A single '*' replaces NUL-lines in the output.
-        output: Output format, can be ``print``, ``string``, ``dict`` or ``json``.
+        output: Output format, can be ``print``, ``string``, ``dict``, ``json`` or ``graph``.
+        max_depth: Maximum amount of pointer hops to follow for ``output="graph"``.
 
     Returns:
-        Formatted string when ``output="string"``, a dict when ``output="dict"``,
+        Formatted string when ``output="string"``, a dict when ``output="dict"`` or ``output="graph"``,
         a JSON string when ``output="json"``, or ``None`` when ``output="print"``.
     """
-    if output not in ("print", "string", "dict", "json"):
+    if output not in ("print", "string", "dict", "json", "graph"):
         raise ValueError(f"Invalid output argument: {output!r} (should be 'print', 'string', 'dict' or 'json').")
+
+    provided_data = data is not None
+    input_obj = obj
 
     if isinstance(obj, Structure):
         data = obj.dumps() if data is None else data
@@ -467,6 +476,14 @@ def dumpstruct(
         obj = obj(data)
     else:
         raise ValueError("Invalid arguments: expected a Structure instance, or a Structure class with data.")
+
+    if output == "graph":
+        from dissect.cstruct.references import dumpreferences
+
+        # Let the graph use the stream the object was parsed from, which can be larger than the object itself.
+        # For a class, parse the data at the given offset, so object addresses match the data.
+        obj = input_obj if isinstance(input_obj, type) else obj
+        return dumpreferences(obj, data if provided_data else None, offset, max_depth=max_depth, output="dict")
 
     result = {
         "bytes": data.hex(),

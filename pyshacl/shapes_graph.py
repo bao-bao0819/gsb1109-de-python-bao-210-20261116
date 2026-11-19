@@ -366,25 +366,21 @@ class ShapesGraph(object):
         gathered_node_shapes = set()
         gathered_prop_shapes = set()
         found_prop_shapes_paths: Dict[Union[rdflib.URIRef, rdflib.BNode], Union[rdflib.URIRef, rdflib.BNode]] = dict()
+        gathered_shape_nodes: set = set()
 
-        def _gather_shapes(shapes_nodes: Sequence[Union[rdflib.URIRef, rdflib.BNode]], recurse_depth: int = 0):
+        def _gather_shapes(shapes_nodes: Sequence[Union[rdflib.URIRef, rdflib.BNode]]):
             nonlocal gathered_node_shapes, gathered_prop_shapes, found_prop_shapes_paths
-            if recurse_depth > 10:
-                raise ShapeLoadError(
-                    "Specified shape has too many levels of attached bnodes.",
-                    "https://www.w3.org/TR/shacl/#shapes-graph",
-                )
             shape_expecting_preds = (SH_and, SH_not, SH_or, SH_xone, SH_property, SH_node, SH_qualifiedValueShape)
-            for s in shapes_nodes:
+            pending_shapes = list(shapes_nodes)
+            while pending_shapes:
+                s = pending_shapes.pop()
+                if s in gathered_shape_nodes:
+                    continue
+                gathered_shape_nodes.add(s)
                 all_po = list(g.predicate_objects(s))
                 if len(all_po) < 1:
-                    if recurse_depth < 1:
-                        raise ShapeLoadError(
-                            "Shape listed in use_shapes does not exist in the SHACL ShapesGraph.",
-                            "https://www.w3.org/TR/shacl/#shapes-graph",
-                        )
-                    else:
-                        return
+                    # A dangling reference does not contribute any constraints.
+                    continue
                 has_class = any(RDF_type == _p for _p, _o in all_po)
                 has_shape_expecting_p: Dict[rdflib.URIRef, bool] = {}
                 for _p in shape_expecting_preds:
@@ -426,7 +422,7 @@ class ShapesGraph(object):
                             gathered_prop_shapes.add(s)
                         else:
                             gathered_node_shapes.add(s)
-                _found_child_bnodes: List[rdflib.BNode] = []
+                _found_child_shapes: List[Union[rdflib.URIRef, rdflib.BNode]] = []
                 if has_shape_expecting_p:
                     for _p in has_shape_expecting_p.keys():
                         property_entries = list(g.objects(s, _p))
@@ -434,13 +430,19 @@ class ShapesGraph(object):
                             if _p in (SH_or, SH_xone, SH_and):
                                 # These are list-expecting variants of shape-expecting constraints.
                                 for item in g.items(p_e):
-                                    if isinstance(item, rdflib.BNode):
-                                        _found_child_bnodes.append(item)
-                            elif isinstance(p_e, rdflib.BNode):
-                                _found_child_bnodes.append(p_e)
-                if len(_found_child_bnodes) > 0:
-                    _gather_shapes(_found_child_bnodes, recurse_depth=recurse_depth + 1)
+                                    if isinstance(item, (rdflib.BNode, rdflib.URIRef)):
+                                        _found_child_shapes.append(item)
+                            elif isinstance(p_e, (rdflib.BNode, rdflib.URIRef)):
+                                _found_child_shapes.append(p_e)
+                if len(_found_child_shapes) > 0:
+                    pending_shapes.extend(_found_child_shapes)
 
+        for _use_shape in shapes_list:
+            if len(list(g.predicate_objects(_use_shape))) < 1:
+                raise ShapeLoadError(
+                    "Shape listed in use_shapes does not exist in the SHACL ShapesGraph.",
+                    "https://www.w3.org/TR/shacl/#shapes-graph",
+                )
         _gather_shapes(shapes_list)
 
         allowed_shapes = set(gathered_node_shapes).union(set(gathered_prop_shapes))

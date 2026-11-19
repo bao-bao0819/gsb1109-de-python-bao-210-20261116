@@ -1200,16 +1200,32 @@ class VKRecord(Record):
             # we don't really support these types, but can at least
             #  return raw binary for someone else to work with.
             return d
-        elif data_type in (RegUint8, RegInt16, RegUint16, RegInt32, RegUint32, 
-                        RegInt64, RegUint64, RegFloat, RegDouble, RegUnicodeChar, 
-                        RegBoolean, RegUnicodeString, RegCompositeValue,RegDateTimeOffset, 
-                        RegTimeSpan, RegGUID, RegUnk111, RegUnk112, RegUnk113, RegBytesArray, 
-                        RegInt16Array, RegUint16Array, RegInt32Array, RegUInt32Array, 
-                        RegInt64Array, RegUInt64Array, RegFloatArray, RegDoubleArray, 
+        elif data_type in (RegUint8, RegInt16, RegUint16, RegInt32, RegUint32,
+                        RegInt64, RegUint64, RegFloat, RegDouble, RegUnicodeChar,
+                        RegBoolean, RegUnicodeString, RegCompositeValue,RegDateTimeOffset,
+                        RegTimeSpan, RegGUID, RegUnk111, RegUnk112, RegUnk113, RegBytesArray,
+                        RegInt16Array, RegUint16Array, RegInt32Array, RegUInt32Array,
+                        RegInt64Array, RegUInt64Array, RegFloatArray, RegDoubleArray,
                         RegUnicodeCharArray, RegBooleanArray, RegUnicodeStringArray):
+            # The payload includes an 8-byte timestamp suffix that is not part
+            # of the composite stream; report the stream length as the outer
+            # size so it can be compared with the nested item count.
+            outer_size = data_length - 8 if data_length >= 8 else 0
             d = d[0:-8] # remove timestamp from end
             comp_type = data_type & 0xEFF # Apply mask for composite types
-            return SettingsParse.ParseAppDataCompositeValue(comp_type, d, len(d))
+            return SettingsParse.ParseAppDataCompositeValue(comp_type, d, len(d),
+                                                            outer_size=outer_size)
+        elif data_type & 0x100 == 0x100:
+            # A settings.dat value type this library does not know yet.  Keep
+            # the payload (minus the same trailing timestamp) instead of
+            # raising, so one unfamiliar value cannot hide the whole key.
+            outer_size = data_length - 8 if data_length >= 8 else 0
+            d = d[0:-8] if len(d) >= 8 else b""
+            comp_type = data_type & 0xFF
+            value = SettingsParse.UnknownCompositeValue(
+                comp_type, self.name(), d, offset=self.data_offset(),
+                data_size=len(d), item_byte_len=outer_size)
+            return value
         elif data_type == RegFileTime:
             return parse_windows_timestamp(struct.unpack_from(str("<Q"), d, 0)[0])
         elif data_length < 5 or data_length >= 0x80000000:

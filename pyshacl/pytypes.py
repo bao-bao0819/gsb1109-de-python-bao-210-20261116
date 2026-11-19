@@ -23,3 +23,6 @@ class SHACLExecutor:
     sparql_mode: bool = False
     max_validation_depth: int = 15
     focus_nodes: Optional[List[URIRef]] = None
+    # Per-run provenance tracker for path evaluation over multigraph datasets.
+    # None for plain (single-graph) data graphs and SPARQL remote mode.
+    path_scope_tracker: Optional[object] = None

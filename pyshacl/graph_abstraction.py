@@ -50,7 +50,7 @@ except ImportError:
 import shutil
 import warnings
 from pathlib import Path
-from typing import Any, Callable, Dict, Generator, Iterable, Mapping, Sequence, Tuple, Type, Union
+from typing import Any, Callable, Dict, Generator, Iterable, Mapping, Optional, Sequence, Tuple, Type, Union
 
 from rdflib import Dataset as rdf_Dataset
 from rdflib import Graph as rdf_Graph
@@ -761,6 +761,47 @@ if has_oxigraph:
                 default_graph = ox_DefaultGraph()
                 for q in self.impl.quads_for_pattern(ox_triple[0], ox_triple[1], ox_triple[2], default_graph):
                     yield convert_quad_to_rdflib(q)[:3]
+
+        def quads(
+            self,
+            quad: Optional[
+                Tuple[
+                    Union[rdf_IdentifiedNode, rdf_Literal, None],
+                    Union[rdf_IdentifiedNode, None],
+                    Union[rdf_IdentifiedNode, rdf_Literal, None],
+                ]
+            ] = None,
+        ) -> Generator:
+            """Yield (subject, predicate, object, graph) quads across all graphs.
+
+            Mirrors :meth:`rdflib.Dataset.quads`; the fourth element is the named
+            graph identifier, or ``None`` for the default graph. A three-element
+            pattern matches any graph, and a four-element pattern restricts it.
+            """
+            if quad is None:
+                s, p, o, g = None, None, None, None
+            elif len(quad) == 4:
+                s, p, o, g = quad
+            elif len(quad) == 3:
+                s, p, o = quad
+                g = None
+            else:
+                return
+            ox_s, ox_p, ox_o = convert_triple_to_oxigraph((s, p, o))
+            if isinstance(ox_p, ox_BlankNode) or isinstance(ox_p, ox_Literal):
+                # Oxigraph cannot match a BNode or Literal predicate.
+                return
+            if isinstance(ox_s, ox_Literal):
+                # Oxigraph cannot match a Literal subject.
+                return
+            if self.locked_context is not None:
+                ox_g = self.locked_context
+            elif g is None:
+                ox_g = None
+            else:
+                ox_g = to_ox(g)
+            for q in self.impl.quads_for_pattern(ox_s, ox_p, ox_o, ox_g):
+                yield convert_quad_to_rdflib(q)
 
         def subject_objects(
             self, predicate: Union[rdf_IdentifiedNode, None], unique: bool = False

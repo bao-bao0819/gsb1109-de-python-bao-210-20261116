@@ -6,6 +6,14 @@ and this project adheres to [Python PEP 440 Versioning](https://www.python.org/d
 
 ## [Unreleased]
 
+### Added
+
+- SHACL property path evaluation over a multigraph dataset is now graph-scoped and provenance-aware.
+  - Each complete path (sequence, alternative, inverse, and zero/one-or-more/zero-or-one) is resolved inside a single data graph; edges living in different named graphs are no longer stitched together into one path.
+  - Validation results on multigraph data carry an `urn:pyshacl:sourceGraph` triple (and a matching `Source Graph:` report line) naming the supporting graph(s). Results that cannot be reproduced on one graph name every graph boundary touched while attempting the path, including nested `sh:detail` results.
+  - Single-graph and default-graph-only validation is unchanged and emits no provenance extension; internal inference/inoculation graphs are excluded from the scope calculation.
+  - `OxigraphDataGraph` now exposes a `quads()` method matching the RDFLib dataset interface used by the scoped path evaluator.
+
 ## [0.40.2] - 2026-07-28
 
 ### Fixed

@@ -1,10 +1,11 @@
 import itertools
 import operator
-from typing import TYPE_CHECKING, List, Set, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Union
 from warnings import warn
 
 import rdflib
 from rdflib import Literal, URIRef
+from rdflib.graph import DATASET_DEFAULT_GRAPH_ID
 
 from pyshacl.consts import (
     RDF,
@@ -22,20 +23,92 @@ from pyshacl.consts import (
     SH_zeroOrOnePath,
 )
 from pyshacl.errors import ReportableRuntimeError, ShapeLoadError
+from pyshacl.helper.path_scope import UNSCOPED_GRAPH, GraphId, intersect_scopes
 
 if TYPE_CHECKING:
+    from pyshacl.helper.path_scope import PathScopeTracker
     from pyshacl.pytypes import GraphLike, RDFNode
     from pyshacl.shapes_graph import ShapesGraph
 
+# A value node maps to the set of graph ids supporting a complete path to it.
+# A result reached without consuming an edge carries UNSCOPED_GRAPH.
+ProvenanceMap = Dict[Any, Set[GraphId]]
 
-def value_nodes_from_path(sg, focus, path_val, target_graph, inverse: bool = False, recursion: int = 0) -> Set:
+
+def _is_multigraph(target_graph) -> bool:
+    is_multi = getattr(target_graph, "is_multigraph", None)
+    if callable(is_multi):
+        return bool(is_multi())
+    # RDFLib Datasets expose quads() and are multigraph even without the wrapper.
+    return hasattr(target_graph, "quads") and hasattr(target_graph, "default_graph")
+
+
+def _edge_objects(target_graph, focus, predicate, inverse: bool) -> List[Tuple[Any, GraphId]]:
+    """Return (node, graph_id) pairs for one direct path step.
+
+    On a multigraph dataset the graph id is the named graph (or the default
+    graph) containing the edge. On a plain graph every edge is unscoped because
+    there is no graph boundary to enforce.
+    """
+    if not _is_multigraph(target_graph):
+        if inverse:
+            return [(node, UNSCOPED_GRAPH) for node in target_graph.subjects(predicate, focus)]
+        return [(node, UNSCOPED_GRAPH) for node in target_graph.objects(focus, predicate)]
+    if inverse:
+        quads = target_graph.quads((None, predicate, focus, None))
+        results = [(s, _context_id(context)) for s, _p, _o, context in quads]
+    else:
+        quads = target_graph.quads((focus, predicate, None, None))
+        results = [(o, _context_id(context)) for _s, _p, o, context in quads]
+    return results
+
+
+def _context_id(context) -> GraphId:
+    # RDFLib yields None for the default graph; the DataGraph wrapper yields
+    # DATASET_DEFAULT_GRAPH_ID instead. Normalize both to the same scope.
+    if context is None:
+        return DATASET_DEFAULT_GRAPH_ID
+    identifier = getattr(context, "identifier", context)
+    if identifier is None:
+        return DATASET_DEFAULT_GRAPH_ID
+    return identifier
+
+
+def _merge_provenance(into: ProvenanceMap, node, graph_ids: Set[GraphId]) -> None:
+    bucket = into.setdefault(node, set())
+    bucket.update(graph_ids)
+
+
+def value_nodes_from_path_with_provenance(
+    sg,
+    focus,
+    path_val,
+    target_graph,
+    inverse: bool = False,
+    recursion: int = 0,
+    _attempts: Optional[Set[GraphId]] = None,
+) -> ProvenanceMap:
+    """Evaluate a SHACL path, keeping every full path inside one graph scope.
+
+    The result maps each reached value node to the graph ids that support a
+    complete path from the focus node to it. Edges taken from different graphs
+    are never joined into a single path; see
+    https://www.w3.org/TR/shacl/#property-paths for the path semantics.
+
+    When ``_attempts`` is given, every graph touched by an edge traversal is
+    recorded in it, including traversals that could not be joined into a
+    complete path, so reports can name the boundary of an un-reproducible path.
+    """
     # Link: https://www.w3.org/TR/shacl/#property-paths
     if isinstance(path_val, URIRef):
-        if inverse:
-            return set(target_graph.subjects(path_val, focus))
-        else:
-            return set(target_graph.objects(focus, path_val))
-    elif isinstance(path_val, Literal):
+        provenance: ProvenanceMap = {}
+        edges = _edge_objects(target_graph, focus, path_val, inverse)
+        if _attempts is not None:
+            _attempts.update(graph_id for _node, graph_id in edges)
+        for node, graph_id in edges:
+            _merge_provenance(provenance, node, {graph_id})
+        return provenance
+    if isinstance(path_val, Literal):
         raise ShapeLoadError(
             "Values of a property path cannot be a Literal.",
             "https://www.w3.org/TR/shacl/#property-paths",
@@ -60,89 +133,149 @@ def value_nodes_from_path(sg, focus, path_val, target_graph, inverse: bool = Fal
                 raise ReportableRuntimeError("A list of SHACL Paths must contain at least two path items.")
             else:
                 go_deeper = False
-        this_level_nodes = value_nodes_from_path(
-            sg, focus, first_node, target_graph, inverse=inverse, recursion=recursion + 1
+        first_provenance = value_nodes_from_path_with_provenance(
+            sg, focus, first_node, target_graph, inverse=inverse, recursion=recursion + 1, _attempts=_attempts
         )
         if not go_deeper:
-            return this_level_nodes
-        found_value_nodes = set()
-        for tln in iter(this_level_nodes):
-            value_nodes = value_nodes_from_path(
-                sg, tln, rest_node, target_graph, inverse=inverse, recursion=recursion + 1
+            return first_provenance
+        sequence_provenance: ProvenanceMap = {}
+        for intermediate_node, first_scopes in first_provenance.items():
+            rest_provenance = value_nodes_from_path_with_provenance(
+                sg,
+                intermediate_node,
+                rest_node,
+                target_graph,
+                inverse=inverse,
+                recursion=recursion + 1,
+                _attempts=_attempts,
             )
-            found_value_nodes.update(value_nodes)
-        return found_value_nodes
+            for value_node, rest_scopes in rest_provenance.items():
+                joined_scopes = intersect_scopes(first_scopes, rest_scopes)
+                if joined_scopes:
+                    _merge_provenance(sequence_provenance, value_node, joined_scopes)
+        return sequence_provenance
 
     find_inverse = set(sg.graph.objects(path_val, SH_inversePath))
     if len(find_inverse) > 0:
         inverse_path = next(iter(find_inverse))
-        return value_nodes_from_path(
-            sg, focus, inverse_path, target_graph, inverse=not inverse, recursion=recursion + 1
+        return value_nodes_from_path_with_provenance(
+            sg,
+            focus,
+            inverse_path,
+            target_graph,
+            inverse=not inverse,
+            recursion=recursion + 1,
+            _attempts=_attempts,
         )
 
     find_alternatives = set(sg.graph.objects(path_val, SH_alternativePath))
     if len(find_alternatives) > 0:
         alternatives_list = next(iter(find_alternatives))
-        all_collected = set()
+        alternative_provenance: ProvenanceMap = {}
         visited_alternatives = 0
-        for a in sg.graph.items(alternatives_list):
-            found_nodes = value_nodes_from_path(sg, focus, a, target_graph, inverse=inverse, recursion=recursion + 1)
+        for alternative in sg.graph.items(alternatives_list):
+            found = value_nodes_from_path_with_provenance(
+                sg,
+                focus,
+                alternative,
+                target_graph,
+                inverse=inverse,
+                recursion=recursion + 1,
+                _attempts=_attempts,
+            )
             visited_alternatives += 1
-            all_collected.update(found_nodes)
+            for node, graph_ids in found.items():
+                _merge_provenance(alternative_provenance, node, graph_ids)
         if visited_alternatives < 2:
             raise ReportableRuntimeError("List of SHACL alternate paths must have at least two path items.")
-        return all_collected
+        return alternative_provenance
 
     find_zero_or_more = set(sg.graph.objects(path_val, SH_zeroOrMorePath))
     if len(find_zero_or_more) > 0:
         zm_path = next(iter(find_zero_or_more))
-        collection_set = set()
-        # Note, the zero-or-more path always includes the current subject too!
-        collection_set.add(focus)
-        found_nodes = value_nodes_from_path(sg, focus, zm_path, target_graph, inverse=inverse, recursion=recursion + 1)
-        search_deeper_nodes = set(iter(found_nodes))
-        while len(search_deeper_nodes) > 0:
-            current_node = search_deeper_nodes.pop()
-            if current_node in collection_set:
-                continue
-            collection_set.add(current_node)
-            found_more_nodes = value_nodes_from_path(
-                sg, current_node, zm_path, target_graph, inverse=inverse, recursion=recursion + 1
-            )
-            search_deeper_nodes.update(found_more_nodes)
-        return collection_set
+        # The zero-length step always reaches the focus node without an edge.
+        collection: ProvenanceMap = {focus: {UNSCOPED_GRAPH}}
+        frontier = value_nodes_from_path_with_provenance(
+            sg, focus, zm_path, target_graph, inverse=inverse, recursion=recursion + 1, _attempts=_attempts
+        )
+        visited_nodes = {focus}
+        while frontier:
+            next_frontier: ProvenanceMap = {}
+            for current_node, current_scopes in frontier.items():
+                if current_node in visited_nodes:
+                    continue
+                visited_nodes.add(current_node)
+                _merge_provenance(collection, current_node, current_scopes)
+                deeper = value_nodes_from_path_with_provenance(
+                    sg,
+                    current_node,
+                    zm_path,
+                    target_graph,
+                    inverse=inverse,
+                    recursion=recursion + 1,
+                    _attempts=_attempts,
+                )
+                for deeper_node, deeper_scopes in deeper.items():
+                    joined_scopes = intersect_scopes(current_scopes, deeper_scopes)
+                    if joined_scopes:
+                        _merge_provenance(next_frontier, deeper_node, joined_scopes)
+            frontier = next_frontier
+        return collection
 
     find_one_or_more = set(sg.graph.objects(path_val, SH_oneOrMorePath))
     if len(find_one_or_more) > 0:
         one_or_more_path = next(iter(find_one_or_more))
-        collection_set = set()
-        found_nodes = value_nodes_from_path(
-            sg, focus, one_or_more_path, target_graph, inverse=inverse, recursion=recursion + 1
+        collection: ProvenanceMap = {}
+        frontier = value_nodes_from_path_with_provenance(
+            sg,
+            focus,
+            one_or_more_path,
+            target_graph,
+            inverse=inverse,
+            recursion=recursion + 1,
+            _attempts=_attempts,
         )
-        # Note, the one-or-more path should _not_ include the current focus
-        search_deeper_nodes = set(iter(found_nodes))
-        while len(search_deeper_nodes) > 0:
-            current_node = search_deeper_nodes.pop()
-            if current_node in collection_set:
-                continue
-            collection_set.add(current_node)
-            found_more_nodes = value_nodes_from_path(
-                sg, current_node, one_or_more_path, target_graph, inverse=inverse, recursion=recursion + 1
-            )
-            search_deeper_nodes.update(found_more_nodes)
-        return collection_set
+        visited_nodes = set()
+        while frontier:
+            next_frontier: ProvenanceMap = {}
+            for current_node, current_scopes in frontier.items():
+                if current_node in visited_nodes:
+                    continue
+                visited_nodes.add(current_node)
+                _merge_provenance(collection, current_node, current_scopes)
+                deeper = value_nodes_from_path_with_provenance(
+                    sg,
+                    current_node,
+                    one_or_more_path,
+                    target_graph,
+                    inverse=inverse,
+                    recursion=recursion + 1,
+                    _attempts=_attempts,
+                )
+                for deeper_node, deeper_scopes in deeper.items():
+                    joined_scopes = intersect_scopes(current_scopes, deeper_scopes)
+                    if joined_scopes:
+                        _merge_provenance(next_frontier, deeper_node, joined_scopes)
+            frontier = next_frontier
+        return collection
 
     find_zero_or_one = set(sg.graph.objects(path_val, SH_zeroOrOnePath))
     if len(find_zero_or_one) > 0:
         zero_or_one_path = next(iter(find_zero_or_one))
-        collection_set = set()
-        # Note, the zero-or-one path always includes the current subject too!
-        collection_set.add(focus)
-        found_nodes = value_nodes_from_path(
-            sg, focus, zero_or_one_path, target_graph, inverse=inverse, recursion=recursion + 1
+        # The zero-length step always reaches the focus node without an edge.
+        collection: ProvenanceMap = {focus: {UNSCOPED_GRAPH}}
+        found = value_nodes_from_path_with_provenance(
+            sg,
+            focus,
+            zero_or_one_path,
+            target_graph,
+            inverse=inverse,
+            recursion=recursion + 1,
+            _attempts=_attempts,
         )
-        collection_set.update(found_nodes)
-        return collection_set
+        for node, graph_ids in found.items():
+            _merge_provenance(collection, node, graph_ids)
+        return collection
     remaining = set(sg.graph.predicate_objects(path_val))
     if len(remaining) > 0:
         raise ShapeLoadError(
@@ -153,6 +286,38 @@ def value_nodes_from_path(sg, focus, path_val, target_graph, inverse: bool = Fal
     raise ShapeLoadError(
         "Cannot get any values from sh:path property. Malformed shape?", "https://www.w3.org/TR/shacl/#property-paths"
     )
+
+
+def value_nodes_from_path(
+    sg,
+    focus,
+    path_val,
+    target_graph,
+    inverse: bool = False,
+    recursion: int = 0,
+    tracker: Optional["PathScopeTracker"] = None,
+) -> Set:
+    """Backward-compatible wrapper returning the reached value nodes as a set.
+
+    When a :class:`PathScopeTracker` is supplied, the supporting graph of each
+    value node is recorded on it for report provenance, together with every
+    graph touched while attempting the path so that un-reproducible results can
+    still name the graph boundary involved.
+    """
+    attempts: Set[GraphId] = set()
+    provenance = value_nodes_from_path_with_provenance(
+        sg,
+        focus,
+        path_val,
+        target_graph,
+        inverse=inverse,
+        recursion=recursion,
+        _attempts=attempts,
+    )
+    if tracker is not None:
+        tracker.attach(focus, path_val, provenance)
+        tracker.attach_attempts(focus, path_val, attempts)
+    return set(provenance.keys())
 
 
 def nodes_from_node_expression(

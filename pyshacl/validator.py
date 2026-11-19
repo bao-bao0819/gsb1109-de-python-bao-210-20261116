@@ -325,6 +325,16 @@ class Validator(PySHACLRunType):
 
         g: DataGraph = self._target_graph
 
+        # When the data is split across named graphs, track which graph
+        # supports each path result so that paths cannot cross graph
+        # boundaries and validation results can cite their source graph.
+        # SPARQL remote mode evaluates paths server-side via SPARQL, so the
+        # local provenance tracker does not apply.
+        from .helper.path_scope import PathScopeTracker, data_graph_has_named_graphs
+
+        if not executor.sparql_mode and data_graph_has_named_graphs(g):
+            executor.path_scope_tracker = PathScopeTracker()
+
         if self.debug:
             self.logger.debug(f"Validating DataGraph named {g.identifier}")
         if advanced:

@@ -40,6 +40,7 @@ from .errors import ConstraintLoadError, ConstraintLoadWarning, ReportableRuntim
 from .helper import get_query_helper_cls
 from .helper.expression_helper import value_nodes_from_path
 from .helper.path_helper import shacl_path_to_sparql_path
+from .helper.path_scope import PathScopeTracker
 from .pytypes import GraphLike, RDFNode, SHACLExecutor
 
 if TYPE_CHECKING:
@@ -539,7 +540,14 @@ class Shape(object):
             self.logger.debug(f"Milliseconds to find focus nodes: {elapsed * 1000.0:.3f}ms")
         return found_node_targets
 
-    def value_nodes(self, target_graph, focus, sparql_mode: bool = False, debug: bool = False):
+    def value_nodes(
+        self,
+        target_graph,
+        focus,
+        sparql_mode: bool = False,
+        debug: bool = False,
+        tracker: Optional[PathScopeTracker] = None,
+    ):
         """
         For each focus node, you can get a set of value nodes.
         For a Node Shape, each focus node has just one value node,
@@ -550,6 +558,8 @@ class Shape(object):
         :type sparql_mode: bool
         :param debug:
         :type debug: bool
+        :param tracker: per-run provenance tracker for multigraph path evaluation
+        :type tracker: PathScopeTracker | None
         :return:
         """
         t1 = 0.0
@@ -596,7 +606,7 @@ class Shape(object):
                 pass
         else:
             for f in focus:
-                focus_dict[f] = value_nodes_from_path(self.sg, f, path_val, target_graph)
+                focus_dict[f] = value_nodes_from_path(self.sg, f, path_val, target_graph, tracker=tracker)
         if debug:
             t2 = perf_counter()
             elapsed = t2 - t1
@@ -724,7 +734,11 @@ class Shape(object):
         parameters = (p for p, v in self.sg.predicate_objects(self.node) if p in search_parameters)
         reports = []
         focus_value_nodes = self.value_nodes(
-            target_graph, focus_list, sparql_mode=executor.sparql_mode, debug=executor.debug
+            target_graph,
+            focus_list,
+            sparql_mode=executor.sparql_mode,
+            debug=executor.debug,
+            tracker=executor.path_scope_tracker,
         )
         filter_reports: bool = False
         allow_conform: bool = False
@@ -818,5 +832,7 @@ class Shape(object):
             t2 = perf_counter()
             elapsed = t2 - t1
             self.logger.debug(f"Milliseconds to evaluate shape {str(self)}: {elapsed * 1000.0:.3f}ms")
+        if executor.path_scope_tracker is not None and reports:
+            reports = executor.path_scope_tracker.annotate_reports(reports)
         # print(_evaluation_path, "Passes" if not non_conformant else "Fails")
         return (not non_conformant), reports

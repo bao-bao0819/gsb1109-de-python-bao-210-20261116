@@ -1,3 +1,9 @@
+1.4.0
+  - add target-environment expansion for RegExpandSZ values (Registry.Expand)
+    - preserves the stored string and exposes an explicit effective view
+    - resolves nested variable references with cycle and depth protection
+    - reports unbound variables and per-occurrence provenance separately
+
 1.2.0
   - [DEPRECATED] records() in HBINBlock, use the more correct cells() instead, by @NiKiZe
   - fix bug in parsing of resident values with length zero, reported and patched by @BridgeyTheGeek

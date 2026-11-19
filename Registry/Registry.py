@@ -20,9 +20,29 @@ from __future__ import print_function
 
 import sys
 import ntpath
+from collections import OrderedDict
 from enum import Enum
 
 from . import RegistryParse
+from .Expand import (
+    EnvironmentExpansionResult,
+    ExpansionPart,
+    STATUS_CYCLE,
+    STATUS_DEPTH_LIMIT,
+    STATUS_LITERAL,
+    STATUS_NOT_EXPANDABLE,
+    STATUS_PARTIAL,
+    STATUS_RESOLVED,
+    STATUS_UNRESOLVED,
+    TargetEnvironment,
+    environment_from_key,
+    expand,
+    expand_environment,
+    expand_environment_string,
+    expand_environment_strings,
+    expand_string,
+    expand_value as expand_registry_value,
+)
 
 RegSZ = 0x0001
 RegExpandSZ = 0x0002
@@ -222,11 +242,73 @@ class RegistryValue(object):
         """
         return self._vkrecord.data_type_str()
 
-    def value(self, overrun=0):
+    def value(self, overrun=0, environment=None):
+        """
+        Get the parsed data.
+
+        For RegExpandSZ this is the string exactly as stored in the hive: the
+        special variables are not expanded and no acquisition-host environment
+        is consulted. Use raw_value() when the caller needs the stored string
+        explicitly, or expand() when the caller supplies a target environment.
+
+        As a convenience, passing an environment returns the effective view:
+        `value(environment=env)`. A non-integer first positional argument is
+        also treated as the environment.
+        """
+        if not isinstance(overrun, int):
+            if environment is not None:
+                raise TypeError(
+                    "environment specified both positionally and by keyword")
+            environment = overrun
+            overrun = 0
+        if environment is not None:
+            return self.expand(environment)
         return self._vkrecord.data(overrun)
+
+    def raw_value(self, overrun=0):
+        """
+        Get the stored data without any environment expansion.
+        """
+        return self._vkrecord.data(overrun)
+
+    def raw(self, overrun=0):
+        """
+        Alias for raw_value().
+        """
+        return self.raw_value(overrun)
 
     def raw_data(self, overrun=0):
         return self._vkrecord.raw_data(overrun)
+
+    def expand(self, environment=None, max_depth=32):
+        """
+        Build the effective view of a RegExpandSZ value for a target machine.
+
+        Arguments:
+        - `environment`: a mapping of NAME to value, an iterable of
+              (NAME, value) pairs or "NAME=value" strings, a TargetEnvironment,
+              or a RegistryKey holding environment values. The acquisition
+              host's environment is never used implicitly.
+        - `max_depth`: recursion limit for variables that reference other
+              variables.
+
+        Returns an EnvironmentExpansionResult with the untouched raw string,
+        the effective string, and per-occurrence provenance. Unbound variables
+        remain as %NAME% placeholders and are reported in `unresolved`.
+        """
+        return expand_registry_value(self, environment, max_depth)
+
+    def expand_environment(self, environment=None, max_depth=32):
+        return self.expand(environment, max_depth)
+
+    def expanded_value(self, environment=None, max_depth=32):
+        return self.expand(environment, max_depth).effective
+
+    def effective_value(self, environment=None, max_depth=32):
+        return self.expand(environment, max_depth).effective
+
+    def effective_view(self, environment=None, max_depth=32):
+        return self.expand(environment, max_depth)
 
     def timestamp(self):
         """
@@ -261,6 +343,31 @@ class RegistryKey(object):
 
     def __getitem__(self, key):
         return self.value(key)
+
+    def expand_values(self, environment=None, max_depth=32):
+        """
+        Return an ordered mapping of value name to expansion result for every
+        RegExpandSZ value in this key. The environment is resolved explicitly
+        and never taken from the acquisition host.
+
+        With no environment every variable is reported as pending. Pass
+        ``self.environment()`` or a mapping to resolve against a target.
+        """
+        results = OrderedDict()
+        for value in self.values():
+            if value.value_type() == RegExpandSZ:
+                results[value.name()] = value.expand(environment, max_depth)
+        return results
+
+    def environment(self):
+        """
+        Read this key as a target environment, for example
+        ``ControlSet001\\Control\\Session Manager\\Environment``.
+        """
+        return TargetEnvironment(environment_from_key(self))
+
+    def expand_value(self, name, environment=None, max_depth=32):
+        return self.value(name).expand(environment, max_depth)
 
     def timestamp(self):
         """
@@ -450,6 +557,53 @@ class Registry(object):
         # are there any other keys at this
         # level? is this the name of the hive?
         return RegistryKey(self._regf.first_key()).find_key(path)
+
+    def expand_value(self, key_path, value_name, environment=None,
+                     max_depth=32):
+        """
+        Expand a RegExpandSZ value identified by key path and value name using
+        an explicit target environment. Convenience wrapper around
+        RegistryKey.value(...).expand(...).
+        """
+        return self.open(key_path).value(value_name).expand(
+            environment, max_depth)
+
+    def environment(self, key_path=None):
+        """
+        Build a target environment from an environment key. Defaults to the
+        Session Manager Environment key of the first control set found.
+        """
+        if key_path is None:
+            for control_set in ("ControlSet001", "ControlSet002",
+                                "CurrentControlSet"):
+                try:
+                    key_path = control_set + \
+                        "\\Control\\Session Manager\\Environment"
+                    key = self.open(key_path)
+                    return key.environment()
+                except RegistryKeyNotFoundException:
+                    continue
+            raise RegistryKeyNotFoundException(
+                "Session Manager\\Environment")
+        return self.open(key_path).environment()
+
+    def expand_values(self, key_path, environment=None, max_depth=32):
+        """
+        Return expansion results for every RegExpandSZ value under a key.
+        """
+        return self.open(key_path).expand_values(environment, max_depth)
+
+    def expand(self, key_path, value_name=None, environment=None,
+               max_depth=32):
+        """
+        Expand one named value, or every RegExpandSZ value under the key when
+        no value name is supplied.
+        """
+        key = self.open(key_path)
+        if value_name is None:
+            return key.expand_values(environment, max_depth)
+        return key.value(value_name).expand(environment, max_depth)
+
 
 def print_all(key):
     if len(key.subkeys()) == 0:

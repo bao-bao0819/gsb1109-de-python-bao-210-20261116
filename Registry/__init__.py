@@ -15,11 +15,12 @@
 #   See the License for the specific language governing permissions and
 #   limitations under the License.
 
-_version_ = '1.3.1'
+_version_ = '1.4.0'
 
 __all__ = [
     'Registry',
     'RegistryParse',
     'RegistryLog',
-    'SettingsParse'
+    'SettingsParse',
+    'Expand'
 ]

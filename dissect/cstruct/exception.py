@@ -25,6 +25,10 @@ class ArraySizeError(Error):
     pass
 
 
+class TelemetryError(Error):
+    pass
+
+
 class ExpressionParserError(Error):
     pass
 

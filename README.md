@@ -284,6 +284,34 @@ assert example.magic == 1337
 assert example.data == b"arbitrary length data"
 ```
 
+### Telemetry text views
+Telemetry often mixes fixed byte strings, zero terminated strings and padded wide character arrays. `TelemetryView` presents these fields as one unified text view that can be exported and rebuilt without changing any field offset.
+
+```python
+from dissect.cstruct import InsufficientBudgetError, build_view, cstruct
+
+cdef = """
+struct telemetry {
+    char  magic[4];
+    char  name[];
+    wchar label[8];
+};
+"""
+
+cs = cstruct().load(cdef)
+data = b"PF\x00\x00probe\x00" + "AB".encode("utf-16-le") + b"\x00" * 12
+view = build_view(cs.telemetry(data))
+
+assert view.texts == {"magic": "PF", "name": "probe", "label": "AB"}
+assert view.problems == ()  # no missing terminators or truncated code units
+assert view.collisions == ()  # no distinct bytes that decode to the same text
+
+export = view.export(budget=1024)  # raises InsufficientBudgetError when lossy fields don't fit
+assert export.rebuild() == data
+```
+
+Each field records its kind, offset, length, text and boundary state, so a missing terminator, a truncated code unit and a genuine empty string stay distinct. Fields that cannot be reproduced from text alone are kept in the sidecar; if a byte budget cannot hold all of them, the export reports the shortfall instead of silently dropping one.
+
 ### Custom definition parsers
 Don't like the C-like definition syntax? Write your own syntax parser!
 

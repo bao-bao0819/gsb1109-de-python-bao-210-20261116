@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 
 - Declarative syntax for structures and unions in `dissect.cstruct.declarative`, using classes with type annotations.
+- `TelemetryView` in `dissect.cstruct.telemetry`, a lossless, re-importable text view over the string-like fields of a structure or of explicit boundaries. It distinguishes fixed byte strings, zero terminated strings and padded wide character arrays, separates missing terminators, truncated code units and genuine empty strings, reports value collisions after transcoding and terminator or padding removal, and selects the originals that must be kept in a sidecar within a byte budget. `TelemetryExport.rebuild` patches the fields in place, so no field offset ever changes.
 
 ### Changed
 

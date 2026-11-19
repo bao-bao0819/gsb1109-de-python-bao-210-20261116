@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dissect.cstruct.bitbuffer import BitBuffer
+from dissect.cstruct.bounded import IncompleteRead
 from dissect.cstruct.cstruct import cstruct, ctypes, ctypes_type
 from dissect.cstruct.dump import dumpstruct, hexdump
 from dissect.cstruct.exception import (
@@ -10,6 +11,7 @@ from dissect.cstruct.exception import (
     ResolveError,
 )
 from dissect.cstruct.expression import Expression
+from dissect.cstruct.reader import read_partial
 from dissect.cstruct.types import (
     LEB128,
     Array,
@@ -64,6 +66,7 @@ __all__ = [
     "Expression",
     "Field",
     "Flag",
+    "IncompleteRead",
     "Int",
     "MetaType",
     "NullPointerDereference",
@@ -92,6 +95,7 @@ __all__ = [
     "pf16",
     "pf32",
     "pf64",
+    "read_partial",
     "swap",
     "swap16",
     "swap32",

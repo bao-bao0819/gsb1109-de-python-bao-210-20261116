@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 
 - Declarative syntax for structures and unions in `dissect.cstruct.declarative`, using classes with type annotations.
+- Bounded parsing through `read_partial` and the `IncompleteRead` exception. Reads never cross the given payload boundary, so a corrupted structure or array count cannot make a nested record read through its parent's payload. On truncation the fully confirmed elements and fields are retained, together with the failure offset and field/index path, and shortening the input only changes whether the read is complete or incomplete.
 
 ### Changed
 

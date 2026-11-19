@@ -10,7 +10,7 @@ from dissect.cstruct import compiler
 from dissect.cstruct.cstruct import cstruct
 from dissect.cstruct.types import structure
 from dissect.cstruct.types.base import Array, BaseType
-from dissect.cstruct.types.structure import Field, Union, UnionProxy
+from dissect.cstruct.types.structure import Field, Union, UnionCandidates, UnionProxy, UnionView
 from tests.util import parsed_state, source_lines, verify_compiled
 
 
@@ -1001,3 +1001,151 @@ def test_union_in_structure_write(cs: cstruct, compiled: bool) -> None:
     # Fields that are None have the default value
     obj.f = None
     assert obj.dumps() == b"\x01\x00\x00\x00\x00\x08\x00\x06"
+
+
+def test_union_select(cs: cstruct, compiled: bool) -> None:
+    """Test selecting the union member named by a discriminant, and listing candidates if it's unknown."""
+    cdef = """
+    enum Kind : uint16 {
+        raw = 1,
+        parts = 2,
+    };
+    struct pair {
+        uint16  low;
+        uint16  high;
+    };
+    union value {
+        Kind    kind;
+        pair    parts;
+        uint32  raw;
+        char    text[6];
+    };
+    """
+    cs.load(cdef, compiled=compiled)
+
+    obj = cs.value(b"\x02\x00\x04\x00\x05\x00")
+
+    view = obj.select("kind")
+    assert isinstance(view, UnionView)
+    assert view.name == "parts"
+    assert view.discriminant == cs.Kind.parts
+    assert view.key == "kind"
+    assert view.raw == b"\x02\x00\x04\x00\x05\x00"
+    assert bytes(view) == b"\x02\x00\x04\x00\x05\x00"
+    # The union members share their bytes, including those of the discriminant
+    assert view.low == 2
+    assert view.high == 4
+
+    exported = view.to_dict()
+    assert exported["name"] == "parts"
+    assert exported["bytes"] == "020004000500"
+    assert exported["discriminant"] == {"name": "kind", "value": {"name": "parts", "value": 2}}
+
+    # An unknown discriminant value lists the candidates instead of reading all members
+    unknown = cs.value(b"\x09\x00\x04\x00\x05\x00").select("kind")
+    assert isinstance(unknown, UnionCandidates)
+    assert unknown.candidates == ["parts", "raw", "text"]
+    assert unknown.bytes == b"\x09\x00\x04\x00\x05\x00"
+
+
+def test_union_select_bad_key(cs: cstruct) -> None:
+    cs.load("union value { uint8 a; uint8 b; };")
+
+    with pytest.raises(KeyError, match="no discriminant member"):
+        cs.value(b"\x00").select("kind")
+
+
+def test_union_view_write_preserves_bytes(cs: cstruct, compiled: bool) -> None:
+    """Test that changing the selected member of a view keeps the bytes of the members that weren't selected."""
+    cdef = """
+    enum Kind : uint16 {
+        raw = 1,
+        parts = 2,
+    };
+    struct pair {
+        uint16  low;
+        uint16  high;
+    };
+    union value {
+        Kind    kind;
+        pair    parts;
+        uint32  raw;
+        char    text[6];
+    };
+    """
+    cs.load(cdef, compiled=compiled)
+
+    buf = b"\x02\x00\x04\x00\x05\x00"
+    obj = cs.value(buf)
+
+    view = obj.select("kind")
+    view.low = 0x4142
+
+    assert obj.parts.low == 0x4142
+    assert obj.parts.high == 4
+    assert obj.dumps() == b"\x42\x41\x04\x00\x05\x00"
+
+    # The bytes after the selected member are kept
+    assert obj.text == b"BA\x04\x00\x05\x00"
+
+
+def test_union_bitfield_write_preserves_bits(cs: cstruct, compiled: bool) -> None:
+    """Test that changing a bit field member keeps the bits of the other members of its storage unit."""
+    cdef = """
+    union test {
+        uint8   a : 4;
+        uint8   b : 4;
+        uint8   raw;
+    };
+    """
+    cs.load(cdef, compiled=compiled)
+
+    # A union member that is a bit field reads its whole storage unit, but only patches its own bits on write
+    obj = cs.test(b"\xab")
+    assert obj.raw == 0xAB
+
+    obj.a = 1
+    assert obj.raw == 0xA1
+    assert obj.dumps() == b"\xA1"
+
+    obj = cs.test(b"\xab")
+    obj.b = 1
+    assert obj.raw == 0x1B
+    assert obj.dumps() == b"\x1B"
+
+
+def test_union_write_preserves_unselected_bytes(cs: cstruct, compiled: bool) -> None:
+    """Test that writing a union only writes the changed member, not defaults for the members it doesn't cover."""
+    cdef = """
+    union test {
+        uint32  a;
+        char    b[8];
+        uint8   c;
+    };
+    """
+    cs.load(cdef, compiled=compiled)
+
+    buf = b"\x01\x02\x03\x04\x05\x06\x07\x08"
+    obj = cs.test(buf)
+    obj.c = 0xFF
+
+    assert obj.dumps() == b"\xff\x02\x03\x04\x05\x06\x07\x08"
+
+
+def test_union_view_scalar_write(cs: cstruct, compiled: bool) -> None:
+    """Test that assigning a scalar view patches only the selected member."""
+    cdef = """
+    union test {
+        uint8   kind;
+        uint32  value;
+        char    text[4];
+    };
+    """
+    cs.load(cdef, compiled=compiled)
+
+    obj = cs.test(b"\x01\x02\x03\x04")
+    view = obj.select("kind", value="value")
+    assert view.name == "value"
+
+    view.value = 0x11223344
+    assert obj.dumps() == b"\x44\x33\x22\x11"

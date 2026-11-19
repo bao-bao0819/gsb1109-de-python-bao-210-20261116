@@ -25,7 +25,9 @@ from dissect.cstruct.types.base import (
     _is_buffer_type,
 )
 from dissect.cstruct.types.enum import EnumMetaType
+from dissect.cstruct.types.flag import Flag
 from dissect.cstruct.types.pointer import Pointer
+from dissect.cstruct.util import ENDIANNESS_TO_BYTEORDER_MAP
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
@@ -705,18 +707,58 @@ class UnionMetaType(StructureMetaType):
         if cls.__dynamic__:
             raise NotImplementedError("Writing dynamic unions is not yet supported")
 
-        offset = stream.tell()
-        expected_offset = offset + len(cls)
+        original = getattr(data, "_buf", None)
+        if original is None or endian != getattr(data, "_endian", endian):
+            # Not parsed from bytes, or written in another endianness: write by the largest field
+            offset = stream.tell()
+            expected_offset = offset + len(cls)
 
-        if (field := cls._write_field()) is not None:
-            # Write the value
-            field.type._write(stream, getattr(data, field._name), endian=endian)
+            if (field := cls._write_field()) is not None:
+                value = getattr(data, field._name)
+                if value is None:
+                    value = field.type.__default__()
+                field.type._write(stream, value, endian=endian)
 
-        # If we haven't filled the union size yet, pad it
-        if remaining := expected_offset - stream.tell():
-            stream.write(b"\x00" * remaining)
+            # If we haven't filled the union size yet, pad it
+            if remaining := expected_offset - stream.tell():
+                stream.write(b"\x00" * remaining)
 
-        return stream.tell() - offset
+            return stream.tell() - offset
+
+        # Start from the bytes the union was parsed from. For every member, only the bytes that differ from what the
+        # original bytes would serialize to are written. This preserves the bytes of members that weren't changed,
+        # including their padding, instead of clearing them with default values.
+        buf = bytearray(original.ljust(cls.__size__, b"\x00")[: cls.__size__])
+
+        # Remember the members that were changed, before the union is rebuilt from the new bytes
+        for field in cls.__fields__:
+            # Of fields with a repeated name ("_"), a union only keeps the value of the last one
+            if cls.__lookup__[field._name] is not field or field.bits:
+                # Bit fields patch their own bits into the parsed bytes when they change
+                continue
+
+            value = getattr(data, field._name)
+            if value is None:
+                continue
+
+            start = field.offset or 0
+            try:
+                patch = field.type.dumps(value, endian=endian)
+                baseline = field.type.dumps(
+                    field.type._read(io.BytesIO(original[start : start + field.type.__size__]), endian=endian),
+                    endian=endian,
+                )
+            except (AttributeError, TypeError, EOFError):
+                # A member without a complete value can't be serialized, keep its parsed bytes
+                continue
+
+            end = min(start + len(patch), len(buf), start + len(baseline))
+            for i in range(end - start):
+                if patch[i] != baseline[i]:
+                    buf[start + i] = patch[i]
+
+        stream.write(bytes(buf))
+        return cls.__size__
 
 
 class Union(Structure, metaclass=UnionMetaType):
@@ -737,6 +779,115 @@ class Union(Structure, metaclass=UnionMetaType):
         if attr in self.__class__.__lookup__:
             self._rebuild(attr)
 
+    def select(self, key: str | None = None, *, value: Any = None) -> UnionView | UnionCandidates:
+        """Select the union member named after a discriminant value.
+
+        The discriminant is the member called ``key``, e.g. a kind or tag field. Its value is looked up in the
+        union: a member name for enum and flag values, the string value for char values and the integer value for
+        other integers. If the discriminant value does not match a member, the candidate member names are returned
+        instead of reading all members.
+
+        Args:
+            key: The name of the discriminant member of the union. When omitted, the first member called ``kind``,
+                ``type``, ``tag``, ``discriminator`` or ``selector`` is used.
+            value: Optional discriminant value to select with, instead of the value of the member.
+        """
+        if key is None:
+            key = next(
+                (
+                    candidate
+                    for candidate in ("kind", "type", "tag", "discriminator", "selector")
+                    if candidate in self.__class__.__lookup__
+                ),
+                None,
+            )
+            if key is None:
+                candidates = [field._name for field in self.__class__.__fields__]
+                return UnionCandidates(self, candidates)
+
+        if key not in self.__class__.__lookup__:
+            raise KeyError(f"{self.__class__.__name__!r} has no discriminant member {key!r}")
+
+        discriminant = getattr(self, key) if value is None else value
+        if isinstance(discriminant, (Enum, Flag)) and discriminant.name is not None:
+            names = [discriminant.name]
+        elif isinstance(discriminant, bytes):
+            names = [discriminant.decode("utf-8", "surrogateescape").rstrip("\x00")]
+        elif isinstance(discriminant, str):
+            names = [discriminant.rstrip("\x00")]
+        else:
+            # Integer discriminants can name members by their decimal value, e.g. ``Kind`` values or ``case 1:``
+            names = [str(int(discriminant)), hex(int(discriminant))]
+
+        return self.resolve(key, names, value=discriminant)
+
+    def view(self, key: str | None = None, *, value: Any = None) -> UnionView | UnionCandidates:
+        """Return the view of the union member selected by the discriminant, see :meth:`select`."""
+        return self.select(key, value=value)
+
+    def resolve(self, key: str, names: str | list[str], *, value: Any = None) -> UnionView | UnionCandidates:
+        """Select the union member called one of ``names``, or return the candidates if there is no such member.
+
+        Args:
+            key: The name of the discriminant member.
+            names: The member name(s) the discriminant value points at.
+            value: The discriminant value, defaults to the value of the discriminant member.
+        """
+        if value is None:
+            value = getattr(self, key)
+
+        if isinstance(names, str):
+            names = [names]
+
+        lookup = self.__class__.__lookup__
+        for name in names:
+            if name in lookup and name != key:
+                return UnionView(self, name, discriminant=value, key=key)
+
+        # The member that holds the discriminant itself is not a candidate
+        candidates = [field._name for field in self.__class__.__fields__ if field._name != key]
+        return UnionCandidates(self, candidates, discriminant=value, key=key)
+
+    def export(self, key: str | None = None, *, value: Any = None) -> dict[str, Any]:
+        """Export the union and its discriminant-selected member to a structured dictionary.
+
+        The export always carries the original bytes of the union, so the members that weren't selected are
+        preserved. If the discriminant value is unknown, the candidate members are listed instead.
+
+        Args:
+            key: The name of the discriminant member of the union.
+            value: Optional discriminant value to select with, instead of the value of the member.
+        """
+        selected = self.select(key, value=value)
+        node: dict[str, Any] = {
+            "kind": "union",
+            "type": self.__class__.__name__,
+            "bytes": bytes(self).hex(),
+        }
+
+        if isinstance(selected, UnionCandidates):
+            node["candidates"] = selected.candidates
+            if selected.key is not None:
+                node["discriminant"] = {"name": selected.key, "value": _export_value(selected.discriminant)}
+            return node
+
+        node["selected"] = selected.name
+        node["field"] = selected.to_dict()
+        if selected.key is not None:
+            node["discriminant"] = {"name": selected.key, "value": _export_value(selected.discriminant)}
+        return node
+
+    def to_dict(self, key: str | None = None, *, value: Any = None) -> dict[str, Any]:
+        """Alias of :meth:`export`."""
+        return self.export(key, value=value)
+
+    def candidates(self, key: str | None = None, *, value: Any = None) -> list[str]:
+        """Return the names of the members that the discriminant could select, see :meth:`select`."""
+        selected = self.select(key, value=value)
+        if isinstance(selected, UnionCandidates):
+            return selected.candidates
+        return [field._name for field in self.__class__.__fields__ if field._name != selected.key]
+
     def _rebuild(self, attr: str) -> None:
         if (cur_buf := getattr(self, "_buf", None)) is None:
             cur_buf = b"\x00" * self.__class__.__size__
@@ -749,13 +900,39 @@ class Union(Structure, metaclass=UnionMetaType):
         if (value := getattr(self, attr)) is None:
             value = field.type.__default__()
 
-        field.type._write(buf, value, endian=self._endian)
+        if field.bits:
+            # Only patch the bits of this field in its storage unit, so the other fields sharing the unit keep
+            # their value instead of being overwritten by the zeroed default of the storage type.
+            self._write_bits(buf, field, value)
+        else:
+            field.type._write(buf, value, endian=self._endian)
 
         object.__setattr__(self, "_buf", buf.getvalue())
         self._update()
 
         # (Re-)proxify all values
         self._proxify()
+
+    def _write_bits(self, buf: BinaryIO, field: Field, value: Any) -> None:
+        """Write the value of a bit field to its storage unit, keeping the bits of the other fields."""
+        field_type = field.type
+        if isinstance(field_type, EnumMetaType):
+            field_type = field_type.__type__
+
+        unit_size = field_type.__size__
+        unit_bits = unit_size * 8
+        unit_offset, bit_offset = _bit_field_offset(self.__class__, field)
+
+        buf.seek(unit_offset)
+        data = int.from_bytes(buf.read(unit_size), ENDIANNESS_TO_BYTEORDER_MAP[self._endian])
+
+        mask = (1 << field.bits) - 1
+        # Little endian fills the storage unit from the least significant bit, big endian from the most significant
+        shift = bit_offset if self._endian == "<" else unit_bits - bit_offset - field.bits
+        data = (data & ~(mask << shift)) | ((int(value) & mask) << shift)
+
+        buf.seek(unit_offset)
+        buf.write(data.to_bytes(unit_size, ENDIANNESS_TO_BYTEORDER_MAP[self._endian]))
 
     def _update(self) -> None:
         result, sizes = self.__class__._read_fields(io.BytesIO(self._buf), endian=self._endian)
@@ -806,6 +983,234 @@ class UnionProxy:
     def __setattr__(self, attr: str, value: Any) -> None:
         setattr(self.__target__, attr, value)
         self.__union__._rebuild(self.__attr__)
+
+
+class UnionView:
+    """A view of one selected member of a :class:`Union`.
+
+    A union stores all its members in the same bytes. Business logic usually only wants the member selected by a
+    discriminant (e.g. an enum member name matching the member name), while the bytes of the other members must be
+    preserved when writing back. This view keeps a reference to the union and its original bytes, and exposes only
+    the selected member.
+
+    Args:
+        union: The union to view.
+        field: The name of the selected union member.
+        discriminant: The value of the discriminant that selected this view.
+        key: The name of the discriminant member, if any.
+    """
+
+    __slots__ = ("__union__", "__field__", "__key__", "__discriminant__", "__target__")
+
+    def __init__(
+        self,
+        union: Union,
+        field: str,
+        *,
+        discriminant: Any = None,
+        key: str | None = None,
+    ):
+        object.__setattr__(self, "__union__", union)
+        object.__setattr__(self, "__field__", field)
+        object.__setattr__(self, "__key__", key)
+        object.__setattr__(self, "__discriminant__", discriminant)
+        object.__setattr__(self, "__target__", getattr(union, field))
+
+    @property
+    def name(self) -> str:
+        """The name of the selected union member."""
+        return self.__field__
+
+    @property
+    def field(self) -> Field:
+        """The :class:`Field` of the selected union member."""
+        return self.__union__.__class__.__lookup__[self.__field__]
+
+    @property
+    def type(self) -> type[BaseType]:
+        """The type of the selected union member."""
+        return self.field.type
+
+    @property
+    def value(self) -> Any:
+        """The value of the selected union member."""
+        return getattr(self.__union__, self.__field__)
+
+    @value.setter
+    def value(self, value: Any) -> None:
+        setattr(self.__union__, self.__field__, value)
+
+    @property
+    def offset(self) -> int:
+        """The offset of the selected member relative to the start of the union."""
+        return self.field.offset or 0
+
+    @property
+    def size(self) -> int | None:
+        """The size of the selected member."""
+        return self.field.type.__size__
+
+    @property
+    def discriminant(self) -> Any:
+        """The discriminant value that selected this view."""
+        return self.__discriminant__
+
+    @property
+    def key(self) -> str | None:
+        """The name of the discriminant member, if any."""
+        return self.__key__
+
+    @property
+    def raw(self) -> bytes:
+        """The bytes of the whole union, including the members that weren't selected."""
+        return bytes(self.__union__)
+
+    @property
+    def bytes(self) -> bytes:
+        """The bytes of the whole union, including the members that weren't selected."""
+        return self.raw
+
+    @property
+    def data(self) -> bytes:
+        """The bytes of the whole union, including the members that weren't selected."""
+        return self.raw
+
+    def __len__(self) -> int:
+        return self.size or 0
+
+    def __bytes__(self) -> bytes:
+        return self.raw
+
+    def __getitem__(self, item: str) -> Any:
+        if item in ("raw", "data"):
+            return self.raw
+        if item in ("name", "type", "value", "offset", "size", "discriminant", "key"):
+            return getattr(self, item)
+        if item in ("bytes",):
+            return self.bytes
+        return getattr(self.__target__, item)
+
+    def __getattr__(self, attr: str) -> Any:
+        return getattr(self.__target__, attr)
+
+    def __setattr__(self, attr: str, value: Any) -> None:
+        if attr == "value":
+            # A scalar member (e.g. an integer) can't hold attributes, assign it through the union
+            setattr(self.__union__, self.__field__, value)
+            return
+
+        setattr(self.__target__, attr, value)
+        # Only patch the selected member of the original bytes, leaving the other members intact
+        self.__union__._rebuild(self.__field__)
+
+    def __repr__(self) -> str:
+        return repr(self.__target__)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Export this view to a structured dictionary, including the original union bytes."""
+        node: dict[str, Any] = {
+            "name": self.__field__,
+            "type": self.type.__name__,
+            "offset": self.offset,
+            "size": self.size,
+            "bytes": self.raw.hex(),
+            "value": _export_value(self.value),
+        }
+        if isinstance(self.__target__, Structure):
+            node["fields"] = _export_fields(self.__target__)
+        if self.__key__ is not None:
+            node["discriminant"] = {"name": self.__key__, "value": _export_value(self.__discriminant__)}
+        return node
+
+
+class UnionCandidates(list):
+    """The candidate members of a union whose discriminant value is unknown.
+
+    This is returned instead of selecting a member, so that callers can inspect the possible views without parsing
+    every branch of the union at once.
+    """
+
+    __slots__ = ("__union__", "__key__", "__discriminant__")
+
+    def __init__(self, union: Union, candidates: list[str], *, discriminant: Any = None, key: str | None = None):
+        super().__init__(candidates)
+        object.__setattr__(self, "__union__", union)
+        object.__setattr__(self, "__key__", key)
+        object.__setattr__(self, "__discriminant__", discriminant)
+
+    @property
+    def candidates(self) -> list[str]:
+        """The names of the union members that could be selected."""
+        return list(self)
+
+    @property
+    def discriminant(self) -> Any:
+        """The unknown discriminant value."""
+        return self.__discriminant__
+
+    @property
+    def key(self) -> str | None:
+        """The name of the discriminant member, if any."""
+        return self.__key__
+
+    @property
+    def raw(self) -> bytes:
+        """The bytes of the whole union."""
+        return bytes(self.__union__)
+
+    @property
+    def bytes(self) -> bytes:
+        """The bytes of the whole union."""
+        return self.raw
+
+    def to_dict(self) -> dict[str, Any]:
+        """Export the candidates and the original union bytes."""
+        node: dict[str, Any] = {"candidates": list(self), "bytes": self.raw.hex()}
+        if self.__key__ is not None:
+            node["discriminant"] = {"name": self.__key__, "value": _export_value(self.__discriminant__)}
+        return node
+
+
+def _export_fields(value: Structure) -> list[dict[str, Any]]:
+    """Export the fields of a structure as a flat list of ``name``, ``type`` and ``value`` nodes."""
+    return [
+        {"name": field._name, "type": field.type.__name__, "value": _export_value(getattr(value, field._name))}
+        for field in value.__class__.__fields__
+        if value.__class__.__lookup__[field._name] is field
+    ]
+
+
+def _export_value(value: Any) -> Any:
+    """Convert a value to a JSON-friendly representation for structured exports."""
+    if isinstance(value, bytes):
+        return {"type": "bytes", "value": value.hex()}
+    if isinstance(value, Enum):
+        return {"name": value.name, "value": value.value}
+    if isinstance(value, Structure):
+        return {name: _export_value(getattr(value, name)) for name in value.__class__.__members__}
+    if isinstance(value, list):
+        return [_export_value(item) for item in value]
+    if isinstance(value, (int, float, str, bool)) or value is None:
+        return value
+    return repr(value)
+
+
+def _bit_field_offset(type_: type[Structure], field: Field) -> tuple[int, int]:
+    """Return the offset of the storage unit of ``field`` and the position of ``field`` in its bits."""
+    field_type = None
+    bit_offset = 0
+    for member in type_.__fields__:
+        member_type = member.type.__type__ if isinstance(member.type, EnumMetaType) else member.type
+        if bit_offset == 0 or member_type is not field_type or member.offset != field.offset:
+            field_type = member_type
+            bit_offset = 0
+
+        if member is field:
+            return field.offset or 0, bit_offset
+
+        bit_offset += member.bits or 0
+
+    raise ValueError(f"Field {field._name!r} is not a field of {type_.__name__}")
 
 
 def attrsetter(path: str) -> Callable[[Any], Any]:

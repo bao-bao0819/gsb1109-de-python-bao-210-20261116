@@ -58,6 +58,7 @@ class TripleRule(SHACLRule):
         focus_nodes: Optional[Sequence['RDFNode']] = None,
         target_graph_identifier: Optional['URIRef'] = None,
     ) -> int:
+        self._last_added = ()
         focus_list: Sequence['RDFNode']
         if focus_nodes is not None:
             focus_list = list(focus_nodes)
@@ -75,6 +76,7 @@ class TripleRule(SHACLRule):
         # uses target nodes to find focus nodes
         applicable_nodes = self.filter_conditions(focus_list, data_graph)
         all_added = 0
+        all_new_triples = set()
         iterate_limit = int(TRIPLE_RULE_ITERATE_LIMIT)
         while True:
             if iterate_limit < 1:
@@ -84,6 +86,7 @@ class TripleRule(SHACLRule):
             iterate_limit -= 1
             added = 0
             to_add = []
+            seen = set()
             for a in applicable_nodes:
                 s_set = nodes_from_node_expression(self.s, a, data_graph, self.shape.sg)
                 p_set = nodes_from_node_expression(self.p, a, data_graph, self.shape.sg)
@@ -91,9 +94,14 @@ class TripleRule(SHACLRule):
                 new_triples = itertools.product(s_set, p_set, o_set)
                 this_added = False
                 for i in iter(new_triples):
-                    if not this_added and i not in data_graph:
-                        this_added = True
+                    # A triple can be generated for more than one focus node. It is
+                    # only genuinely new once, and only if the graph does not
+                    # already contain it.
+                    if i in seen or i in data_graph:
+                        continue
+                    seen.add(i)
                     to_add.append(i)
+                    this_added = True
                 if this_added:
                     added += 1
             if added > 0:
@@ -106,10 +114,12 @@ class TripleRule(SHACLRule):
                     target_graph = data_graph
                 for i in to_add:
                     target_graph.add(cast(Tuple['RDFNode', 'RDFNode', 'RDFNode'], i))
+                all_new_triples.update(to_add)
                 all_added += added
                 if self.iterate:
                     continue  # Jump up to iterate
                 else:
                     break  # Don't iterate
             break
+        self._last_added = tuple(all_new_triples)
         return all_added

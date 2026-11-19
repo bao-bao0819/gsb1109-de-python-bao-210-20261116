@@ -57,6 +57,7 @@ class RuleExpandRunner(PySHACLRunType):
             raise RuntimeError("data_graph must be a DataGraph object")
         self.data_graph: DataGraph = data_graph
         self._target_graph: Union[GraphLike, None] = None
+        self.rules_report: Optional[dict] = None
         self.ont_graph = ont_graph
         if not hasattr(self.data_graph, 'is_multigraph'):
             if isinstance(self.data_graph.impl, rdf_Dataset):
@@ -91,6 +92,8 @@ class RuleExpandRunner(PySHACLRunType):
         options_dict.setdefault('iterate_rules', False)
         options_dict.setdefault('focus_nodes', None)
         options_dict.setdefault('use_shapes', None)
+        options_dict.setdefault('max_rule_rounds', 100)
+        options_dict.setdefault('rule_closure', False)
         if 'logger' not in options_dict:
             options_dict['logger'] = logging.getLogger(__name__)
             if options_dict['debug']:
@@ -133,6 +136,8 @@ class RuleExpandRunner(PySHACLRunType):
             max_validation_depth=999,
             focus_nodes=self.options.get("focus_nodes", None),
             debug=self.debug,
+            max_rule_rounds=int(self.options.get("max_rule_rounds", 100)),
+            rule_closure=bool(self.options.get("rule_closure", False)),
         )
 
     def run(self) -> DataGraph:
@@ -252,8 +257,22 @@ class RuleExpandRunner(PySHACLRunType):
         try:
             if gathered_rules:
                 apply_rules(executor, gathered_rules, g, focus_nodes=on_focus_nodes)
+                self.rules_report = getattr(executor, "rules_report", None)
+            elif executor.iterate_rules or executor.rule_closure:
+                # Record an explicit "no_rules" closure report instead of
+                # returning None, so callers can distinguish "nothing to do"
+                # from "rules ran and converged".
+                apply_rules(executor, {}, g, focus_nodes=on_focus_nodes)
+                self.rules_report = getattr(executor, "rules_report", None)
         finally:
             if gathered_functions:
                 unapply_functions(gathered_functions, g)
+
+        if self.rules_report is not None and self.rules_report.get("status") == "incomplete":
+            self.logger.warning(
+                "SHACL Rules expansion stopped at the round limit (%s) while rules were still adding "
+                "new triples. The expanded graph is incomplete.",
+                self.rules_report.get("max_rounds"),
+            )
 
         return g

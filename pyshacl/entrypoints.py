@@ -46,6 +46,7 @@ def validate(
     focus_nodes: Optional[List[Union[str, URIRef]]] = None,
     use_shapes: Optional[List[Union[str, URIRef]]] = None,
     multi_data_graphs_mode: Optional[str] = None,
+    return_rules_report: bool = False,
     **kwargs,
 ):
     """
@@ -211,6 +212,8 @@ def validate(
     else:
         loaded_sg = None
     iterate_rules = kwargs.pop('iterate_rules', False)
+    rule_closure = bool(kwargs.pop('rule_closure', False)) or bool(iterate_rules)
+    max_rule_rounds = kwargs.pop('max_rule_rounds', None)
     if "abort_on_error" in kwargs:
         log.warning("Usage of abort_on_error is deprecated. Use abort_on_first instead.")
         ae = kwargs.pop("abort_on_error")
@@ -224,6 +227,8 @@ def validate(
         'allow_warnings': allow_warnings,
         'advanced': advanced,
         'iterate_rules': iterate_rules,
+        'rule_closure': rule_closure,
+        'max_rule_rounds': int(max_rule_rounds) if max_rule_rounds is not None else 100,
         'use_js': use_js,
         'sparql_mode': sparql_mode,
         'logger': log,
@@ -247,12 +252,16 @@ def validate(
         report_text = "Validation Failure - {}".format(e.message)
     if do_check_dash_result and validator is not None:
         passes = check_dash_result(validator, report_graph, loaded_sg or dg)
+        if return_rules_report:
+            return passes, report_graph, report_text, getattr(validator, "rules_report", None)
         return passes, report_graph, report_text
     do_serialize_report_graph = kwargs.pop('serialize_report_graph', False)
     if do_serialize_report_graph and isinstance(report_graph, Graph):
         if not (isinstance(do_serialize_report_graph, str)):
             do_serialize_report_graph = 'turtle'
         report_graph = report_graph.serialize(None, encoding='utf-8', format=do_serialize_report_graph)
+    if return_rules_report:
+        return conforms, report_graph, report_text, getattr(validator, "rules_report", None)
     return conforms, report_graph, report_text
 
 
@@ -368,8 +377,10 @@ def shacl_rules(
     inplace: Optional[bool] = False,
     focus_nodes: Optional[List[Union[str, URIRef]]] = None,
     use_shapes: Optional[List[Union[str, URIRef]]] = None,
+    max_rule_rounds: Optional[int] = None,
+    return_rules_report: bool = False,
     **kwargs,
-) -> Union[str, GraphLike]:
+) -> Union[str, GraphLike, Tuple[GraphLike, dict]]:
     """
     :param data_graph: rdflib.Graph or file path or web url of the data to validate
     :type data_graph: rdflib.Graph | str | bytes
@@ -388,6 +399,12 @@ def shacl_rules(
     :type focus_nodes: list | None
     :param use_shapes: A list of IRIs to use only those shapes from the SHACL ShapesGraph.
     :type use_shapes: list | None
+    :param max_rule_rounds: Maximum number of ordered closure rounds. A run that
+        still changes the graph at this limit is reported as incomplete.
+    :type max_rule_rounds: int | None
+    :param return_rules_report: Return ``(expanded_graph, rules_report)`` instead
+        of only the expanded graph.
+    :type return_rules_report: bool
     :param kwargs:
     :return:
     """
@@ -437,11 +454,18 @@ def shacl_rules(
     else:
         loaded_sg = None
     iterate_rules = kwargs.pop('iterate_rules', False)
+    # Any request to iterate rules now uses ordered, whole-graph closure
+    # rounds. ``rule_closure`` can also be requested explicitly.
+    rule_closure = bool(kwargs.pop('rule_closure', False)) or bool(iterate_rules)
+    if max_rule_rounds is None:
+        max_rule_rounds = kwargs.pop('max_rule_rounds', None)
     runner_options_dict = {
         'debug': do_debug or False,
         'inference': inference,
         'inplace': inplace or ephemeral,
         'iterate_rules': iterate_rules,
+        'rule_closure': rule_closure,
+        'max_rule_rounds': int(max_rule_rounds) if max_rule_rounds is not None else 100,
         'use_js': use_js,
         'logger': log,
         'focus_nodes': focus_nodes,
@@ -465,8 +489,14 @@ def shacl_rules(
             g.add((URIRef("<urn:rdflib:pyshacl:shacl-rules-error>"), RDF_type, SH.ValidationFailure))
             g.add((URIRef("<urn:rdflib:pyshacl:shacl-rules-error>"), SH.message, Literal(error)))
             return g
+    rules_report = runner.rules_report
     if serialize_expanded_graph:
         guess_format = "trig" if isinstance(expanded_graph, Dataset) else "turtle"
         serialize_format = kwargs.get('serialize_expanded_graph_format', guess_format)
-        return expanded_graph.serialize(format=serialize_format)
+        serialized = expanded_graph.serialize(format=serialize_format)
+        if return_rules_report:
+            return serialized, rules_report
+        return serialized
+    if return_rules_report:
+        return expanded_graph, rules_report
     return expanded_graph

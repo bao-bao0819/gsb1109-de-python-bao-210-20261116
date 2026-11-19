@@ -231,6 +231,22 @@ parser.add_argument(
     default=False,
 )
 parser.add_argument(
+    '-mr',
+    '--max-rule-rounds',
+    dest='max_rule_rounds',
+    action='store',
+    type=int,
+    default=None,
+    help='Maximum number of ordered SHACL Rules closure rounds (used with --rules and --iterate-rules).',
+)
+parser.add_argument(
+    '--rules-report',
+    dest='rules_report',
+    action='store',
+    default=None,
+    help='Write a JSON report of the SHACL Rules closure, including per-round evidence (used with --rules).',
+)
+parser.add_argument(
     '--server',
     help='Ignore all the rest of the options, start the HTTP Server. Same as `pyshacl_server`.',
     action='store_true',
@@ -238,6 +254,30 @@ parser.add_argument(
     default=False,
 )
 # parser.add_argument('-h', '--help', action="help", help='Show this help text.')
+
+
+def _strip_main_only_args(argv: List[str]) -> List[str]:
+    """Remove options that only the main validator parser understands.
+
+    When ``--rules`` delegates to the rules CLI, its ``argv`` must not contain
+    ``--rules`` itself, nor the closure options that are re-added explicitly.
+    """
+
+    pruned: List[str] = []
+    skip_next = False
+    for token in argv:
+        if skip_next:
+            skip_next = False
+            continue
+        if token in ("-mr", "--max-rule-rounds", "--rules-report"):
+            skip_next = True
+            continue
+        if token == "--rules":
+            continue
+        if token.startswith("--max-rule-rounds=") or token.startswith("--rules-report="):
+            continue
+        pruned.append(token)
+    return pruned
 
 
 def main(prog: Union[str, None] = None) -> None:
@@ -256,6 +296,22 @@ def main(prog: Union[str, None] = None) -> None:
         http_main()
     if args.do_rules:
         from pyshacl.cli_rules import main as rules_main
+
+        # Forward translate-safe options to the rules CLI, which owns its own
+        # argument parsing. Anything not forwarded keeps the rules defaults.
+        argv = sys.argv[1:]
+        extra: List[str] = []
+        if getattr(args, "max_rule_rounds", None) is not None:
+            extra.extend(["--max-rule-rounds", str(args.max_rule_rounds)])
+        if getattr(args, "rules_report", None) is not None:
+            extra.extend(["--rules-report", str(args.rules_report)])
+        if extra:
+            # Strip the options consumed by the main parser, then re-add the
+            # forwarded forms so the rules parser sees them exactly once.
+            pruned = _strip_main_only_args(argv)
+            sys.argv = [sys.argv[0], *pruned, *extra]
+        else:
+            sys.argv = [sys.argv[0], *_strip_main_only_args(argv)]
 
         # rules_main calls sys.exit(0) and never returns
         rules_main()

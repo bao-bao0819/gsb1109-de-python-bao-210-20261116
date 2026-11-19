@@ -114,8 +114,15 @@ optional arguments:
   -a, --advanced        Enable features from the SHACL Advanced Features
                         specification.
   -j, --js              Enable features from the SHACL-JS Specification.
-  -it, --iterate-rules  Run Shape's SHACL Rules iteratively until the
-                        data_graph reaches a steady state.
+  -it, --iterate-rules  Run all Shape's SHACL Rules in ordered rounds until
+                        the data_graph reaches a steady state.
+  -mr, --max-rule-rounds [MAX_RULE_ROUNDS]
+                        Maximum number of ordered SHACL Rules closure rounds.
+                        If this limit is reached while rules still add new
+                        triples, the run is reported as incomplete (exit code 4).
+  --rules-report [RULES_REPORT]
+                        Write a JSON report of the rule closure, including
+                        per-round evidence, to this file.
   --abort               Abort on first invalid data.
   --allow-info, --allow-infos
                         Shapes marked with severity of Info will not cause
@@ -233,7 +240,9 @@ Some other optional keyword variables available on the `validate` function:
 * `data_graph_format`: Override the format detection for the given data graph source file.
 * `shacl_graph_format`: Override the format detection for the given shacl graph source file.
 * `ont_graph_format`: Override the format detection for the given extra ontology graph source file.
-* `iterate_rules`: Iterate SHACL Rules until steady state is found (only works with advanced mode).
+* `iterate_rules`: Run all SHACL Rules in ordered, whole-graph closure rounds until a full round adds no new triples (only works with advanced mode).
+* `max_rule_rounds`: Maximum number of ordered rule-closure rounds. If the limit is reached while rules are still adding triples, the run is reported as incomplete instead of converged.
+* `return_rules_report`: When true, `shacl_rules(...)` returns `(expanded_graph, rules_report)`. The report contains the closure triples, per-round rule firings, and a `status` of `converged`, `incomplete`, or `no_rules`.
 * `do_owl_imports`: Enable the feature to allow the import of subgraphs using `owl:imports` for the shapes graph and the ontology graph. Note, you explicitly cannot use this on the target data graph.
 * `serialize_report_graph`: Convert the report results_graph into a serialised representation (for example, 'turtle')
 * `check_dash_result`: Check the validation result against the given expected DASH test suite result.

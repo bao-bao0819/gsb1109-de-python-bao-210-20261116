@@ -6,6 +6,28 @@ and this project adheres to [Python PEP 440 Versioning](https://www.python.org/d
 
 ## [Unreleased]
 
+### Changed
+
+- SHACL Rules iteration (`iterate_rules`) now runs all rules in ordered,
+  whole-graph closure rounds instead of iterating each shape's rules in
+  isolation. A rule can consume facts produced by a later rule in a previous
+  round.
+- Rule execution order is deterministic: shapes are ordered by `sh:order` then
+  node IRI, and rules within a shape likewise.
+
+### Added
+
+- `RuleClosureReport` evidence for rule runs: per-round firings, the derived
+  closure triples, and per-triple provenance.
+- `shacl_rules(..., return_rules_report=True)` and `max_rule_rounds=N`.
+- `pyshacl_rules --rules-report FILE` and `--max-rule-rounds N`.
+  A run that exhausts `max_rule_rounds` while still adding triples is reported
+  as `incomplete` and exits with code 4; it is not reported as converged.
+- A run with no applicable rules is reported as `no_rules`, distinct from both
+  convergence and an incomplete run.
+- Building a closure from an input graph no longer modifies that input graph;
+  re-running over an already-expanded graph adds nothing.
+
 ## [0.40.2] - 2026-07-28
 
 ### Fixed

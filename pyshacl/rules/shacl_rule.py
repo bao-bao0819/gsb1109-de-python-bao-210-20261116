@@ -31,7 +31,7 @@ class SHACLRuleCondition(object):
 
 
 class SHACLRule(object):
-    __slots__ = ("executor", "shape", "node", "iterate", "_deactivated")
+    __slots__ = ("executor", "shape", "node", "iterate", "_deactivated", "_last_added")
 
     def __init__(self, executor: SHACLExecutor, shape, rule_node, iterate=False):
         """
@@ -47,9 +47,15 @@ class SHACLRule(object):
         self.shape = shape
         self.node = rule_node
         self.iterate = iterate
+        self._last_added = ()
 
         deactivated_nodes = list(self.shape.sg.objects(self.node, SH_deactivated))
         self._deactivated = len(deactivated_nodes) > 0 and bool(deactivated_nodes[0])
+
+    @property
+    def last_added(self):
+        """The new triples added by the most recent call to :meth:`apply`."""
+        return self._last_added
 
     @property
     def deactivated(self):

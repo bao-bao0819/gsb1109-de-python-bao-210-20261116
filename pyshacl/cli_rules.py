@@ -75,7 +75,25 @@ parser.add_argument(
     dest='iterate_rules',
     action='store_true',
     default=False,
-    help="Run Shape's SHACL Rules iteratively until the data_graph reaches a steady state.",
+    help="Run all Shape's SHACL Rules in ordered rounds until the data_graph reaches a steady state.",
+)
+parser.add_argument(
+    '-mr',
+    '--max-rule-rounds',
+    dest='max_rule_rounds',
+    action='store',
+    type=int,
+    default=None,
+    help='Maximum number of ordered SHACL Rules closure rounds. If this limit is reached while '
+    'rules still add new triples, the run is reported as incomplete (exit code 4).',
+)
+parser.add_argument(
+    '--rules-report',
+    dest='rules_report',
+    action='store',
+    type=argparse.FileType('w'),
+    default=None,
+    help='Write a JSON report of the rule closure, including per-round evidence, to this file.',
 )
 parser.add_argument(
     '-d',
@@ -194,6 +212,10 @@ def main(prog: Union[str, None] = None) -> None:
         runner_kwargs['use_shapes'] = [_s.strip() for _s in args.shape.split(',')]
     if args.iterate_rules:
         runner_kwargs['iterate_rules'] = True
+    if args.max_rule_rounds is not None:
+        runner_kwargs['max_rule_rounds'] = args.max_rule_rounds
+    if args.rules_report is not None:
+        runner_kwargs['return_rules_report'] = True
     if args.shacl_file_format:
         _f: str = args.shacl_file_format
         if _f != "auto":
@@ -209,8 +231,11 @@ def main(prog: Union[str, None] = None) -> None:
     if args.format != "auto":
         runner_kwargs['serialize_expanded_graph_format'] = args.format
     exit_code: Union[int, None] = None
+    rules_report = None
     try:
         output_txt = shacl_rules(data_graph, **runner_kwargs)
+        if args.rules_report is not None and isinstance(output_txt, tuple) and len(output_txt) == 2:
+            output_txt, rules_report = output_txt
         if isinstance(output_txt, BaseException):
             raise output_txt
     except ValidationFailure as vf:
@@ -266,6 +291,26 @@ def main(prog: Union[str, None] = None) -> None:
         else:
             output_unicode = output_txt
         args.output.write(output_unicode)
+    if args.rules_report is not None:
+        if rules_report is None:
+            # The report was requested but rules closure did not run (e.g. no
+            # ``--iterate-rules``). Say so explicitly instead of emitting an
+            # empty object that could be mistaken for a converged run.
+            args.rules_report.write(
+                '{\n  "status": "not_run",\n  "reason": "rules_closure_not_requested"\n}\n'
+            )
+        else:
+            args.rules_report.write(rules_report.to_json(indent=2))
+            args.rules_report.write("\n")
+            if rules_report.get("status") == "incomplete":
+                sys.stderr.write(
+                    "Rules Runner reached the maximum number of rounds ({}) while rules were still adding "
+                    "new triples. The expanded graph is incomplete.\n".format(rules_report.get("max_rounds"))
+                )
+                args.rules_report.close()
+                args.output.close()
+                sys.exit(4)
+        args.rules_report.close()
     args.output.close()
     sys.exit(0)
 

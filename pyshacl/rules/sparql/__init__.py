@@ -61,6 +61,7 @@ class SPARQLRule(SHACLRule):
         focus_nodes: Optional[Sequence['RDFNode']] = None,
         target_graph_identifier: Optional['URIRef'] = None,
     ) -> int:
+        self._last_added = ()
         focus_list: Sequence['RDFNode']
         if focus_nodes is not None:
             focus_list = list(focus_nodes)
@@ -76,6 +77,7 @@ class SPARQLRule(SHACLRule):
                 return 0
             focus_list = filtered_focus_nodes
         all_added = 0
+        all_new_triples = set()
         SPARQLQueryHelper = get_query_helper_cls()
         iterate_limit = int(SPARQL_RULE_ITERATE_LIMIT)
         while True:
@@ -102,10 +104,10 @@ class SPARQLRule(SHACLRule):
                     if result_graph is None:
                         raise ReportableRuntimeError("Query executed by a SHACL SPARQLRule did not return a Graph.")
                     for i in result_graph:
-                        if not this_added and i not in data_graph:
-                            this_added = True
-                            # We only need to know at least one triple was added, then break!
-                            break
+                        if i in all_new_triples or i in data_graph:
+                            continue
+                        all_new_triples.add(i)
+                        this_added = True
                     if this_added:
                         added += 1
                         construct_graphs.add(result_graph)
@@ -132,4 +134,5 @@ class SPARQLRule(SHACLRule):
                 else:
                     break  # Don't iterate
             break  # We've reached a local steady state
+        self._last_added = tuple(all_new_triples)
         return all_added

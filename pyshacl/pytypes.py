@@ -23,3 +23,5 @@ class SHACLExecutor:
     sparql_mode: bool = False
     max_validation_depth: int = 15
     focus_nodes: Optional[List[URIRef]] = None
+    max_rule_rounds: int = 100
+    rule_closure: bool = False

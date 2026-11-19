@@ -65,6 +65,7 @@ class Validator(PySHACLRunType):
             raise RuntimeError("data_graph must be a DataGraph object")
         self.data_graph = data_graph
         self._target_graph: Union[DataGraph, None] = None
+        self.rules_report: Optional[dict] = None
         self.ont_graph = ont_graph
         if not hasattr(self.data_graph, 'is_multigraph'):
             if isinstance(self.data_graph.impl, rdf_Dataset):
@@ -113,6 +114,8 @@ class Validator(PySHACLRunType):
         options_dict.setdefault('max_validation_depth', 15)
         options_dict.setdefault('focus_nodes', None)
         options_dict.setdefault('use_shapes', None)
+        options_dict.setdefault('max_rule_rounds', 100)
+        options_dict.setdefault('rule_closure', False)
         if 'logger' not in options_dict:
             options_dict['logger'] = logging.getLogger(__name__)
             if options_dict['debug']:
@@ -195,6 +198,8 @@ class Validator(PySHACLRunType):
             max_validation_depth=self.options.get("max_validation_depth", 15),
             focus_nodes=self.options.get("focus_nodes", None),
             debug=self.debug,
+            max_rule_rounds=int(self.options.get("max_rule_rounds", 100)),
+            rule_closure=bool(self.options.get("rule_closure", False)),
         )
 
     def run(self):
@@ -335,6 +340,13 @@ class Validator(PySHACLRunType):
                     self.logger.warning("Skipping SHACL Rules because operating in SPARQL Remote Graph Mode.")
                 else:
                     apply_rules(executor, advanced['rules'], g, focus_nodes=on_focus_nodes)
+                    self.rules_report = getattr(executor, "rules_report", None)
+                    if self.rules_report is not None and self.rules_report.get("status") == "incomplete":
+                        self.logger.warning(
+                            "SHACL Rules inference stopped at the round limit (%s) while rules were still "
+                            "adding new triples. Validation results may be based on an incomplete closure.",
+                            self.rules_report.get("max_rounds"),
+                        )
         try:
             for s in shapes:
                 _is_conform, _reports = s.validate(executor, g, focus=on_focus_nodes)

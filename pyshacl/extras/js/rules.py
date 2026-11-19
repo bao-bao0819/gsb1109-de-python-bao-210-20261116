@@ -36,6 +36,7 @@ class JSRule(SHACLRule):
         focus_nodes: Union[Sequence['RDFNode'], None] = None,
         target_graph_identifier: Optional['URIRef'] = None,
     ) -> int:
+        self._last_added = ()
         focus_list: Sequence['RDFNode']
         if focus_nodes is not None:
             focus_list = list(focus_nodes)
@@ -51,6 +52,7 @@ class JSRule(SHACLRule):
                 return 0
             focus_list = filtered_focus_nodes
         all_added = 0
+        all_new_triples = set()
         iterate_limit = int(JS_RULE_ITERATE_LIMIT)
         while True:
             if iterate_limit < 1:
@@ -68,8 +70,10 @@ class JSRule(SHACLRule):
                     set_to_add = set()
                     for t in triples:
                         s, p, o = tr = t[:3]
-                        if not this_added and tr not in data_graph:
-                            this_added = True
+                        if tr in all_new_triples or tr in data_graph:
+                            continue
+                        all_new_triples.add(tr)
+                        this_added = True
                         set_to_add.add(tr)
                     sets_to_add.append(set_to_add)
                 if this_added:
@@ -91,4 +95,5 @@ class JSRule(SHACLRule):
                 else:
                     break  # Don't iterate
             break
+        self._last_added = tuple(all_new_triples)
         return all_added

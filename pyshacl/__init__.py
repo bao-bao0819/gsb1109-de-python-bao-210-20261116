@@ -2,6 +2,7 @@
 #
 from .entrypoints import shacl_rules, validate, validate_each
 from .rule_expand_runner import RuleExpandRunner
+from .rules import RuleClosureReport, apply_rules_closure
 from .shape import Shape
 from .shapes_graph import ShapesGraph
 from .validator import Validator
@@ -16,6 +17,8 @@ __all__ = [
     'shacl_rules',
     'Validator',
     'RuleExpandRunner',
+    'RuleClosureReport',
+    'apply_rules_closure',
     '__version__',
     'Shape',
     'ShapesGraph',

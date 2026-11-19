@@ -489,6 +489,12 @@ class _ReadSourceGenerator(_SourceGenerator):
                 yield from align_to_field(field)
                 yield from self._generate_field_source(field)
 
+                if self.align:
+                    # An aligned composite aligns its tail to the position in the stream, which can be past the
+                    # struct-relative size when the structure starts at an unaligned offset. The stream position no
+                    # longer matches the tracked offset, so the next field has to seek relative to the start again.
+                    current_offset = None
+
             # Bit fields
             elif field.bits:
                 if not self._starts_bit_value(field):

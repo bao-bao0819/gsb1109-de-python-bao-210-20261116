@@ -456,3 +456,61 @@ def test_align_stream_position(cs: cstruct, compiled: bool) -> None:
     fh.seek(1)
     assert cs.test_nested(c=1, d=cs.nested(a=2, b=3), e=4).write(fh) == 31
     assert fh.getvalue() == (b"\xff\x01\x00\x00\x00\x02\x00\x00\x00\x03\x00\x00\x00\x00\x00\x00\x00\x04" + bytes(14))
+
+
+def test_align_nested_struct_stream_offset(cs: cstruct, compiled: bool) -> None:
+    """Test reading the same nested structure after two prefixes when it starts at a stream offset.
+
+    The nested fields are laid out relative to the start of their structure, while the padding at the end of the
+    nested structure follows the position in the stream. Re-seeking relative to the structure start must keep the
+    following fields (here a string) at their explicit offsets, instead of letting the stream-relative padding shift
+    them or get swallowed into the string.
+    """
+    cdef = """
+    struct inner {
+        uint8   a;
+        uint32  b;
+    };
+
+    struct prefix8 {
+        uint8   pre;
+        inner   i;
+        char    tag[4];
+    };
+
+    struct prefix16 {
+        uint16  pre;
+        inner   i;
+        char    tag[4];
+    };
+    """
+    cs.load(cdef, compiled=compiled, align=True)
+
+    assert verify_compiled(cs.prefix8, compiled)
+    assert verify_compiled(cs.prefix16, compiled)
+
+    # Both structures are 16 bytes with the nested structure at offset 4 and the string at offset 12
+    for cls in (cs.prefix8, cs.prefix16):
+        assert len(cls) == 16
+        assert cls.__members__["i"].offset == 0x04
+        assert cls.__members__["tag"].offset == 0x0C
+
+    # Struct-relative bytes: pre, inner (a=2, b=11) and the string "ABCD", including inter-field padding
+    payload = bytes.fromhex("01 00 00 00 02 00 00 00 0b 00 00 00 41 42 43 44")
+
+    for lead in (0, 1, 2, 3):
+        fh = BytesIO(b"\xee" * lead + payload + b"\xff" * 8)
+        fh.seek(lead)
+
+        for cls in (cs.prefix8, cs.prefix16):
+            obj = cls(fh)
+
+            # Logical values are laid out relative to the structure and stay identical at every stream offset
+            assert obj.i.a == 0x02
+            assert obj.i.b == 0x0B
+            assert obj.tag == b"ABCD"
+
+            # The structure consumes its 16 struct-relative bytes, then the trailing padding aligns to the stream
+            assert fh.tell() == (lead + 16 + 3) & ~3
+            # Seek back to the start so the next structure is read at the same offset
+            fh.seek(lead)

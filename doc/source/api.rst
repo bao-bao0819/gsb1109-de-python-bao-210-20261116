@@ -73,6 +73,9 @@ Operate on features:
 
     FeatureDB.interfeatures
     FeatureDB.children_bp
+    FeatureDB.parent_edges
+    FeatureDB.lineage
+    FeatureDB.coverage
     FeatureDB.merge
     FeatureDB.create_introns
     FeatureDB.bed12
@@ -108,6 +111,25 @@ Creating a :class:`Feature` object:
     :nosignatures:
 
     feature_from_line
+
+Parent edges and coverage
+-------------------------
+A feature can have multiple parents (for example an exon shared by two
+transcripts). These objects keep the single feature identity separate from its
+parent edges and support both per-transcript counting and joint gene-level
+coverage without double-counting shared features:
+
+.. currentmodule:: gffutils
+
+.. autosummary::
+    :toctree: autodocs
+    :nosignatures:
+
+    FeatureLineage
+    ParentEdge
+    CoverageResult
+    CoverageReport
+    ParentResolutionError
 
 Integration with other tools
 ----------------------------

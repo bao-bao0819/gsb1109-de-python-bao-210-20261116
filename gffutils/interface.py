@@ -7,6 +7,7 @@ from gffutils import bins
 from gffutils import helpers
 from gffutils import constants
 from gffutils import merge_criteria as mc
+from gffutils import lineage as lineage_mod
 from gffutils.feature import Feature
 from gffutils.exceptions import FeatureNotFoundError
 
@@ -573,6 +574,458 @@ class FeatureDB(object):
             limit=limit,
             completely_within=completely_within,
         )
+
+    def parent_edges(self, id, level=None):
+        """
+        Yield every stored parent edge of feature `id`.
+
+        Each yielded item is a
+        :class:`gffutils.lineage.ParentEdge` ``(parent_id, level)`` tuple,
+        one per row of the ``relations`` table.
+
+        Unlike :meth:`parents`, edges are not collapsed with ``SELECT
+        DISTINCT`` against the ``features`` table, and edges whose parent
+        feature is absent from the database are still yielded. A feature
+        shared by two transcripts therefore yields two edges while remaining
+        a single feature. Use this method (or :meth:`lineage`) when every
+        parent edge matters rather than a deduplicated list of parents.
+
+        Parameters
+        ----------
+        id : string or Feature
+
+        level : None or int
+            If provided, restrict to edges at the given relation level.
+        """
+        if isinstance(id, Feature):
+            id = id.id
+        c = self.conn.cursor()
+        if level is None:
+            c.execute(
+                """
+                SELECT parent, level FROM relations
+                WHERE child = ?
+                ORDER BY level, parent
+                """,
+                (id,),
+            )
+        else:
+            c.execute(
+                """
+                SELECT parent, level FROM relations
+                WHERE child = ? AND level = ?
+                ORDER BY parent
+                """,
+                (id, level),
+            )
+        for parent_id, edge_level in c:
+            yield lineage_mod.ParentEdge(parent_id, edge_level)
+
+    def _feature_exists(self, id):
+        c = self.conn.cursor()
+        c.execute("SELECT 1 FROM features WHERE id = ? LIMIT 1", (id,))
+        return c.fetchone() is not None
+
+    def _ancestor_ids_of_type(self, id, featuretype):
+        """Distinct ancestor IDs of `id` whose featuretype matches."""
+        c = self.conn.cursor()
+        c.execute(
+            """
+            SELECT DISTINCT features.id
+            FROM relations
+            JOIN features ON features.id = relations.parent
+            WHERE relations.child = ? AND features.featuretype = ?
+            """,
+            (id, featuretype),
+        )
+        return {row[0] for row in c}
+
+    def _root_ancestor_ids(self, id):
+        """
+        Distinct ancestor IDs of `id` that themselves have no parent.
+
+        Used as a fallback grouping key when no explicit gene feature exists
+        in the parent chain.
+        """
+        c = self.conn.cursor()
+        c.execute(
+            """
+            SELECT DISTINCT relations.parent
+            FROM relations
+            WHERE relations.child = ?
+            AND relations.parent NOT IN (
+                SELECT child FROM relations
+            )
+            """,
+            (id,),
+        )
+        roots = {row[0] for row in c}
+        if roots:
+            return roots
+        c.execute(
+            """
+            SELECT DISTINCT parent FROM relations WHERE child = ?
+            """,
+            (id,),
+        )
+        return {row[0] for row in c}
+
+    def _gene_anchors_for_parent(self, parent_id, gene_featuretype):
+        """
+        Gene-like grouping IDs reachable from a direct parent ID.
+
+        A parent that is itself a gene feature is its own anchor; otherwise
+        the gene ancestors in the relation closure are used, falling back to
+        root ancestors. Shared by lineage conflict detection and gene-scope
+        grouping so the two never disagree.
+        """
+        c = self.conn.cursor()
+        c.execute(
+            "SELECT featuretype FROM features WHERE id = ? LIMIT 1",
+            (parent_id,),
+        )
+        row = c.fetchone()
+        if row is not None and row[0] == gene_featuretype:
+            return {parent_id}
+        genes = self._ancestor_ids_of_type(parent_id, gene_featuretype)
+        if genes:
+            return genes
+        return self._root_ancestor_ids(parent_id)
+
+    def lineage(self, id, gene_featuretype="gene"):
+        """
+        Build a :class:`gffutils.lineage.FeatureLineage` for feature `id`.
+
+        The lineage pairs the single feature identity with every parent edge
+        stored for it. Shared parentage (e.g. an exon with
+        ``Parent=tx1,tx2``) is represented as multiple edges of one feature,
+        never as duplicated feature rows.
+
+        Edges referencing parent IDs that are absent from the database flag
+        the lineage as :data:`gffutils.lineage.MISSING_PARENT`. Edges whose
+        present parents resolve to more than one gene feature flag it as
+        :data:`gffutils.lineage.CONFLICTING_PARENTS`. In neither case is a
+        parent chosen to "fix" the lineage; the raw edges and the offending
+        IDs are retained on the returned object.
+
+        Parameters
+        ----------
+        id : string or Feature
+
+        gene_featuretype : str
+            Featuretype used when deciding which ancestors count as genes for
+            conflict detection.
+        """
+        if isinstance(id, Feature):
+            feature = id
+        else:
+            feature = self[id]
+
+        # Keep every stored edge (including the transitive closure) for
+        # fidelity, but treat the level-1 edges as the actual parent edges.
+        ancestor_edges = list(self.parent_edges(feature.id))
+        edges = [edge for edge in ancestor_edges if edge.level == 1]
+        missing_parent_ids = [
+            edge.parent for edge in edges if not self._feature_exists(edge.parent)
+        ]
+
+        gene_sets = []
+        for parent_id in dict.fromkeys(edge.parent for edge in edges):
+            if parent_id in missing_parent_ids:
+                continue
+            gene_sets.append(
+                self._gene_anchors_for_parent(parent_id, gene_featuretype)
+            )
+        conflicting_gene_ids = sorted(
+            {gene_id for gene_set in gene_sets for gene_id in gene_set}
+        )
+
+        if len(conflicting_gene_ids) > 1:
+            status = lineage_mod.CONFLICTING_PARENTS
+        elif missing_parent_ids:
+            # A dangling edge (Parent points at an ID with no feature) means
+            # the parent relationship is missing. A feature with no edges at
+            # all is treated as a resolved root feature.
+            status = lineage_mod.MISSING_PARENT
+        else:
+            status = lineage_mod.RESOLVED
+
+        return lineage_mod.FeatureLineage(
+            feature=feature,
+            parent_edges=edges,
+            status=status,
+            missing_parent_ids=missing_parent_ids,
+            conflicting_gene_ids=conflicting_gene_ids,
+            ancestor_edges=ancestor_edges,
+        )
+
+    def coverage(
+        self,
+        featuretype="exon",
+        scope="both",
+        gene_featuretype="gene",
+        transcript_featuretype="mRNA",
+        merge=False,
+        merge_criteria=(
+            mc.seqid,
+            mc.overlap_end_inclusive,
+            mc.strand,
+            mc.feature_type,
+        ),
+        on_unresolved="keep",
+    ):
+        """
+        Coverage of child features under transcripts and/or genes.
+
+        Two accounting conventions are supported and neither duplicates
+        source rows: a feature shared by several parents keeps one identity
+        and one row per parent edge in the ``relations`` table.
+
+        Parameters
+        ----------
+        featuretype : str
+            Child featuretype to measure, typically ``"exon"``.
+
+        scope : str
+            One of:
+
+            - ``"transcript"``: one :class:`~gffutils.lineage.CoverageResult`
+              per transcript. Each parent edge counts, so a shared exon
+              contributes once to *each* transcript that references it.
+            - ``"gene"``: one result per gene. Feature identities are
+              unioned first, so a shared exon contributes only once to the
+              gene's joint coverage (its length is not summed per
+              transcript). With ``merge=True`` the coordinates are merged
+              instead, handling distinct exons that overlap.
+            - ``"both"``: returns a dict with both reports, keyed
+              ``"transcript"`` and ``"gene"``.
+
+        gene_featuretype, transcript_featuretype : str
+            Featuretypes identifying the grouping features. Common
+            alternatives include ``"transcript"`` for GTF-style annotations.
+
+        merge : bool
+            In gene scope, merge overlapping child coordinates before
+            summing (via :meth:`merge`). By default the union is taken over
+            feature identities, which already prevents shared-exon double
+            counting.
+
+        on_unresolved : {"keep", "warn", "error"}
+            Policy for lineages with missing or conflicting parent edges.
+            ``"keep"`` (default) parks them in the report's ``unresolved``
+            list without assigning them to any group; ``"warn"`` does the
+            same while emitting a warning; ``"error"`` raises
+            :class:`gffutils.exceptions.ParentResolutionError`. No policy
+            ever picks a parent to complete a tree.
+
+        Returns
+        -------
+        CoverageReport or dict
+            A :class:`~gffutils.lineage.CoverageReport` for a single scope,
+            or a dict mapping scope name to report when ``scope="both"``.
+        """
+        if scope not in ("transcript", "gene", "both"):
+            raise ValueError(
+                "scope must be one of 'transcript', 'gene', 'both'; got %r"
+                % (scope,)
+            )
+        if scope == "both":
+            return {
+                "transcript": self.coverage(
+                    featuretype=featuretype,
+                    scope="transcript",
+                    gene_featuretype=gene_featuretype,
+                    transcript_featuretype=transcript_featuretype,
+                    merge=merge,
+                    merge_criteria=merge_criteria,
+                    on_unresolved=on_unresolved,
+                ),
+                "gene": self.coverage(
+                    featuretype=featuretype,
+                    scope="gene",
+                    gene_featuretype=gene_featuretype,
+                    transcript_featuretype=transcript_featuretype,
+                    merge=merge,
+                    merge_criteria=merge_criteria,
+                    on_unresolved=on_unresolved,
+                ),
+            }
+
+        group_featuretype = (
+            transcript_featuretype if scope == "transcript" else gene_featuretype
+        )
+
+        # One lineage per feature of the requested type. A shared feature is
+        # therefore processed once; its multiple parent edges live on the
+        # single lineage instead of producing duplicated source rows.
+        all_lineages = [
+            self.lineage(feature, gene_featuretype=gene_featuretype)
+            for feature in self.all_features(featuretype=featuretype)
+        ]
+
+        # A child without a single parent edge has no relationship to
+        # resolve; keep it pending rather than attaching it to a made-up tree.
+        pending = []
+        resolved = []
+        for lin in all_lineages:
+            if not lin.parent_edges:
+                pending.append(
+                    lineage_mod.FeatureLineage(
+                        feature=lin.feature,
+                        parent_edges=lin.parent_edges,
+                        status=lineage_mod.MISSING_PARENT,
+                        missing_parent_ids=lin.missing_parent_ids,
+                        conflicting_gene_ids=lin.conflicting_gene_ids,
+                        ancestor_edges=lin.ancestor_edges,
+                    )
+                )
+            elif lin.is_resolved:
+                resolved.append(lin)
+            else:
+                pending.append(lin)
+
+        # Cache parent featuretypes via a single set-based JOIN (no large IN
+        # list) so grouping does not assume every parent's hierarchy level.
+        # Dangling parents are dropped naturally by the features JOIN.
+        parent_types = self._parent_featuretype_map(featuretype)
+
+        if scope == "transcript":
+            grouped, unanchored = self._group_for_transcripts(
+                resolved, parent_types, transcript_featuretype
+            )
+        else:
+            grouped, unanchored = self._group_for_genes(
+                resolved, gene_featuretype
+            )
+        pending.extend(unanchored)
+
+        lineage_by_id = {lin.feature_id: lin for lin in all_lineages}
+        results = []
+        for group_id in self._ordered_group_ids(grouped, group_featuretype):
+            features = list(grouped[group_id].values())
+            if scope == "gene" and merge:
+                # merge() assumes coordinate-sorted input, mirroring
+                # children_bp(order_by="start").
+                ordered = sorted(features, key=lambda feat: (feat.seqid, feat.start))
+                bp = sum(
+                    len(merged)
+                    for merged in self.merge(
+                        iter(ordered), merge_criteria=merge_criteria
+                    )
+                )
+            else:
+                # Transcript scope sums one length per edge-grouped feature;
+                # gene scope has already unioned identities so a shared exon
+                # contributes a single length.
+                bp = sum(len(feature) for feature in features)
+            results.append(
+                lineage_mod.CoverageResult(
+                    key=group_id,
+                    scope=scope,
+                    bp=bp,
+                    features=features,
+                    lineages=[lineage_by_id[feature.id] for feature in features],
+                )
+            )
+
+        lineage_mod.check_on_unresolved(on_unresolved, pending)
+        return lineage_mod.CoverageReport(scope, results, pending)
+
+    def _parent_featuretype_map(self, child_featuretype):
+        """
+        Mapping of direct-parent ID to featuretype for every edge whose child
+        has `child_featuretype`. Set-based, so it scales without a large
+        parameter list; dangling parent IDs are absent because of the JOIN.
+        """
+        c = self.conn.cursor()
+        c.execute(
+            """
+            SELECT DISTINCT relations.parent, parents.featuretype
+            FROM relations
+            JOIN features AS children ON children.id = relations.child
+            JOIN features AS parents ON parents.id = relations.parent
+            WHERE children.featuretype = ? AND relations.level = 1
+            """,
+            (child_featuretype,),
+        )
+        return {row[0]: row[1] for row in c}
+
+    def _group_for_transcripts(self, lineages, parent_types, transcript_featuretype):
+        """
+        Assign each resolved lineage to each transcript parent edge it has.
+
+        Returns (grouped, unanchored). Lineages without a transcript parent
+        are returned as unanchored (pending) instead of being dropped.
+        """
+        grouped = collections.OrderedDict()
+        unanchored = []
+        for lin in lineages:
+            transcript_parents = [
+                edge.parent
+                for edge in lin.parent_edges
+                if parent_types.get(edge.parent) == transcript_featuretype
+            ]
+            if not transcript_parents:
+                unanchored.append(
+                    lineage_mod.FeatureLineage(
+                        feature=lin.feature,
+                        parent_edges=lin.parent_edges,
+                        status=lineage_mod.MISSING_PARENT,
+                        missing_parent_ids=list(lin.parent_ids),
+                        conflicting_gene_ids=lin.conflicting_gene_ids,
+                        ancestor_edges=lin.ancestor_edges,
+                    )
+                )
+                continue
+            for transcript_id in dict.fromkeys(transcript_parents):
+                grouped.setdefault(transcript_id, collections.OrderedDict())[
+                    lin.feature_id
+                ] = lin.feature
+        return grouped, unanchored
+
+    def _group_for_genes(self, lineages, gene_featuretype):
+        """
+        Union resolved lineages under each gene they connect to.
+
+        Returns (grouped, unanchored). Lineages whose parent chain contains
+        no gene-like ancestor are returned as pending rather than being
+        attached to an invented gene.
+        """
+        grouped = collections.OrderedDict()
+        unanchored = []
+        for lin in lineages:
+            gene_ids = set()
+            for parent_id in lin.parent_ids:
+                gene_ids.update(
+                    self._gene_anchors_for_parent(parent_id, gene_featuretype)
+                )
+            if not gene_ids:
+                unanchored.append(
+                    lineage_mod.FeatureLineage(
+                        feature=lin.feature,
+                        parent_edges=lin.parent_edges,
+                        status=lineage_mod.MISSING_PARENT,
+                        missing_parent_ids=list(lin.parent_ids),
+                        conflicting_gene_ids=lin.conflicting_gene_ids,
+                        ancestor_edges=lin.ancestor_edges,
+                    )
+                )
+                continue
+            for gene_id in gene_ids:
+                grouped.setdefault(gene_id, collections.OrderedDict())[
+                    lin.feature_id
+                ] = lin.feature
+        return grouped, unanchored
+
+    def _ordered_group_ids(self, grouped, group_featuretype):
+        """Group IDs in database order, with any unknown IDs appended."""
+        known = [
+            feature.id
+            for feature in self.features_of_type(group_featuretype)
+            if feature.id in grouped
+        ]
+        known_set = set(known)
+        return known + [key for key in grouped if key not in known_set]
 
     def _execute(self, query, args):
         self._last_query = query
@@ -1779,6 +2232,10 @@ class FeatureDB(object):
         child_featuretype="exon",
         merge=False,
         merge_criteria=(mc.seqid, mc.overlap_end_inclusive, mc.strand, mc.feature_type),
+        scope=None,
+        gene_featuretype="gene",
+        transcript_featuretype="mRNA",
+        on_unresolved="keep",
         **kwargs
     ):
         """
@@ -1808,6 +2265,25 @@ class FeatureDB(object):
 
             to access the available callbacks.
 
+        scope : None, "transcript", or "gene"
+            Selects the accounting convention. ``None`` (default) preserves
+            the historical behavior: deduplicated child rows are summed
+            directly. ``"transcript"`` counts every parent edge, so a shared
+            exon contributes once to each transcript. ``"gene"`` takes the
+            joint union of child feature identities under the gene, so a
+            shared exon contributes only once instead of being double
+            counted. Use ``"transcript"`` for a transcript feature and
+            ``"gene"`` for a gene feature; unresolved lineages are handled
+            according to `on_unresolved` and never repaired by picking a
+            parent.
+
+        gene_featuretype, transcript_featuretype : str
+            Featuretypes identifying genes and transcripts when `scope` is
+            provided.
+
+        on_unresolved : {"keep", "warn", "error"}
+            Policy forwarded to :meth:`coverage` when `scope` is set.
+
         Returns
         -------
         Integer representing the total number of bp.
@@ -1826,6 +2302,30 @@ class FeatureDB(object):
                         kwargs.keys()
                     )
                 )
+
+        if scope is not None:
+            if scope not in ("transcript", "gene"):
+                raise ValueError(
+                    "scope must be None, 'transcript', or 'gene'; got %r"
+                    % (scope,)
+                )
+            if isinstance(feature, Feature):
+                feature_id = feature.id
+            else:
+                feature_id = feature
+            report = self.coverage(
+                featuretype=child_featuretype,
+                scope=scope,
+                gene_featuretype=gene_featuretype,
+                transcript_featuretype=transcript_featuretype,
+                merge=merge,
+                merge_criteria=merge_criteria,
+                on_unresolved=on_unresolved,
+            )
+            result = report.get(feature_id)
+            if result is None:
+                return 0
+            return result.bp
 
         children = self.children(
             feature, featuretype=child_featuretype, order_by="start"

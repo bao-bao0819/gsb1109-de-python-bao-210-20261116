@@ -7,6 +7,17 @@ Change log
 v0.14
 -----
 
+- Added identity-preserving parent-edge and coverage support. A feature shared
+  by multiple parents (e.g. an exon with ``Parent=tx1,tx2``) is one feature
+  with one parent edge per parent, rather than duplicated source rows. New
+  ``FeatureDB.parent_edges`` and ``FeatureDB.lineage`` expose every edge and a
+  resolution status, and ``FeatureDB.coverage`` (plus a ``scope`` argument on
+  ``FeatureDB.children_bp``) provides both per-transcript coverage (each edge
+  counts) and joint gene coverage (feature identities or coordinates are
+  unioned, so a shared exon is counted once). Missing or conflicting parentage
+  is retained as unresolved instead of silently picking the first parent; use
+  the ``on_unresolved`` policy to keep, warn on, or raise
+  ``ParentResolutionError`` for those lineages.
 - If a value contained a semicolon there would be unexpected behavior (reported
   in `#212 <https://github.com/daler/gffutils/issues/212>`__). This is solved
   by adding a new entry to the dialect, ``semicolon in quotes```, and running

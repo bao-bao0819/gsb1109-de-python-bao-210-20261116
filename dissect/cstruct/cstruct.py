@@ -40,6 +40,7 @@ if TYPE_CHECKING:
         Array,
         Field,
     )
+    from dissect.cstruct.types.base import MetaType
 
 
 T = TypeVar("T", bound=BaseType)
@@ -249,11 +250,12 @@ class cstruct:
         cs._anonymous_count = self._anonymous_count
         cs.includes = self.includes.copy()
 
-        # Update types to point to the new cstruct instance
+        # A single memo is shared across every type so that cyclic references (e.g. a structure with a pointer to
+        # itself) resolve to the copied classes. Aliases and repeated registrations of the same class collapse to
+        # the same bound copy, instead of sharing classes with the original cstruct instance.
+        memo: dict[int, MetaType] = {}
         for name, type_ in self.types.items():
-            new_type = copy.copy(type_)
-            new_type.__cs__ = cs
-            cs.add_type(name, new_type, replace=True)
+            cs.add_type(name, type_.bind(cs, memo), replace=True)
 
         for name, value in self.consts.items():
             cs.add_const(name, value)

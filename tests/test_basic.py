@@ -600,6 +600,207 @@ def test_copy(cs: cstruct) -> None:
     assert cs_copy.resolve("test2").__cs__ is cs_copy
 
 
+def test_copy_types_are_deep_copied(cs: cstruct, compiled: bool) -> None:
+    cs.load(
+        """
+        struct test {
+            uint32   a;
+            test    *next;
+            uint8    items[2];
+        };
+        """,
+        compiled=compiled,
+    )
+
+    snapshot = cs.copy()
+
+    # Copied types are distinct classes bound to the copied cstruct instance
+    assert snapshot.test is not cs.test
+    assert snapshot.test.__cs__ is snapshot
+    assert snapshot.uint32 is not cs.uint32
+    assert snapshot.uint32.__cs__ is snapshot
+
+    # Derived pointer targets and array element types are rebound to the same version
+    pointer_type = snapshot.test.__fields__[1].type
+    array_type = snapshot.test.__fields__[2].type
+    assert pointer_type.__type__ is snapshot.test
+    assert array_type.__type__ is snapshot.uint8
+
+    # The original cstruct keeps its own classes and binding
+    assert cs.test.__cs__ is cs
+    assert cs.test.__fields__[1].type.__type__ is cs.test
+
+
+def test_copy_cyclic_type_references(cs: cstruct) -> None:
+    cs.load(
+        """
+        struct node {
+            uint32 value;
+            node   *next;
+        };
+        """
+    )
+
+    snapshot = cs.copy()
+
+    # The self reference must resolve to the copied class, never leak back to the original registry
+    assert snapshot.node.__fields__[1].type.__type__ is snapshot.node
+
+    def assert_bound(type_: BaseType, seen: set[int]) -> None:
+        if id(type_) in seen:
+            return
+        seen.add(id(type_))
+        assert type_.__cs__ is snapshot
+        if hasattr(type_, "__type__"):
+            assert_bound(type_.__type__, seen)
+        for field in getattr(type_, "__fields__", []):
+            assert_bound(field.type, seen)
+
+    for bound_type in snapshot.types.values():
+        assert_bound(bound_type, set())
+
+
+def test_copy_mutation_does_not_affect_original(cs: cstruct) -> None:
+    cs.load(
+        """
+        struct test {
+            uint32 a;
+        };
+        """
+    )
+    original_size = len(cs.test)
+
+    snapshot = cs.copy()
+    snapshot.test.add_field("b", snapshot.uint32)
+
+    assert len(snapshot.test) == original_size + 4
+    assert [field.name for field in snapshot.test.__fields__] == ["a", "b"]
+
+    # The original class and its cstruct binding are untouched
+    assert len(cs.test) == original_size
+    assert [field.name for field in cs.test.__fields__] == ["a"]
+    assert cs.test.__cs__ is cs
+
+
+def test_copy_enums_flags_and_unions(cs: cstruct) -> None:
+    cs.load(
+        """
+        enum Color : uint16 { RED = 1, GREEN = 2 };
+        flag Bits : uint8 { A = 1, B = 2 };
+        union Value { uint8 as_byte; uint16 as_word; };
+        struct Holder { Color color; Bits bits; Value value; };
+        """
+    )
+
+    snapshot = cs.copy()
+
+    assert snapshot.Color is not cs.Color
+    assert snapshot.Color.__cs__ is snapshot
+    assert snapshot.Color.__type__ is snapshot.uint16
+    assert snapshot.Bits.__type__ is snapshot.uint8
+    assert snapshot.Color.RED.value == cs.Color.RED.value
+    assert snapshot.Color(1).__class__ is snapshot.Color
+
+    holder = snapshot.Holder
+    assert holder.__fields__[0].type is snapshot.Color
+    assert holder.__fields__[1].type is snapshot.Bits
+    assert holder.__fields__[2].type is snapshot.Value
+
+
+def test_replaced_type_keeps_old_version_reads(cs: cstruct) -> None:
+    cs.load(
+        """
+        struct record {
+            uint32 a;
+            uint32 b;
+        };
+        """
+    )
+
+    # An in-flight task binds the first version and derives array and pointer types from it
+    v1 = cs.record
+    v1_array = v1[2]
+    v1_pointer = cs._make_pointer(v1)
+
+    # A second task registers an incompatible new version of the same name
+    other = cstruct()
+    other.load(
+        """
+        struct record {
+            uint32 a;
+            uint64 b;
+        };
+        """
+    )
+    cs.add_type("record", other.record, replace=True)
+
+    assert cs.record is not v1
+    assert len(v1) == 8
+    assert len(cs.record) == 12
+
+    # Derived types of the old version keep interpreting data with the old layout
+    assert v1_array.__type__ is v1
+    assert v1_array.__size__ == 16
+    assert v1_pointer.__type__ is v1
+
+    payload_v1 = b"\x01\x00\x00\x00\x02\x00\x00\x00"
+    old_obj = v1(BytesIO(payload_v1))
+    assert (old_obj.a, old_obj.b) == (1, 2)
+    assert v1_array(BytesIO(payload_v1 * 2))[1].b == 2
+
+    payload_v2 = b"\x01\x00\x00\x00\x02\x00\x00\x00\x00\x00\x00\x00"
+    new_obj = cs.record(BytesIO(payload_v2))
+    assert (new_obj.a, new_obj.b) == (1, 2)
+
+
+def test_snapshot_pins_type_versions(cs: cstruct) -> None:
+    cs.load("struct record { uint32 a; uint32 b; };")
+
+    version_two = cstruct()
+    version_two.load("struct record { uint32 a; uint64 b; };")
+    cs.add_type("record", version_two.record, replace=True)
+
+    snapshot = cs.copy()
+    assert len(snapshot.record) == 12
+
+    # Registering yet another version on the live registry doesn't change the pinned snapshot
+    version_three = cstruct()
+    version_three.load("struct record { uint8 a; };")
+    cs.add_type("record", version_three.record, replace=True)
+
+    assert len(cs.record) == 1
+    assert len(snapshot.record) == 12
+    assert snapshot.record.__cs__ is snapshot
+
+
+def test_copy_pointer_dereferences_bound_target(cs: cstruct) -> None:
+    cs.load(
+        """
+        struct node {
+            uint32 value;
+            node   *next;
+        };
+        """
+    )
+    snapshot = cs.copy()
+    pointer_size = snapshot.pointer.__size__
+    node_size = 4 + pointer_size
+
+    # value=1, next points at the second node, which holds value=2 and a null pointer
+    data = (
+        (1).to_bytes(4, "little")
+        + node_size.to_bytes(pointer_size, "little")
+        + (2).to_bytes(4, "little")
+        + (0).to_bytes(pointer_size, "little")
+    )
+
+    obj = snapshot.node(BytesIO(data))
+    assert obj.value == 1
+    dereferenced = obj.next.dereference()
+    assert isinstance(dereferenced, snapshot.node)
+    assert dereferenced.value == 2
+
+
 def test_cdef(cs: cstruct) -> None:
     """Test that a cstruct instance can render all its definitions back to C-style definitions."""
     cs.load(

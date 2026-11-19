@@ -13,15 +13,23 @@ from dissect.cstruct.util import classproperty, normalize_endianness
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from typing import TypeAlias
 
     from typing_extensions import Self
 
     from dissect.cstruct.cstruct import AllowedEndianness, Endianness, cstruct
 
+    # Mapping of already rebound type classes, keyed by the id() of the original class.
+    # Type classes aren't hashable in a way that survives the copy, so id() is used explicitly.
+    TypeBindingMemo: TypeAlias = dict[int, MetaType]
+
 
 EOF = -0xE0F  # Negative counts are illegal anyway, so abuse that for our EOF sentinel
 
 _IMMUTABLE_TYPES = (int, float, bytes, str)
+
+# Class attributes that are provided by Python itself and must not be passed to a class factory when cloning
+_CLONE_IGNORED_ATTRS = frozenset({"__dict__", "__weakref__"})
 
 
 class MetaType(type):
@@ -82,6 +90,47 @@ class MetaType(type):
                 num_entries = num_entries.evaluate(cls.__cs__)
 
         return cls.__cs__._make_array(cls, num_entries)
+
+    def bind(cls, cs: cstruct, memo: TypeBindingMemo | None = None) -> MetaType:
+        """Return a deep copy of this type class, bound to the given cstruct instance.
+
+        Every type referenced by this class (e.g. array element types and pointer targets) is rebound as well,
+        using the shared ``memo``. Because cyclic type references (such as a structure containing a pointer to
+        itself) are registered in ``memo`` before their nested types are rebound, they resolve to the copied
+        classes instead of leaking back into the type registry of the original cstruct instance.
+
+        Args:
+            cs: The cstruct instance to bind the copied type class to.
+            memo: Mapping of original class ids to already rebound classes, shared across one copy operation.
+        """
+        if memo is None:
+            memo = {}
+
+        existing = memo.get(id(cls))
+        if existing is not None:
+            return existing
+
+        return cls._bind(cs, memo)
+
+    def _bind(cls, cs: cstruct, memo: TypeBindingMemo) -> MetaType:
+        """Create a bound deep copy of this type class.
+
+        The default implementation clones the class itself and rebinds every directly referenced, cstruct-bound
+        type class found in its own attributes. Subclasses with derived or nested state (structures, enums)
+        override this method. The new class must be registered in ``memo`` before any nested type is rebound,
+        so that cyclic references resolve to the copied class.
+        """
+        attrs = {key: value for key, value in cls.__dict__.items() if key not in _CLONE_IGNORED_ATTRS}
+        attrs["__cs__"] = cs
+
+        new_cls = type(cls)(cls.__name__, cls.__bases__, attrs)
+        memo[id(cls)] = new_cls
+
+        for key, value in list(new_cls.__dict__.items()):
+            if isinstance(value, MetaType) and "__cs__" in value.__dict__:
+                setattr(new_cls, key, value.bind(cs, memo))
+
+        return new_cls
 
     def __bool__(cls) -> bool:
         """Type class is always truthy."""

@@ -33,6 +33,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- `cstruct.copy()` now deep copies its type classes instead of shallow copying them, so copies no longer share classes with the original registry. Cyclic type references, such as a structure containing a pointer to itself, resolve to the copied classes, and derived array and pointer types are rebound to the same versions. In-flight reads and snapshots keep their original layout when a new version of a same-named type is registered.
 - `dumpstruct` colors the right bytes of structures with padding and unions.
 - Structures and unions no longer share nested structures and arrays between their default values.
 - Unions can be created with default values and read if they have doubly nested structures or nested unions.

@@ -80,6 +80,16 @@ class EnumMetaType(EnumMeta, MetaType):
             return super().__getitem__(name)
         return MetaType.__getitem__(cls, name)
 
+    def _bind(cls, cs: cstruct, memo: dict[int, MetaType]) -> type[Enum]:
+        # Enums and flags can't be cloned with the generic class factory: the stdlib EnumMetaType requires its
+        # own class namespace. Rebuild them through the dissect Enum/Flag base, like the parser does.
+        underlying = cls.__type__.bind(cs, memo)
+        values = {name: member.value for name, member in cls.__members__.items()}
+
+        new_cls = cls.__bases__[0](cs, cls.__name__, underlying, values)
+        memo[id(cls)] = new_cls
+        return new_cls
+
     __len__ = MetaType.__len__
 
     def __contains__(cls, value: Any) -> bool:

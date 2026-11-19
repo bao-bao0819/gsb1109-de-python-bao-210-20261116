@@ -1,6 +1,14 @@
 # -*- coding: latin-1 -*-
 #
 from .entrypoints import shacl_rules, validate, validate_each
+from .release_gate import (
+    BlockingEvidence,
+    Exemption,
+    ReleaseDecision,
+    ReleaseGate,
+    Severity,
+    build_release_gate,
+)
 from .rule_expand_runner import RuleExpandRunner
 from .shape import Shape
 from .shapes_graph import ShapesGraph
@@ -19,4 +27,10 @@ __all__ = [
     '__version__',
     'Shape',
     'ShapesGraph',
+    'ReleaseGate',
+    'ReleaseDecision',
+    'BlockingEvidence',
+    'Exemption',
+    'Severity',
+    'build_release_gate',
 ]

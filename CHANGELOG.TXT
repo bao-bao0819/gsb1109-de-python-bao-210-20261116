@@ -1,3 +1,9 @@
+1.4.0
+  - add Registry.LayeredConfig for resolving system/user/policy configurations
+    into an effective view with per-item source chains, explicit absent/empty/
+    deleted states, deletion markers (including subtree deletes), fresh
+    recomputation after policy withdrawal, and a separate type-conflict list
+
 1.2.0
   - [DEPRECATED] records() in HBINBlock, use the more correct cells() instead, by @NiKiZe
   - fix bug in parsing of resident values with length zero, reported and patched by @BridgeyTheGeek

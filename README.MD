@@ -67,6 +67,50 @@ Advanced users who wish to study the structure of the Windows
 Registry may find the `Registry.RegistryParse` module useful.
 This module implements all known structures of the Windows Registry.
 
+
+Layered configuration
+---------------------
+`Registry.LayeredConfig` resolves an effective configuration from
+three layers.  The default priority, from lowest to highest, is
+`system`, then `user`, then `policy`.
+
+
+    from Registry.LayeredConfig import DELETE, LayeredConfig
+
+    config = LayeredConfig()
+    config.set("system", "browser.homepage", "https://intranet/", "REG_SZ")
+    config.set("user", "browser.homepage", "https://example.com/", "REG_SZ")
+    config.set("policy", "browser.homepage", DELETE)
+
+    item = config.effective()["browser.homepage"]
+    item.state          # State.DELETED: the policy marker hides both lower values
+    item.source_chain   # policy tombstone, then the masked user and system values
+
+    config.withdraw("policy")
+    config.effective()["browser.homepage"].value   # "https://example.com/"
+
+Every effective item reports one of four states:
+
+- `ABSENT`: no layer mentioned the name.
+- `PRESENT`: the winning layer set a non-empty value.
+- `EMPTY`: the winning layer set an explicit empty value (`""`, `b""`,
+  `[]`, `{}` or `None`); lower layers are not consulted.
+- `DELETED`: a deletion marker hides the lower values.
+
+A deletion marker is data, not a mutation: `effective()` always rebuilds
+from the raw entries, so withdrawing or replacing the policy layer
+re-reveals the correct lower values instead of reusing a stale overlay.
+Names whose sources declare different value types are listed separately
+in `effective().conflicts` (each conflict is also returned by
+`config.conflicts()`); the winning value is still reported normally.
+
+`DELETE` removes one name.  `DeleteTree("app")` removes a name and every
+name below it.  `config.remove(layer, name)` withdraws a single raw entry
+without adding a marker, and `config.revoke(layer)` is an alias for
+`withdraw(layer)`.  `to_dict()` renders the whole result, including source
+chains and conflicts, as JSON-friendly data.
+
+
 Wanted
 ------
   - Bug reports.

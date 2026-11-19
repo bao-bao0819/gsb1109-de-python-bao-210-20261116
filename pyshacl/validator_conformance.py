@@ -1,6 +1,9 @@
+import datetime
+import decimal
 import logging
+from collections import Counter
 from io import StringIO
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Union
+from typing import TYPE_CHECKING, Any, FrozenSet, List, Optional, Set, Tuple, Union
 
 import rdflib
 from rdflib import BNode, Literal, Namespace, URIRef
@@ -8,6 +11,7 @@ from rdflib.query import Result
 from rdflib.util import from_n3
 
 from pyshacl.consts import (
+    RDF_first,
     RDF_object,
     RDF_predicate,
     RDF_subject,
@@ -19,7 +23,11 @@ from pyshacl.consts import (
     SH_result,
     SH_resultMessage,
     SH_resultPath,
+    SH_resultSeverity,
     SH_select,
+    SH_sourceConstraint,
+    SH_sourceConstraintComponent,
+    SH_sourceShape,
     SH_ValidationReport,
     SH_value,
 )
@@ -35,6 +43,111 @@ if TYPE_CHECKING:
     from pyshacl.validator import Validator
 
 DASH = Namespace("http://datashapes.org/dash#")
+
+# Recursion limit when building structural signatures of nested blank nodes.
+_SIGNATURE_RECURSION_LIMIT = 12
+
+# The fields that identify a validation result. Each entry pairs a label used
+# inside the signature with the SHACL predicate of the field. Order does not
+# affect matching (the signature is a set), it only keeps the code readable.
+_RESULT_SIGNATURE_FIELDS: Tuple[Tuple[str, Any], ...] = (
+    ("focusNode", SH_focusNode),
+    ("value", SH_value),
+    ("resultPath", SH_resultPath),
+    ("resultSeverity", SH_resultSeverity),
+    ("sourceConstraintComponent", SH_sourceConstraintComponent),
+    ("sourceShape", SH_sourceShape),
+    ("sourceConstraint", SH_sourceConstraint),
+    ("resultMessage", SH_resultMessage),
+    ("detail", SH_detail),
+)
+
+
+# Literal python values with stable, value-based equality and hashing. Other
+# datatypes (e.g. rdf:HTML parsed into an XML DocumentFragment) produce fresh
+# objects per parse, so for those we fall back to the lexical form and datatype.
+_SCALAR_LITERAL_VALUE_TYPES = (
+    str,
+    bool,
+    int,
+    float,
+    decimal.Decimal,
+    datetime.datetime,
+    datetime.date,
+    datetime.time,
+    datetime.timedelta,
+    bytes,
+)
+
+
+def _literal_signature(node: rdflib.Literal):
+    # Match on the literal value, not its (re-generated) lexical form, so that
+    # value-equal literals (e.g. "1"^^xsd:integer and "1"^^xsd:int) stay equal.
+    value = node.value
+    if isinstance(value, _SCALAR_LITERAL_VALUE_TYPES):
+        return ("literal", type(value).__name__, value, node.language or "")
+    # Unparseable or non-scalar datatypes: compare the lexical form and
+    # datatype IRI instead of the parsed python object, which has no stable
+    # identity across independently parsed graphs.
+    return ("literal-lex", str(node), str(node.datatype), node.language or "")
+
+
+def _blank_node_signature(graph: GraphLike, node: rdflib.BNode, recursion: int):
+    # Structural identity: the predicates/objects attached to the blank node,
+    # never the blank node's generated id. RDF lists keep their item order,
+    # ordinary predicate/object pairs are compared as an unordered multiset.
+    if recursion >= _SIGNATURE_RECURSION_LIMIT:
+        return ("bnode-recursion-limit",)
+    predicates = set(graph.predicates(node))
+    if RDF_first in predicates:
+        return (
+            "list",
+            tuple(_node_signature(graph, item, recursion + 1) for item in graph.items(node)),
+        )
+    predicate_object_pairs: Counter = Counter()
+    for predicate in predicates:
+        for obj in graph.objects(node, predicate):
+            predicate_object_pairs[(str(predicate), _node_signature(graph, obj, recursion + 1))] += 1
+    return ("bnode", frozenset(predicate_object_pairs.items()))
+
+
+def _node_signature(graph: GraphLike, node, recursion: int = 0):
+    # A name-independent identity for an RDF node: URIRefs and literals on their
+    # actual value, blank nodes on their surrounding structure. This is what lets
+    # the same validation result match even when every blank node got a new id.
+    if isinstance(node, Literal):
+        return _literal_signature(node)
+    if isinstance(node, URIRef):
+        return ("uri", str(node))
+    if isinstance(node, BNode):
+        return _blank_node_signature(graph, node, recursion + 1)
+    return ("other", str(node))
+
+
+def _result_signature(graph: GraphLike, result_node) -> FrozenSet[Tuple[Tuple[str, Any], int]]:
+    # Build the structural fingerprint of one sh:ValidationResult, covering its
+    # focus node, value, path, severity, source shape/constraint, messages and
+    # nested details. Repeated objects (and repeated results) are represented by
+    # a multiplicity, so genuinely duplicated violations stay distinct.
+    field_signatures: Counter = Counter()
+    for field_name, predicate in _RESULT_SIGNATURE_FIELDS:
+        for obj in graph.objects(result_node, predicate):
+            field_signatures[(field_name, _node_signature(graph, obj))] += 1
+    return frozenset(field_signatures.items())
+
+
+def _describe_result(graph: GraphLike, result_node) -> str:
+    # Best-effort human-readable rendering for log messages only.
+    parts = []
+    for field_name, predicate in _RESULT_SIGNATURE_FIELDS:
+        objects = list(graph.objects(result_node, predicate))
+        if objects:
+            try:
+                rendered = ", ".join(stringify_node(graph, obj) for obj in objects)
+            except Exception:
+                rendered = "<unprintable node>"
+            parts.append("{}: {}".format(field_name, rendered))
+    return "; ".join(parts)
 
 
 def clean_validation_reports(actual_graph, actual_report, expected_graph, expected_report):
@@ -87,9 +200,6 @@ def compare_validation_reports(
             "Cannot check the expected result, the given expectedResult does not have an sh:conforms."
         )
     expected_conform = next(iter(expected_conforms))
-    expected_result_nodes_i = expected_graph.objects(expected_result, SH_result)
-    expected_result_nodes = list(expected_result_nodes_i)
-    expected_result_node_count = len(expected_result_nodes)
 
     validation_reports = report_graph.subjects(RDF_type, SH_ValidationReport)
     validation_reports_set = set(validation_reports)
@@ -99,9 +209,6 @@ def compare_validation_reports(
         )
     validation_report = next(iter(validation_reports_set))
     clean_validation_reports(report_graph, validation_report, expected_graph, expected_result)
-    eq = compare_blank_node(report_graph, validation_report, expected_graph, expected_result)
-    if eq != 0:
-        return False
     report_conforms_i = report_graph.objects(validation_report, SH_conforms)
     report_conforms = set(report_conforms_i)
     if len(report_conforms) < 1:  # pragma: no cover
@@ -119,74 +226,42 @@ def compare_validation_reports(
         log.error("Expected Result Conforms value is different from Validation Report's Conforms value.")
         return False
 
-    report_result_nodes_i = report_graph.objects(validation_report, SH_result)
-    report_result_nodes = list(report_result_nodes_i)
-    report_result_node_count = len(report_result_nodes)
+    expected_results = list(expected_graph.objects(expected_result, SH_result))
+    report_results = list(report_graph.objects(validation_report, SH_result))
 
-    if expected_result_node_count != report_result_node_count:
-        # TODO:coverage: write a test for this
+    # Compare results as a multiset of structural signatures instead of a
+    # name-keyed dict. Blank node ids are regenerated on every validation run,
+    # so matching on (focus, value, path) strings with blank nodes collapsed to
+    # a single "BNode" placeholder both misses real changes (any two blank-node
+    # results look identical) and reports phantom changes when ids shift.
+    expected_signatures = Counter(_result_signature(expected_graph, r) for r in expected_results)
+    report_signatures = Counter(_result_signature(report_graph, r) for r in report_results)
+    if expected_signatures == report_signatures:
+        return True
+
+    # Keep one representative result node per signature so the log messages can
+    # describe the genuinely added and removed violations, not renamed blanks.
+    expected_by_signature = {_result_signature(expected_graph, r): r for r in expected_results}
+    report_by_signature = {_result_signature(report_graph, r): r for r in report_results}
+    missing_signatures = expected_signatures - report_signatures
+    extra_signatures = report_signatures - expected_signatures
+    for signature, multiplicity in sorted(missing_signatures.items(), key=lambda item: item[1], reverse=True):
+        representative = expected_by_signature.get(signature)
+        description = _describe_result(expected_graph, representative) if representative is not None else ""
         log.error(
-            "Number of expected result's sh:result entries is different from Validation Report's sh:result entries.\n"
-            "Expected {}, got {}.".format(expected_result_node_count, report_result_node_count)
-        )
-        return False
-
-    expected_results_dict: Dict[Tuple[str, str, str], Any] = {}
-    report_results_dict: Dict[Tuple[str, str, str], Any] = {}
-    for result_nodes, result_graph, dest_dict in (
-        (expected_result_nodes, expected_graph, expected_results_dict),
-        (report_result_nodes, report_graph, report_results_dict),
-    ):
-        for result in result_nodes:
-            result_focus_i = result_graph.objects(result, SH_focusNode)
-            result_focus_list = list(result_focus_i)
-            if len(result_focus_list) > 0:
-                f_node = result_focus_list[0]
-                if isinstance(f_node, Literal):
-                    result_focus = str(f_node)
-                elif isinstance(f_node, BNode):
-                    # result_value = "_:" + str(v_node)
-                    # Can't compare BNodes because they are
-                    # different in the shapes graph than the data graph
-                    result_focus = "BNode"
-                else:
-                    result_focus = stringify_node(result_graph, f_node)
-            else:
-                result_focus = ""
-            result_value_i = result_graph.objects(result, SH_value)
-            result_value_list = list(result_value_i)
-            if len(result_value_list) > 0:
-                v_node = result_value_list[0]
-                if isinstance(v_node, Literal):
-                    result_value = str(v_node)
-                elif isinstance(v_node, BNode):
-                    # result_value = "_:" + str(v_node)
-                    # Can't compare BNodes because they are
-                    # different in the shapes graph than the data graph
-                    result_value = "BNode"
-                else:
-                    result_value = stringify_node(result_graph, v_node)
-            else:
-                result_value = ""
-            result_path_i = result_graph.objects(result, SH_resultPath)
-            result_path_list = list(result_path_i)
-            if len(result_path_list) > 0:
-                result_path = stringify_node(result_graph, result_path_list[0])
-            else:
-                result_path = ""
-            dest_dict[(result_focus, result_value, result_path)] = result
-    not_found_results = 0
-    for expected_focus, expected_value, expected_path in expected_results_dict.keys():
-        if (expected_focus, expected_value, expected_path) not in report_results_dict:
-            log.error(
-                "Expected result not found in Validation Report.\nExpected focus: {}, value: {}, path: {}.".format(
-                    expected_focus, expected_value, expected_path
-                )
+            "Expected validation result not found in Validation Report ({} occurrence(s)).\n{}".format(
+                multiplicity, description
             )
-            not_found_results += 1
-    if not_found_results > 0:
-        return False
-    return True
+        )
+    for signature, multiplicity in sorted(extra_signatures.items(), key=lambda item: item[1], reverse=True):
+        representative = report_by_signature.get(signature)
+        description = _describe_result(report_graph, representative) if representative is not None else ""
+        log.error(
+            "Unexpected validation result present in Validation Report ({} occurrence(s)).\n{}".format(
+                multiplicity, description
+            )
+        )
+    return False
 
 
 def compare_inferencing_reports(data_graph: GraphLike, expected_graph: GraphLike, expected_results: Union[List, Set]):

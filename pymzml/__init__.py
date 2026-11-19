@@ -25,7 +25,16 @@ Copyright (C) 2010-2019 M. Kösters, C. Fufezan
     SOFTWARE.
 """
 
-__all__ = ["run", "spec", "chromatogram", "obo", "minimum", "plot", "file_classes"]
+__all__ = [
+    "run",
+    "spec",
+    "energy",
+    "chromatogram",
+    "obo",
+    "minimum",
+    "plot",
+    "file_classes",
+]
 
 import sys
 
@@ -40,7 +49,18 @@ __version__ = version("pymzml").rstrip(".dev0")
 # Imports of individual modules
 import pymzml.run
 import pymzml.spec
+import pymzml.energy
 import pymzml.chromatogram
+from pymzml.energy import (
+    AcquisitionEnergy,
+    CollisionEnergy,
+    EnergyBucket,
+    EnergyCondition,
+    EnergySource,
+    bucket_conditions,
+    comparable_conditions,
+    parse_spectrum_element,
+)
 from pymzml.spec import MSDecoder
 from pymzml.chromatogram import Chromatogram
 import pymzml.obo

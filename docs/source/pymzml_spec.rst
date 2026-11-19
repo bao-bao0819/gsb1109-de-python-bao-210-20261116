@@ -35,3 +35,20 @@ MsData
 
 .. autoclass:: pymzml.msdata.MsData
     :members:
+
+Collision energies
+------------------
+
+.. automodule:: pymzml.energy
+
+.. autoclass:: pymzml.energy.AcquisitionEnergy
+    :members:
+
+.. autoclass:: pymzml.energy.EnergyBucket
+    :members:
+
+.. autofunction:: pymzml.energy.parse_spectrum_element
+
+.. autofunction:: pymzml.energy.comparable_conditions
+
+.. autofunction:: pymzml.energy.bucket_conditions

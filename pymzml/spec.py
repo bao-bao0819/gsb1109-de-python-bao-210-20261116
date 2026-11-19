@@ -68,6 +68,16 @@ except (ImportError, ModuleNotFoundError) as e:
     pass
 from . import regex_patterns
 from .decoder import MSDecoder
+from .energy import (
+    AcquisitionEnergy,
+    CollisionEnergy,
+    EnergyBucket,
+    EnergyCondition,
+    bucket_conditions,
+    bucket_spectra,
+    comparable_conditions,
+    parse_spectrum_element,
+)
 from .obo import OboTranslator
 
 PROTON = 1.00727646677
@@ -83,6 +93,15 @@ _TIME_UNIT_ACCESSIONS = {
     "UO:0000010": "second",
     "UO:0000031": "minute",
     "UO:0000032": "hour",
+}
+
+# Accessions that fall back to the structured energy parser when no cvParam
+# with that accession is present in the XML (e.g. vendor userParam files).
+_ENERGY_ACCESSIONS = {
+    "MS:1000045",
+    "MS:1000138",
+    "MS:1002013",
+    "MS:1002014",
 }
 
 
@@ -460,6 +479,7 @@ class Spectrum(MsData):
             "deconvoluted": None,
         }
         self._selected_precursors = None
+        self._energy_conditions = None
         self._profile = None
         self.reprofiled = False
         self._reprofiled_peaks = None
@@ -680,9 +700,199 @@ class Spectrum(MsData):
                 return_val = elements[0]
             else:
                 return_val = elements
+            if return_val is None and accession in _ENERGY_ACCESSIONS:
+                conditions = self.energy_conditions
+                if len(conditions) == 1:
+                    condition = conditions[0]
+                    return_val = (
+                        condition.low
+                        if condition.is_exact
+                        else condition.range
+                    )
+                elif len(conditions) > 1:
+                    return_val = self.energies
         if return_val == "":
             return_val = True
         return return_val
+
+    @property
+    def has_energy_conditions(self):
+        """Whether any collision energy condition was recorded."""
+        return len(self.energy_conditions) > 0
+
+    @property
+    def energy_conditions(self):
+        """
+        Collision energy acquisition conditions of this spectrum.
+
+        Each condition preserves its covered range, discrete steps when known,
+        unit and all sources (CV terms, vendor userParams, filter strings).
+        A fixed energy and a mixture are distinct conditions and are never
+        collapsed into one another.
+
+        Returns:
+            conditions (list): :class:`pymzml.energy.AcquisitionEnergy` values
+        """
+        if self._energy_conditions is None:
+            if self.element is None:
+                self._energy_conditions = []
+            else:
+                self._energy_conditions = parse_spectrum_element(self.element)
+        return self._energy_conditions
+
+    @property
+    def collision_energy_conditions(self):
+        """Alias for :attr:`energy_conditions`."""
+        return self.energy_conditions
+
+    @property
+    def collision_energies(self):
+        """Alias for :attr:`energies`."""
+        return self.energies
+
+    @property
+    def collision_energy_values(self):
+        """Every explicit energy value of this spectrum.
+
+        Unlike :attr:`energies`, mixtures are flattened into their discrete
+        steps (stepped) or into their two end points (continuous ramp).
+        """
+        values = []
+        for condition in self.energy_conditions:
+            if condition.is_exact:
+                values.append(condition.low)
+            elif condition.steps is not None:
+                values.extend(condition.steps)
+            else:
+                values.extend(condition.values)
+        return values
+
+    @property
+    def collision_energy_steps(self):
+        """Discrete energy steps, or ``None`` when no mixture is stepped."""
+        steps = []
+        for condition in self.energy_conditions:
+            if condition.steps is not None:
+                steps.extend(condition.steps)
+        return sorted(set(steps)) if steps else None
+
+    @property
+    def energies(self):
+        """
+        Collision energies of this spectrum as scalar values or ranges.
+
+        Fixed energies are returned as ``float``; mixtures as a
+        ``(low, high)`` tuple in their native unit.  Use
+        :attr:`energy_conditions` when unit and provenance matter.
+        """
+        result = []
+        for condition in self.energy_conditions:
+            if condition.is_exact:
+                result.append(condition.low)
+            else:
+                result.append(condition.range)
+        return result
+
+    @property
+    def collision_energy(self):
+        """
+        The single collision energy of this spectrum, if it has exactly one.
+
+        Returns:
+            energy (float or None): the fixed energy, ``None`` if no collision
+            energy was recorded, or a ``(low, high)`` tuple when the spectrum
+            was acquired with a mixture of energies.  Inspect
+            :attr:`energy_conditions` for units and provenance.
+        """
+        conditions = self.energy_conditions
+        if len(conditions) != 1:
+            return None
+        condition = conditions[0]
+        return condition.low if condition.is_exact else condition.range
+
+    def comparable_energy_conditions(self, unit=None, assume_unit=None):
+        """
+        Return energy conditions converted to a common unit.
+
+        Arguments:
+            unit (str, optional): target unit, ``"electronvolt"`` or
+                ``"joule"``.  Percent collision energy cannot be converted and
+                raises ``ValueError`` when a conversion is requested.
+
+        Keyword Arguments:
+            assume_unit (str, optional): unit to assign to vendor values that
+                declared no unit.  Without it such values stay unknown instead
+                of being silently treated as electronvolt.
+
+        Returns:
+            conditions (list): comparable :class:`AcquisitionEnergy` values
+        """
+        return comparable_conditions(
+            self.energy_conditions, unit=unit, assume_unit=assume_unit
+        )
+
+    def energy_buckets(self, width=1.0, unit=None, origin=0.0, assume_unit=None):
+        """
+        Assign this spectrum's energy conditions to energy buckets.
+
+        Fixed energies yield definite memberships; ramps and stepped mixtures
+        yield possible memberships for every bucket they cover.
+
+        Returns:
+            buckets (list): :class:`pymzml.energy.EnergyBucket` values
+        """
+        return bucket_conditions(
+            self.energy_conditions,
+            width=width,
+            unit=unit,
+            origin=origin,
+            assume_unit=assume_unit,
+        )
+
+    def bucket_energy(self, width=1.0, unit=None, origin=0.0, assume_unit=None):
+        """Alias for :meth:`energy_buckets`."""
+        return self.energy_buckets(
+            width=width, unit=unit, origin=origin, assume_unit=assume_unit
+        )
+
+    def definite_energy_buckets(self, width=1.0, unit=None, origin=0.0, assume_unit=None):
+        """Return buckets this spectrum was certainly acquired at."""
+        return [
+            bucket
+            for bucket in self.energy_buckets(
+                width=width, unit=unit, origin=origin, assume_unit=assume_unit
+            )
+            if bucket.definite
+        ]
+
+    def possible_energy_buckets(self, width=1.0, unit=None, origin=0.0, assume_unit=None):
+        """Return buckets this spectrum only possibly covered."""
+        return [
+            bucket
+            for bucket in self.energy_buckets(
+                width=width, unit=unit, origin=origin, assume_unit=assume_unit
+            )
+            if bucket.possible
+        ]
+
+    def get_energy_conditions(self, unit=None, assume_unit=None):
+        """
+        Return a dictionary representation of the energy conditions.
+
+        Arguments:
+            unit (str, optional): target unit for converted values.
+            assume_unit (str, optional): unit for vendor values without a
+                declared unit.
+
+        Returns:
+            conditions (list): list of dictionaries
+        """
+        return [
+            condition.as_dict()
+            for condition in self.comparable_energy_conditions(
+                unit=unit, assume_unit=assume_unit
+            )
+        ]
 
     def get(self, acc, default=None):
         """Mimic dicts get function.

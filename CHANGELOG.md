@@ -6,6 +6,17 @@ and this project adheres to [Python PEP 440 Versioning](https://www.python.org/d
 
 ## [Unreleased]
 
+### Fixed
+
+- SPARQL constraint pre-binding is now fully token-aware. The lexical checks and the
+  `$PATH` substitution in `SPARQLQueryHelper` ignore string literals, comments and IRI
+  references, so a token spelled identically inside a constant (e.g. `$this`, `$PATH`
+  or the words `VALUES`/`MINUS`/`SERVICE`/`AS`) is never rewritten or mistaken for a
+  pre-bound variable or forbidden clause. Pre-bound variables (`$this`, `$value`,
+  `$currentShape`, `$shapesGraph`) continue to be passed as SPARQL `initBindings`,
+  which keeps a sub-query projecting a variable of the same name correctly scoped and
+  keeps interleaved validations of different focus nodes independent.
+
 ## [0.40.2] - 2026-07-28
 
 ### Fixed

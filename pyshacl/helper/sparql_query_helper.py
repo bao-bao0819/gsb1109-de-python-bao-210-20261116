@@ -45,6 +45,114 @@ class SPARQLQueryHelper(object):
     has_as_var_regex = re.compile(r"[^\w]+AS[\s]+[\$\?](\w+)", flags=re.M | re.I)
     find_msg_subs = re.compile(r"({[\$\?]([^{}]+)})", flags=re.M)
 
+    @staticmethod
+    def _iter_active_spans(sparql_text):
+        """
+        Yield ``(start, end)`` ranges of ``sparql_text`` that are active query code.
+
+        Regions that are not active query code -- string literals (short and long),
+        line comments and full IRI references -- are skipped. This makes every later
+        lexical check token-aware, so the same wording appearing inside a constant
+        (e.g. the text ``$this`` or the keyword ``VALUES`` inside a string) is never
+        mistaken for a SPARQL variable or clause and is never rewritten.
+        """
+        text_len = len(sparql_text)
+        i = 0
+        span_start = 0
+        while i < text_len:
+            ch = sparql_text[i]
+            if ch == "<":
+                # Distinguish an IRI reference (<...>) from comparison operators such as <= and <.
+                # Checked before '#' because an IRI may itself contain a fragment marker (http://x/#f).
+                j = i + 1
+                while j < text_len and sparql_text[j] != ">" and not sparql_text[j].isspace():
+                    j += 1
+                if j < text_len and sparql_text[j] == ">":
+                    if i > span_start:
+                        yield span_start, i
+                    i = j + 1
+                    span_start = i
+                else:
+                    i += 1
+            elif ch == "#":
+                if i > span_start:
+                    yield span_start, i
+                newline = sparql_text.find("\n", i)
+                if newline == -1:
+                    return
+                i = newline
+                span_start = i
+            elif ch == '"' or ch == "'":
+                if i > span_start:
+                    yield span_start, i
+                quote = ch
+                if sparql_text.startswith(quote * 3, i):
+                    closing = sparql_text.find(quote * 3, i + 3)
+                    i = text_len if closing == -1 else closing + 3
+                else:
+                    j = i + 1
+                    while j < text_len:
+                        inner = sparql_text[j]
+                        if inner == "\\":
+                            j += 2
+                            continue
+                        if inner == quote or inner == "\n":
+                            j += 1
+                            break
+                        j += 1
+                    i = j
+                span_start = i
+            else:
+                i += 1
+        if span_start < text_len:
+            yield span_start, text_len
+
+    @classmethod
+    def _search_active_spans(cls, regex, sparql_text):
+        """
+        Run a compiled regex against active query code only, ignoring string/comment/IRI regions.
+
+        Each active span is searched as an extracted substring. Several of the clause-detection
+        regexes anchor at ``^`` with ``re.MULTILINE``; an active span can begin mid-line (right
+        after an inline string), so searching the full text with a mid-line offset would never
+        satisfy the anchor and would silently miss a real clause.
+        """
+        for start, end in cls._iter_active_spans(sparql_text):
+            match = regex.search(sparql_text[start:end])
+            if match:
+                return match
+        return None
+
+    @classmethod
+    def variable_is_used(cls, sparql_text, variable_regex):
+        """True when the variable matched by ``variable_regex`` occurs outside of constants or comments."""
+        return cls._search_active_spans(variable_regex, sparql_text) is not None
+
+    @classmethod
+    def _substitute_in_active_spans(cls, sparql_text, token_regex, replacement):
+        """
+        Apply ``token_regex`` substitution only on active query code.
+
+        Hidden regions (string literals, comments, IRIs) are copied through byte-for-byte,
+        so a token spelled identically inside a constant can never be rewritten.
+        """
+        output = []
+        position = 0
+        for start, end in cls._iter_active_spans(sparql_text):
+            output.append(sparql_text[position:start])
+            span = sparql_text[start:end]
+            rebuilt = []
+            span_position = 0
+            for match in token_regex.finditer(span):
+                rebuilt.append(span[span_position:match.start()])
+                rebuilt.append(match.group(1) + replacement)
+                span_position = match.end()
+            rebuilt.append(span[span_position:])
+            output.append("".join(rebuilt))
+            position = end
+        output.append(sparql_text[position:])
+        return "".join(output)
+
     def __init__(self, shape, node, select_text, parameters=None, messages=None, deactivated=False):
         self._shape = None
         self.node = node
@@ -225,13 +333,13 @@ class SPARQLQueryHelper(object):
         raise NotImplementedError("Cannot turn that kind of node into text.")
 
     def check_invalid_sparql(self, sparql_text, valuenode=None, extravars=None):
-        has_minus = self.has_minus_regex.search(sparql_text)
+        has_minus = self._search_active_spans(self.has_minus_regex, sparql_text)
         if has_minus:
             raise ValidationFailure("A SPARQL Constraint must not contain a MINUS clause.")
-        has_values = self.has_values_regex.search(sparql_text)
+        has_values = self._search_active_spans(self.has_values_regex, sparql_text)
         if has_values:
             raise ValidationFailure("A SPARQL Constraint must not contain a VALUES clause.")
-        has_service = self.has_service_regex.search(sparql_text)
+        has_service = self._search_active_spans(self.has_service_regex, sparql_text)
         if has_service:
             raise ValidationFailure("A SPARQL Constraint must not contain a federated query (SERVICE).")
         potentially_prebound_variables = {'this', 'shapesGraph', 'currentShape'}
@@ -239,7 +347,7 @@ class SPARQLQueryHelper(object):
             potentially_prebound_variables.add('value')
         if extravars is not None and len(extravars) > 0:
             potentially_prebound_variables.update(extravars)
-        has_nested_select = self.has_nested_select_regex.search(sparql_text)
+        has_nested_select = self._search_active_spans(self.has_nested_select_regex, sparql_text)
         if has_nested_select:
             var_string = has_nested_select.group(1)
             vars = var_string.split()
@@ -268,7 +376,7 @@ class SPARQLQueryHelper(object):
                                 ", ".join(potentially_prebound_variables)
                             )
                         )
-        has_as_var = self.has_as_var_regex.search(sparql_text)
+        has_as_var = self._search_active_spans(self.has_as_var_regex, sparql_text)
         if has_as_var:
             var_name = has_as_var.group(1)
             if var_name in potentially_prebound_variables:
@@ -281,24 +389,24 @@ class SPARQLQueryHelper(object):
         new_query_text = "" + self.select_text
         _ = self.check_invalid_sparql(new_query_text, valuenode=valuenode, extravars=extravars)
         init_bindings = {}
-        found_this = self.bind_this_regex.search(new_query_text)
+        found_this = self.variable_is_used(new_query_text, self.bind_this_regex)
         if found_this:
             init_bindings['this'] = thisnode
 
         if valuenode:
-            found_value = self.bind_value_regex.search(new_query_text)
+            found_value = self.variable_is_used(new_query_text, self.bind_value_regex)
             if found_value:
                 init_bindings['value'] = valuenode
 
-        found_cs = self.bind_cs_regex.search(new_query_text)
+        found_cs = self.variable_is_used(new_query_text, self.bind_cs_regex)
         if found_cs:
             init_bindings['currentShape'] = self.shape.node
         path = self.shape.path()
         if path:
             path_string = shacl_path_to_sparql_path(self.shape.sg, path, prefixes=self.prefixes)
-            new_query_text = self.bind_path_regex.sub(r"\g<1>{}".format(path_string), new_query_text)
+            new_query_text = self._substitute_in_active_spans(new_query_text, self.bind_path_regex, path_string)
         else:
-            found_path = self.bind_path_regex.search(new_query_text)
+            found_path = self.variable_is_used(new_query_text, self.bind_path_regex)
             if found_path:
                 raise ReportableRuntimeError(
                     "SPARQL Constraint text has $PATH in it, but no path is known on this Shape."
@@ -307,11 +415,11 @@ class SPARQLQueryHelper(object):
         #  shapes_graph = self.shape.sg
         shapes_graph = False
         if shapes_graph:
-            found_sg = self.bind_sg_regex.search(new_query_text)
+            found_sg = self.variable_is_used(new_query_text, self.bind_sg_regex)
             if found_sg:
                 init_bindings['shapesGraph'] = shapes_graph
         else:
-            found_sg = self.bind_sg_regex.search(new_query_text)
+            found_sg = self.variable_is_used(new_query_text, self.bind_sg_regex)
             if found_sg:
                 raise NotImplementedError(
                     "SPARQL Constraint text has $shapesGraph in it, but Shapes Graph is not currently supported."

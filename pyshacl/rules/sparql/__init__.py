@@ -90,7 +90,7 @@ class SPARQLRule(SHACLRule):
             for a in applicable_nodes:
                 for c in self._constructs:
                     init_bindings = {}
-                    found_this = SPARQLQueryHelper.bind_this_regex.search(c)
+                    found_this = SPARQLQueryHelper.variable_is_used(c, SPARQLQueryHelper.bind_this_regex)
                     if found_this:
                         init_bindings['this'] = a
                     c = self._qh.apply_prefixes(c)

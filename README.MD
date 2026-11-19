@@ -67,6 +67,38 @@ Advanced users who wish to study the structure of the Windows
 Registry may find the `Registry.RegistryParse` module useful.
 This module implements all known structures of the Windows Registry.
 
+Incremental collection
+----------------------
+When a transaction log recovers a batch of dirty pages, the
+`Registry.Incremental` module updates an existing configuration
+snapshot without scanning the whole hive.  It indexes the physical
+structures that make up the logical configuration: key records,
+subkey lists, value lists, value records, and every fragment of large
+value data (including `db`/indirect chains).
+
+    from Registry import Registry, RegistryLog, Incremental
+
+    collector = Incremental.IncrementalCollector(Registry.Registry(baseline))
+    pages = [Incremental.DirtyPageRegion(reference.offset(),
+                                         reference.size(),
+                                         data=page.data(),
+                                         sequence=entry.sequence())
+             for entry in log._regf.log_entries()
+             for reference, page in entry.dirty_pages_with_references()]
+    plan = collector.plan(pages)
+    snapshot = collector.replay(plan, Registry.Registry(recovered))
+    assert snapshot == Incremental.collect_config(Registry.Registry(recovered))
+
+The plan lists each key/value to recollect and the physical change
+that triggered it.  Identity is validated, not assumed: changes to a
+directory or value list invalidate the identities below it, a clean
+content page does not prove the logical path is unchanged, and a
+pointer that cannot be confirmed from the baseline index is reported
+as `pending_rediscovery` rather than guessed.
+
+`Incremental.dirty_pages_from_log(log)` is a convenience wrapper that
+yields the same `DirtyPageRegion` objects in log-entry order.
+
 Wanted
 ------
   - Bug reports.

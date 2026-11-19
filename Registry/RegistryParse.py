@@ -1007,6 +1007,59 @@ class VKRecord(Record):
         """
         return self.unpack_dword(0xC) & DEVPROP_MASK_TYPE
 
+    def has_external_data(self):
+        """
+        Is the value data stored in a separate HBIN cell (rather than inline
+        in the data_offset field)?
+        """
+        length = self.raw_data_length()
+        return not (length < 5 or length >= 0x80000000)
+
+    def is_large_data(self):
+        """
+        Is the value data stored in a large (db/indirect) data chain?
+        """
+        return self.has_external_data() and 0x3FD8 < self.data_length() < 0x80000000
+
+    def data_fragments(self):
+        """
+        Get the list of (offset, size) extents that hold the value data.
+
+        Each extent is an absolute offset into the hive and the number of
+        bytes consumed from that cell.  Small values occupy a single cell,
+        while large values span a DB record, an indirect block, and one or
+        more data cells.
+        """
+        length = self.data_length()
+        if not self.has_external_data():
+            return []
+
+        if not self.is_large_data():
+            cell = HBINCell(self._buf, self.data_offset(), self)
+            return [(cell.offset(), cell.size())]
+
+        db_cell = HBINCell(self._buf, self.data_offset(), self)
+        db = DBRecord(self._buf, db_cell.data_offset(), db_cell)
+        indirect_cell_offset = self.abs_offset_from_hbin_offset(db.unpack_dword(0x4))
+        indirect_cell = HBINCell(self._buf, indirect_cell_offset, db)
+        indirect = DBIndirectBlock(self._buf, indirect_cell.data_offset(), indirect_cell)
+
+        fragments = [(db_cell.offset(), db_cell.size())]
+        fragments.append((indirect_cell.offset(), indirect_cell.size()))
+
+        remaining = length
+        index = 0
+        while remaining > 0:
+            fragment_offset = indirect.abs_offset_from_hbin_offset(
+                indirect.unpack_dword(4 * index))
+            fragment_size = min(0x3FD8, remaining)
+            cell = HBINCell(self._buf, fragment_offset, indirect)
+            fragments.append((fragment_offset, cell.size()))
+            remaining -= fragment_size
+            index += 1
+
+        return fragments
+
     def data_length(self):
         """
         Get the length of this value data. This is the actual length of the data that should be parsed for the value.

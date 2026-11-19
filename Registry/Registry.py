@@ -451,6 +451,40 @@ class Registry(object):
         # level? is this the name of the hive?
         return RegistryKey(self._regf.first_key()).find_key(path)
 
+    def export_config(self, needle=None, case_sensitive=False):
+        """
+        Return a ConfigExportReport separating root-reachable active values
+        from free-cell residue and indeterminate rows.
+
+        Only the report's ``active`` list describes current configuration.
+        See ``Registry.RegistryExport`` for the full contract.
+        """
+        from . import RegistryExport
+        return RegistryExport.classify(self, needle=needle,
+                                       case_sensitive=case_sensitive)
+
+    def active_values(self, needle=None, case_sensitive=False):
+        """
+        Return only values that are effective in the live key tree.
+        """
+        return self.export_config(needle=needle,
+                                  case_sensitive=case_sensitive).active
+
+    def residual_values(self, needle=None, case_sensitive=False):
+        """
+        Return value records found in free cells.  These are observations,
+        not current configuration.
+        """
+        return self.export_config(needle=needle,
+                                  case_sensitive=case_sensitive).residual
+
+    def uncertain_values(self, needle=None, case_sensitive=False):
+        """
+        Return value records whose reachability cannot be established.
+        """
+        return self.export_config(needle=needle,
+                                  case_sensitive=case_sensitive).uncertain
+
 def print_all(key):
     if len(key.subkeys()) == 0:
         print(key.path())

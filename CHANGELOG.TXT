@@ -1,3 +1,8 @@
+unreleased
+  - add Registry.RegistryExport: separate root-reachable active values from
+    free-cell residue and indeterminate rows, with per-row evidence and
+    physical offsets; same-path residual rows are reported as collisions
+
 1.2.0
   - [DEPRECATED] records() in HBINBlock, use the more correct cells() instead, by @NiKiZe
   - fix bug in parsing of resident values with length zero, reported and patched by @BridgeyTheGeek

@@ -67,6 +67,49 @@ Advanced users who wish to study the structure of the Windows
 Registry may find the `Registry.RegistryParse` module useful.
 This module implements all known structures of the Windows Registry.
 
+Exporting effective configuration vs. residual data
+---------------------------------------------------
+
+Keys and values that survive in unallocated (free) cells are not part of the
+live configuration. The `Registry.RegistryExport` module builds a report that
+keeps the two apart:
+
+    from Registry import RegistryExport
+
+    report = RegistryExport.classify("SYSTEM")
+    print(report.to_json())
+
+    for item in report.active:
+        print(item["path"], item["value_name"], item["value"])
+
+The same split is available directly on a loaded hive:
+
+    reg = Registry.Registry("SYSTEM")
+    active = reg.active_values()
+    residual = reg.residual_values()
+    uncertain = reg.uncertain_values()
+
+The report has three disjoint lists:
+
+- `active`: values referenced from the value list of a key reachable from the
+  hive root, with both the value record and its data in allocated cells. Only
+  these describe current configuration.
+- `residual`: value records physically located in free cells.
+- `uncertain`: rows whose reachability cannot be established, such as a free
+  record whose owner key has a broken parent chain or an allocated record that
+  no live key references. These are not reported as deleted.
+
+Each row carries an `evidence` list and a `location` mapping with absolute
+file, HBIN and cell offsets for the record and its data. A residual row that
+shares a textual path and value name with an active row is kept separate and
+linked through `collisions`; path equality is never treated as identity.
+
+The same output is available on the command line:
+
+    python -m Registry.RegistryExport SYSTEM --format text
+    python -m Registry.RegistryExport SYSTEM --search "Program Files"
+
+
 Wanted
 ------
   - Bug reports.

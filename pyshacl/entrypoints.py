@@ -10,7 +10,7 @@ from typing import Dict, List, Optional, Tuple, Union
 from rdflib import Dataset, Graph, Literal, URIRef
 
 from pyshacl.errors import ReportableRuntimeError, ValidationFailure
-from pyshacl.pytypes import GraphLike
+from pyshacl.pytypes import GraphLike, TargetSuspension, ValidationTrace
 
 from .consts import SH, RDF_type
 from .graph_abstraction import DataGraph, has_oxigraph, ox_Store
@@ -30,6 +30,32 @@ def _is_multi_data_graph_input(data_graph: object) -> bool:
     return isinstance(data_graph, (tuple, list, set, frozenset, Sequence))
 
 
+def _coerce_shape_nodes(shape_nodes, namespace_manager=None) -> List[URIRef]:
+    """Normalize shape identifiers passed by callers into URIRefs."""
+    if shape_nodes is None:
+        return []
+    coerced: List[URIRef] = []
+    for node in shape_nodes:
+        if isinstance(node, URIRef):
+            coerced.append(node)
+        elif isinstance(node, str):
+            lowered = node.lower()
+            if lowered.startswith(("http:", "https:", "urn:", "file:")):
+                coerced.append(URIRef(node))
+            elif namespace_manager is not None:
+                try:
+                    coerced.append(namespace_manager.expand_curie(node))
+                except ValueError:
+                    coerced.append(URIRef(node))
+            else:
+                coerced.append(URIRef(node))
+        else:
+            raise ReportableRuntimeError(
+                f"Cannot suspend targets on shape {node!r}: expected an IRI string or URIRef."
+            )
+    return coerced
+
+
 def validate(
     data_graph: Union[DataGraphInput, MultiDataGraphInput],
     *args,
@@ -46,6 +72,9 @@ def validate(
     focus_nodes: Optional[List[Union[str, URIRef]]] = None,
     use_shapes: Optional[List[Union[str, URIRef]]] = None,
     multi_data_graphs_mode: Optional[str] = None,
+    suspend_targets: Optional[List[Union[str, URIRef]]] = None,
+    suspension_reason: Optional[str] = None,
+    validation_trace: Optional[ValidationTrace] = None,
     **kwargs,
 ):
     """
@@ -80,6 +109,15 @@ def validate(
     :type use_shapes: list | None
     :param multi_data_graphs_mode: "combine" or "validate_each" for multiple data graphs
     :type multi_data_graphs_mode: str | None
+    :param suspend_targets: IRIs of shapes whose own target declarations are suspended
+        for this run. The shapes are still evaluated when reached via sh:node,
+        sh:property, sh:or and similar shape-expecting constraints.
+    :type suspend_targets: list | None
+    :param suspension_reason: Human-readable reason recorded alongside the suspension.
+    :type suspension_reason: str | None
+    :param validation_trace: When supplied, collects per-shape evaluation evidence
+        keyed by root shape and focus node, without changing the SHACL report.
+    :type validation_trace: pyshacl.pytypes.ValidationTrace | None
     :param kwargs:
     :return:
     """
@@ -211,6 +249,13 @@ def validate(
     else:
         loaded_sg = None
     iterate_rules = kwargs.pop('iterate_rules', False)
+    target_suspension: Optional[TargetSuspension] = None
+    if suspend_targets is not None and len(suspend_targets) > 0:
+        suspended_nodes = _coerce_shape_nodes(
+            suspend_targets,
+            getattr(loaded_sg, 'namespace_manager', None) if loaded_sg is not None else None,
+        )
+        target_suspension = TargetSuspension(shape_nodes=set(suspended_nodes), reason=suspension_reason)
     if "abort_on_error" in kwargs:
         log.warning("Usage of abort_on_error is deprecated. Use abort_on_first instead.")
         ae = kwargs.pop("abort_on_error")
@@ -229,6 +274,8 @@ def validate(
         'logger': log,
         'focus_nodes': focus_nodes,
         'use_shapes': use_shapes,
+        'target_suspension': target_suspension,
+        'validation_trace': validation_trace,
     }
     if max_validation_depth is not None:
         validator_options_dict['max_validation_depth'] = max_validation_depth
@@ -271,6 +318,9 @@ def validate_each(
     sparql_mode: Optional[bool] = False,
     focus_nodes: Optional[List[Union[str, URIRef]]] = None,
     use_shapes: Optional[List[Union[str, URIRef]]] = None,
+    suspend_targets: Optional[List[Union[str, URIRef]]] = None,
+    suspension_reason: Optional[str] = None,
+    validation_trace: Optional[ValidationTrace] = None,
     **kwargs,
 ) -> Dict[int, Tuple[bool, Union[GraphLike, bytes, ValidationFailure], str]]:
     """
@@ -303,6 +353,9 @@ def validate_each(
             sparql_mode=sparql_mode,
             focus_nodes=focus_nodes,
             use_shapes=use_shapes,
+            suspend_targets=suspend_targets,
+            suspension_reason=suspension_reason,
+            validation_trace=validation_trace,
             **kwargs,
         )
         results[datagraph_i] = result

@@ -44,6 +44,7 @@ from .pytypes import GraphLike, RDFNode, SHACLExecutor
 
 if TYPE_CHECKING:
     from pyshacl.constraints import ConstraintComponent
+    from pyshacl.pytypes import ValidationTrace
     from pyshacl.shapes_graph import ShapesGraph
 
 module = sys.modules[__name__]
@@ -128,6 +129,18 @@ class Shape(object):
 
     def set_advanced(self, val):
         self._advanced = bool(val)
+
+    @staticmethod
+    def _shape_chain(evaluation_path) -> List['Shape']:
+        return [element for element in evaluation_path if isinstance(element, Shape)]
+
+    def _record_trace(self, executor, focus_nodes, conforms, evaluation_path):
+        trace: Optional['ValidationTrace'] = getattr(executor, 'validation_trace', None)
+        if trace is None:
+            return
+        shape_path = self._shape_chain(evaluation_path)
+        for focus in focus_nodes:
+            trace.record_evaluation(self.node, focus, conforms, shape_path)
 
     def get_other_shape(self, shape_node):
         if self.sg.is_filtered_out_shape(shape_node):
@@ -649,14 +662,24 @@ class Shape(object):
         else:
             lh_shape = True
             rh_shape = False
-            self.logger.debug(f"Checking if Shape {str(self)} defines its own targets.")
-            self.logger.debug("Identifying targets to find focus nodes.")
-            if executor.sparql_mode:
-                focus_set = self.focus_nodes_sparql(target_graph, debug=executor.debug)
+            suspension = getattr(executor, 'target_suspension', None)
+            if suspension is not None and isinstance(self.node, URIRef) and self.node in suspension.shape_nodes:
+                # Suspend only this shape's own target declarations. It can
+                # still be evaluated via shape-expecting constraints such as
+                # sh:node, sh:property and sh:or, which always pass a focus.
+                self.logger.debug(
+                    f"Suspending own target declarations of Shape {str(self)} as requested for this run."
+                )
+                focus_list = []
             else:
-                focus_set = self.focus_nodes(target_graph, debug=executor.debug)
-            focus_list = list(focus_set)
-            self.logger.debug(f"Found {len(focus_list)} Focus Nodes to evaluate.")
+                self.logger.debug(f"Checking if Shape {str(self)} defines its own targets.")
+                self.logger.debug("Identifying targets to find focus nodes.")
+                if executor.sparql_mode:
+                    focus_set = self.focus_nodes_sparql(target_graph, debug=executor.debug)
+                else:
+                    focus_set = self.focus_nodes(target_graph, debug=executor.debug)
+                focus_list = list(focus_set)
+                self.logger.debug(f"Found {len(focus_list)} Focus Nodes to evaluate.")
 
         if len(focus_list) < 1:
             # It's possible for shapes to have _no_ focus nodes
@@ -819,4 +842,6 @@ class Shape(object):
             elapsed = t2 - t1
             self.logger.debug(f"Milliseconds to evaluate shape {str(self)}: {elapsed * 1000.0:.3f}ms")
         # print(_evaluation_path, "Passes" if not non_conformant else "Fails")
-        return (not non_conformant), reports
+        conforms = not non_conformant
+        self._record_trace(executor, focus_list, conforms, _evaluation_path)
+        return conforms, reports

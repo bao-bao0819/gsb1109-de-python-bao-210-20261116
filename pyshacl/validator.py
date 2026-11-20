@@ -113,6 +113,8 @@ class Validator(PySHACLRunType):
         options_dict.setdefault('max_validation_depth', 15)
         options_dict.setdefault('focus_nodes', None)
         options_dict.setdefault('use_shapes', None)
+        options_dict.setdefault('target_suspension', None)
+        options_dict.setdefault('validation_trace', None)
         if 'logger' not in options_dict:
             options_dict['logger'] = logging.getLogger(__name__)
             if options_dict['debug']:
@@ -194,6 +196,8 @@ class Validator(PySHACLRunType):
             sparql_mode=bool(self.options.get("sparql_mode", False)),
             max_validation_depth=self.options.get("max_validation_depth", 15),
             focus_nodes=self.options.get("focus_nodes", None),
+            target_suspension=self.options.get("target_suspension", None),
+            validation_trace=self.options.get("validation_trace", None),
             debug=self.debug,
         )
 

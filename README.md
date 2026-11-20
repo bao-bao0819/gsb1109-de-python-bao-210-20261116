@@ -283,6 +283,37 @@ PySHACL v0.27.0 and above has two powerful new features:
     a highly-targeted mode, it feeds those focus nodes directly into those given Shapes for validation.
   - In this mode, the selected SHACL Shape does not need to specify any focus-targeting mechanisms of its own.
 
+## Target Suspension and Quarantine Rule-Change Evidence
+For intake pipelines that use validation results to quarantine records, PySHACL can suspend only a shape's
+_own_ target declarations while leaving the shape fully reachable through shape-expecting constraints
+(`sh:node`, `sh:property`, `sh:or`, `sh:not`, `sh:xone`). This separates "the shape targets the record itself"
+from "another root rule pulls the shape in for the record".
+
+- Pass `suspend_targets=[...]` (optionally with `suspension_reason=...`) to `validate()`. A suspended shape
+  produces no top-level results of its own, but still runs whenever a referencing rule reaches it.
+- Pass an `ValidationTrace()` instance as `validation_trace=...` to collect per-shape evaluation evidence
+  (shape, focus node, root rule, nesting path, conformance) and per-member outcomes for `sh:and`/`sh:or`/
+  `sh:xone`/`sh:not`. The standard SHACL report is unchanged.
+- `pyshacl.evaluate_quarantine()` runs the same record twice (baseline, then suspension) and returns a
+  `QuarantineAssessment`. It lists the root rules that still reference the suspended shape and classifies each
+  path as `causes_rejection`, `rescued_by_alternative_branch` (for example another `sh:or` member passes), or
+  `no_effect`. `to_graph()` emits rule-change evidence in which every reference is tied back to the root rule
+  and the input record, and helper methods compare which result trees disappeared or survived.
+
+```python
+from pyshacl import evaluate_quarantine
+
+assessment = evaluate_quarantine(
+    data_graph, shacl_graph,
+    target_shape="http://example.org/addr#StandardAddressShape",
+    record_node="http://example.org/addr#record1",
+    suspension_reason="pause standard address own targets",
+)
+for outcome in assessment.root_outcomes:
+    print(outcome.root_shape, outcome.effect)
+evidence_graph = assessment.to_graph()
+```
+
 ## SPARQL Remote Graph Mode
 
 _**PySHACL now has a built-in SPARQL Remote Graph Mode, which allows you to validate a data graph that is stored on a remote server.**_

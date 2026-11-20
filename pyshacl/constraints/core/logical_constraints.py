@@ -26,6 +26,28 @@ SH_OrConstraintComponent = SH.OrConstraintComponent
 SH_XoneConstraintComponent = SH.XoneConstraintComponent
 
 
+def _record_logical_branch(
+    executor, constraint_parameter, member_shape, value_node, conforms, evaluation_path
+):
+    """Record the pass/fail outcome of one member of a logical constraint.
+
+    No-op unless the executor carries an opt-in ValidationTrace.
+    """
+    trace = getattr(executor, 'validation_trace', None)
+    if trace is None:
+        return
+    shape_path = [element for element in evaluation_path if isinstance(element, Shape)]
+    shape_path.append(member_shape)
+    trace.record_logical_branch(
+        root_shape_node=shape_path[0].node if shape_path else member_shape.node,
+        focus_node=value_node,
+        constraint=constraint_parameter,
+        member_shape_node=member_shape.node,
+        conforms=conforms,
+        shape_path=shape_path,
+    )
+
+
 class NotConstraintComponent(ConstraintComponent):
     """
     sh:not specifies the condition that each value node cannot conform to a given shape. This is comparable to negation and the logical "not" operator.
@@ -121,6 +143,9 @@ class NotConstraintComponent(ConstraintComponent):
                     )
                 except ValidationFailure as e:
                     raise e
+                _record_logical_branch(
+                    executor, SH_not, found_not_shape, v, _is_conform, _evaluation_path
+                )
                 if len(_r):
                     upstream_reports.extend(_r)
                 if _is_conform:
@@ -238,6 +263,9 @@ class AndConstraintComponent(ConstraintComponent):
                         )
                     except ValidationFailure as e:
                         raise e
+                    _record_logical_branch(
+                        executor, SH_and, and_shape, v, _is_conform, _evaluation_path
+                    )
                     if len(_r):
                         upstream_reports.extend(_r)
                     passed_all = passed_all and _is_conform
@@ -352,6 +380,9 @@ class OrConstraintComponent(ConstraintComponent):
                         )
                     except ValidationFailure as e:
                         raise e
+                    _record_logical_branch(
+                        executor, SH_or, or_shape, v, _is_conform, _evaluation_path
+                    )
                     if len(_r):
                         upstream_reports.extend(_r)
                     passed_any = passed_any or _is_conform
@@ -468,6 +499,9 @@ class XoneConstraintComponent(ConstraintComponent):
                         )
                     except ValidationFailure as e:
                         raise e
+                    _record_logical_branch(
+                        executor, SH_xone, xone_shape, v, _is_conform, _evaluation_path
+                    )
                     if len(_r):
                         upstream_reports.extend(_r)
                     if _is_conform:

@@ -1,6 +1,20 @@
 # -*- coding: latin-1 -*-
 #
 from .entrypoints import shacl_rules, validate, validate_each
+from .pytypes import (
+    LogicalBranchTrace,
+    ShapeEvaluationTrace,
+    TargetSuspension,
+    ValidationTrace,
+)
+from .quarantine import (
+    QuarantineAssessment,
+    ReferenceHop,
+    ReferencePath,
+    RootReferenceOutcome,
+    RunOutcome,
+    evaluate_quarantine,
+)
 from .rule_expand_runner import RuleExpandRunner
 from .shape import Shape
 from .shapes_graph import ShapesGraph
@@ -16,7 +30,17 @@ __all__ = [
     'shacl_rules',
     'Validator',
     'RuleExpandRunner',
-    '__version__',
     'Shape',
     'ShapesGraph',
+    'TargetSuspension',
+    'ValidationTrace',
+    'ShapeEvaluationTrace',
+    'LogicalBranchTrace',
+    'evaluate_quarantine',
+    'QuarantineAssessment',
+    'ReferenceHop',
+    'ReferencePath',
+    'RootReferenceOutcome',
+    'RunOutcome',
+    '__version__',
 ]
